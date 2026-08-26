@@ -5,6 +5,12 @@ on:
     # 08:30 China Standard Time (UTC+8)
     - cron: "30 0 * * *"
   workflow_dispatch:
+    inputs:
+      smoke_test:
+        description: "Send a Feishu cloud smoke-test message only"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -23,7 +29,15 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - name: Send cloud smoke test
+        if: ${{ inputs.smoke_test == true }}
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_USER_OPEN_ID: ${{ vars.FEISHU_USER_OPEN_ID || 'ou_b3bfd8beda8f00996f6f2014da9432cf' }}
+        run: python src/smoke_test.py
       - name: Build and send digest
+        if: ${{ inputs.smoke_test != true }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5-mini' }}
@@ -32,6 +46,7 @@ jobs:
           FEISHU_USER_OPEN_ID: ${{ vars.FEISHU_USER_OPEN_ID || 'ou_b3bfd8beda8f00996f6f2014da9432cf' }}
         run: python src/digest.py
       - name: Persist reviewed videos
+        if: ${{ inputs.smoke_test != true }}
         run: |
           git config user.name "podcast-digest-bot"
           git config user.email "podcast-digest-bot@users.noreply.github.com"
