@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: daily-podcast-digest
+  cancel-in-progress: true
+
 jobs:
   send-digest:
     runs-on: ubuntu-latest
