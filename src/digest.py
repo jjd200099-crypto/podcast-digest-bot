@@ -23,11 +23,11 @@ def latest_videos(channel: str):
     raw = run("yt-dlp", "--flat-playlist", "--playlist-end", "4", "--dump-single-json", channel)
     data = json.loads(raw)
     for entry in data.get("entries") or []:
-        if entry.get("id") and entry.get("url"):
+        if entry.get("id"):
             yield {
                 "id": entry["id"],
                 "title": entry.get("title", "Untitled"),
-                "url": entry["url"],
+                "url": entry.get("webpage_url") or f"https://www.youtube.com/watch?v={entry['id']}",
                 "channel": entry.get("channel") or data.get("channel") or channel,
             }
 
