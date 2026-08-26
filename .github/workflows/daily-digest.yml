@@ -1,0 +1,36 @@
+name: Daily podcast digest
+
+on:
+  schedule:
+    # 08:30 China Standard Time (UTC+8)
+    - cron: "30 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Build and send digest
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5-mini' }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_USER_OPEN_ID: ${{ vars.FEISHU_USER_OPEN_ID || 'ou_b3bfd8beda8f00996f6f2014da9432cf' }}
+        run: python src/digest.py
+      - name: Persist reviewed videos
+        run: |
+          git config user.name "podcast-digest-bot"
+          git config user.email "podcast-digest-bot@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "chore: record reviewed podcast uploads"
+          git push
