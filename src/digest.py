@@ -13,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 STATE_PATH = ROOT / "state.json"
 FEEDS_PATH = ROOT / "feeds.json"
 USER_OPEN_ID = os.environ.get("FEISHU_USER_OPEN_ID", "ou_b3bfd8beda8f00996f6f2014da9432cf")
+GROUP_CHAT_IDS = [
+    chat_id.strip()
+    for chat_id in os.environ.get("FEISHU_GROUP_CHAT_IDS", "").split(",")
+    if chat_id.strip()
+]
 
 
 def run(*args: str) -> str:
@@ -104,8 +109,7 @@ def feishu_token() -> str:
     return body["tenant_access_token"]
 
 
-def send_feishu(markdown: str) -> None:
-    token = feishu_token()
+def send_feishu_to(markdown: str, receive_id: str, receive_id_type: str, token: str) -> None:
     # Feishu post messages have a practical size cap; split only at paragraph boundaries.
     chunks, current = [], ""
     for paragraph in markdown.split("\n\n"):
@@ -120,15 +124,22 @@ def send_feishu(markdown: str) -> None:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=utf-8"}
     for i, chunk in enumerate(chunks, start=1):
         suffix = f"\n\n（第 {i}/{len(chunks)} 段）" if len(chunks) > 1 else ""
-        payload = {"receive_id": USER_OPEN_ID, "msg_type": "text", "content": json.dumps({"text": chunk + suffix}, ensure_ascii=False)}
+        payload = {"receive_id": receive_id, "msg_type": "text", "content": json.dumps({"text": chunk + suffix}, ensure_ascii=False)}
         response = requests.post(
-            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id",
+            f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={receive_id_type}",
             headers=headers, json=payload, timeout=30,
         )
         response.raise_for_status()
         body = response.json()
         if body.get("code") != 0:
             raise RuntimeError(f"Feishu send error: {body}")
+
+
+def send_feishu(markdown: str) -> None:
+    token = feishu_token()
+    send_feishu_to(markdown, USER_OPEN_ID, "open_id", token)
+    for chat_id in GROUP_CHAT_IDS:
+        send_feishu_to(markdown, chat_id, "chat_id", token)
 
 
 def main() -> None:

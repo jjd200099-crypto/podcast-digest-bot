@@ -10,4 +10,4 @@ GitHub Actions 每天北京时间 08:30 运行：扫描指定 YouTube 频道，�
 - `FEISHU_APP_ID`
 - `FEISHU_APP_SECRET`
 
-可选 Variables：`OPENAI_MODEL`、`FEISHU_USER_OPEN_ID`。频道列表在 `feeds.json`；已处理视频记录在 `state.json`。
+可选 Variables：`OPENAI_MODEL`、`FEISHU_USER_OPEN_ID`、`FEISHU_GROUP_CHAT_IDS`（多个群用英文逗号分隔）。频道列表在 `feeds.json`；已处理视频记录在 `state.json`。
