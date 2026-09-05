@@ -11,7 +11,12 @@ sys.path.insert(0, str(ROOT / "src"))
 from news_officer.feishu import brand_message, split_message
 from news_officer.models import Episode, IncomingMessage, Transcript
 from news_officer.official import DwarkeshOfficialTranscriptProvider
-from news_officer.podcast import PodcastService, TranscriptResolver, _interleave
+from news_officer.podcast import (
+    PodcastService,
+    TranscriptResolver,
+    YouTubeFeedSource,
+    _interleave,
+)
 from news_officer.router import (
     CommandRouter,
     HelpPlugin,
@@ -147,6 +152,24 @@ class NewsOfficerTests(unittest.TestCase):
             [[episode("a1"), episode("a2")], [episode("b1"), episode("b2")]]
         )
         self.assertEqual([item.id for item in ordered], ["a1", "b1", "a2", "b2"])
+
+    def test_feed_source_can_filter_a_broad_channel_by_topic(self):
+        source = YouTubeFeedSource(
+            "https://www.youtube.com/channel/example/videos",
+            ("AI", "data center", "software"),
+            20,
+        )
+        self.assertTrue(
+            source.accepts(Episode("1", "The AI investment boom", "https://x", "x"))
+        )
+        self.assertTrue(
+            source.accepts(
+                Episode("2", "Financing a new data center", "https://x", "x")
+            )
+        )
+        self.assertFalse(
+            source.accepts(Episode("3", "Said rates may fall", "https://x", "x"))
+        )
 
     def test_transcript_resolver_rejects_unverified_text_and_falls_through(self):
         incomplete = StaticTranscriptProvider(

@@ -53,6 +53,25 @@ class SourceFailureTests(unittest.TestCase):
         with self.assertRaises(TranscriptLookupError):
             resolver.fetch(Episode("x", "Title", "https://youtu.be/x", "Show"))
 
+    def test_interactive_source_outage_returns_an_explicit_safe_result(self):
+        self.feeds.write_text('{"youtube_channels": []}')
+        service = PodcastService(
+            self.store,
+            self.feeds,
+            FakeSummarizer(),
+            TranscriptResolver([BrokenProvider()]),
+        )
+        episode = Episode(
+            "kG8AoExkX40",
+            "Sam Altman",
+            "https://www.youtube.com/watch?v=kG8AoExkX40",
+            "David Senra",
+        )
+        with patch("news_officer.podcast.video_metadata", return_value=episode):
+            result = service.analyze_url(episode.url)
+        self.assertEqual(result.status, "source_error")
+        self.assertIn("未取得完整文字稿，本次不摘要", result.message)
+
     def test_all_feed_outage_is_not_reported_as_an_empty_scan(self):
         self.feeds.write_text(
             '{"youtube_channels": ["https://www.youtube.com/@one"]}'
@@ -74,7 +93,7 @@ class SourceFailureTests(unittest.TestCase):
         )
         service = PodcastService(self.store, self.feeds, FakeSummarizer())
 
-        def discover(channel):
+        def discover(channel, playlist_end=4):
             if channel.endswith("@one"):
                 return [candidate]
             raise TimeoutError("temporary outage")
@@ -104,6 +123,41 @@ class SourceFailureTests(unittest.TestCase):
         ):
             items = service.build_daily(datetime(2026, 9, 5, tzinfo=UTC))
         self.assertEqual(items[0].status, "unverified_date")
+
+    def test_partial_metadata_enrichment_preserves_verified_feed_date(self):
+        self.feeds.write_text(
+            '{"youtube_channels": ["https://www.youtube.com/@one"]}'
+        )
+        published_at = datetime(2026, 9, 5, tzinfo=UTC)
+        discovered = Episode(
+            "kG8AoExkX40",
+            "Sam Altman",
+            "https://www.youtube.com/watch?v=kG8AoExkX40",
+            "David Senra",
+            published_at=published_at,
+        )
+        partial = Episode(
+            discovered.id,
+            discovered.title,
+            discovered.url,
+            discovered.show,
+            published_at=None,
+        )
+        service = PodcastService(
+            self.store,
+            self.feeds,
+            FakeSummarizer(),
+            TranscriptResolver([MissingProvider()]),
+        )
+        with (
+            patch.object(
+                service, "discover_daily_candidates", return_value=[discovered]
+            ),
+            patch("news_officer.podcast.video_metadata", return_value=partial),
+        ):
+            items = service.build_daily(datetime(2026, 9, 6, tzinfo=UTC))
+        self.assertEqual(items[0].status, "no_transcript")
+        self.assertEqual(items[0].episode.published_at, published_at)
 
     def test_youtube_source_requires_https(self):
         self.assertTrue(is_youtube_url("https://www.youtube.com/watch?v=x"))

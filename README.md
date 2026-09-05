@@ -8,7 +8,7 @@
 
 ## 文字稿规则
 
-新闻官先尝试节目官网的官方 transcript，再回退到公开视频字幕。只有来源明确、文本密度达标且覆盖节目主体时才会调用模型；否则固定回复“未取得完整文字稿，本次不摘要”。当前已接入 Dwarkesh、Sequoia、Invest Like the Best/Colossus 官网，以及经过时间轴覆盖校验和滚动去重的 YouTube 英文字幕。上游超时会进入重试，不会被伪装成“没有文字稿”或“今日无更新”。
+新闻官先尝试节目官网的官方 transcript，再回退到公开视频字幕。只有来源明确、文本密度达标且覆盖节目主体时才会调用模型；否则固定回复“未取得完整文字稿，本次不摘要”。当前已接入 David Senra/Founders、Dwarkesh、Sequoia、Invest Like the Best/Colossus 官网，以及经过时间轴覆盖校验和滚动去重的 YouTube 英文字幕。YouTube 播放页受云机房限制时，基础元数据和频道发现会分别回退到官方 oEmbed 与 Atom feed；全链路不可用时会明确告知用户，不会把简介伪装成摘要。
 
 摘要遵循“会议纪要核心要点精简版”：中文输出，按 4–7 个主题组织 10–20 条连续编号洞察，优先保留数字、强观点、反共识判断和可执行启示，并明确标注嘉宾预测、公司主张与模型估算。
 
@@ -28,7 +28,7 @@ uv run --with lark-oapi==1.7.3 python scripts/register_feishu_app.py
 
 ## Railway 部署
 
-仓库根目录的 `Dockerfile` 会被 Railway 自动识别。服务必须保持一个 replica、关闭 Serverless 休眠、将 restart policy 设为 `Always`，并把持久卷真实挂载到 `/data`。程序在 Railway 上会主动校验卷；配置错误时宁可启动失败，也不会把去重和队列状态悄悄写入临时磁盘。
+仓库根目录的 `Dockerfile` 会被 Railway 自动识别。服务必须保持一个 replica、关闭 Serverless 休眠，并把持久卷真实挂载到 `/data`。付费计划可将 restart policy 设为 `Always`；Free/Trial 计划使用其允许的 `On Failure`（最多 10 次）。程序在 Railway 上会主动校验卷；配置错误时宁可启动失败，也不会把去重和队列状态悄悄写入临时磁盘。
 
 配置 `.env.example` 中的变量后启动。核心变量是 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 和 `OPENAI_API_KEY`。`FEISHU_USER_OPEN_IDS` 与 `FEISHU_GROUP_CHAT_IDS` 是可选的初始订阅种子；此后用户和群可以直接在飞书中订阅或退订，状态保存在 SQLite。退订会跨重启保留，即使旧 ID 仍留在环境变量中也不会被重新加入。密钥应通过 Railway Variables 或 CLI stdin 写入，不进入仓库与命令行参数。
 

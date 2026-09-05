@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +15,8 @@ from news_officer.youtube import (
     intervals_cover_episode,
     latest_videos,
     normalize_channel_videos_url,
+    video_metadata,
+    youtube_video_id,
 )
 
 
@@ -78,6 +81,46 @@ agents are changing software
             with self.subTest(url=url), self.assertRaises(ValueError):
                 normalize_channel_videos_url(url)
 
+    def test_video_id_is_extracted_only_from_supported_video_shapes(self):
+        for url in (
+            "https://youtu.be/kG8AoExkX40",
+            "https://www.youtube.com/watch?v=kG8AoExkX40&t=3",
+            "https://www.youtube.com/embed/kG8AoExkX40",
+            "https://www.youtube.com/shorts/kG8AoExkX40",
+            "https://www.youtube.com/live/kG8AoExkX40",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(youtube_video_id(url), "kG8AoExkX40")
+        self.assertIsNone(youtube_video_id("https://www.youtube.com/@DavidSenra"))
+        self.assertIsNone(youtube_video_id("https://youtube.com.evil.test/watch?v=kG8AoExkX40"))
+
+    @patch("news_officer.youtube.requests.get")
+    @patch("news_officer.youtube.run")
+    def test_video_metadata_falls_back_to_official_oembed(self, mock_run, mock_get):
+        mock_run.side_effect = subprocess.CalledProcessError(1, ["yt-dlp"])
+        response = mock_get.return_value
+        response.status_code = 200
+        response.content = b"{}"
+        response.url = "https://www.youtube.com/oembed"
+        response.json.return_value = {
+            "type": "video",
+            "title": "Sam Altman",
+            "author_name": "David Senra",
+            "author_url": "https://www.youtube.com/@DavidSenra",
+        }
+
+        episode = video_metadata("https://youtu.be/kG8AoExkX40")
+
+        self.assertEqual(episode.id, "kG8AoExkX40")
+        self.assertEqual(episode.title, "Sam Altman")
+        self.assertEqual(episode.show, "David Senra")
+        self.assertEqual(
+            episode.url, "https://www.youtube.com/watch?v=kG8AoExkX40"
+        )
+        self.assertIsNone(episode.duration_seconds)
+        self.assertIn("www.youtube.com/oembed?", mock_get.call_args.args[0])
+        self.assertFalse(mock_get.call_args.kwargs["allow_redirects"])
+
     @patch("news_officer.youtube.run")
     def test_latest_videos_ignores_channel_tabs(self, mock_run):
         mock_run.return_value = json.dumps(
@@ -98,6 +141,69 @@ agents are changing software
             "https://www.youtube.com/@SemiAnalysis/videos",
             mock_run.call_args.args,
         )
+
+    @patch("news_officer.youtube.requests.get")
+    @patch("news_officer.youtube.run")
+    def test_latest_videos_prefers_official_atom_feed(self, mock_run, mock_get):
+        mock_run.side_effect = subprocess.TimeoutExpired("yt-dlp", 90)
+        response = mock_get.return_value
+        response.status_code = 200
+        response.url = "https://www.youtube.com/feeds/videos.xml?channel_id=UCf_KhBXw5TIV0A7butjgFhg"
+        response.content = b"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<feed xmlns=\"http://www.w3.org/2005/Atom\"
+      xmlns:yt=\"http://www.youtube.com/xml/schemas/2015\">
+  <yt:channelId>UCf_KhBXw5TIV0A7butjgFhg</yt:channelId>
+  <title>David Senra</title>
+  <entry>
+    <yt:videoId>kG8AoExkX40</yt:videoId>
+    <title>Sam Altman</title>
+    <published>2026-08-23T12:00:00+00:00</published>
+    <author><name>David Senra</name></author>
+  </entry>
+</feed>"""
+
+        episodes = latest_videos(
+            "https://www.youtube.com/channel/UCf_KhBXw5TIV0A7butjgFhg/videos"
+        )
+
+        self.assertEqual([episode.id for episode in episodes], ["kG8AoExkX40"])
+        self.assertEqual(episodes[0].show, "David Senra")
+        self.assertEqual(
+            episodes[0].published_at.isoformat(), "2026-08-23T12:00:00+00:00"
+        )
+        self.assertIn("feeds/videos.xml?channel_id=", mock_get.call_args.args[0])
+        mock_run.assert_not_called()
+
+    @patch("news_officer.youtube.requests.get")
+    @patch("news_officer.youtube.run")
+    def test_empty_atom_feed_falls_back_to_channel_extractor(
+        self, mock_run, mock_get
+    ):
+        channel_id = "UCf_KhBXw5TIV0A7butjgFhg"
+        response = mock_get.return_value
+        response.status_code = 200
+        response.url = (
+            "https://www.youtube.com/feeds/videos.xml?channel_id=" + channel_id
+        )
+        response.content = f"""<?xml version=\"1.0\"?>
+<feed xmlns=\"http://www.w3.org/2005/Atom\"
+      xmlns:yt=\"http://www.youtube.com/xml/schemas/2015\">
+  <yt:channelId>{channel_id}</yt:channelId>
+  <title>David Senra</title>
+</feed>""".encode()
+        mock_run.return_value = json.dumps(
+            {
+                "channel": "David Senra",
+                "entries": [{"id": "kG8AoExkX40", "title": "Sam Altman"}],
+            }
+        )
+
+        episodes = latest_videos(
+            f"https://www.youtube.com/channel/{channel_id}/videos"
+        )
+
+        self.assertEqual([episode.id for episode in episodes], ["kG8AoExkX40"])
+        mock_run.assert_called_once()
 
 
 if __name__ == "__main__":
