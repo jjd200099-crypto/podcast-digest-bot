@@ -1,0 +1,589 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from .models import Episode, Job, OutboxItem
+
+RETRY_DELAYS_SECONDS = (60, 300, 900, 1800)
+FAILED_DAILY_REQUEUE_SECONDS = 3600
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class Store:
+    """Durable single-replica queue and podcast state.
+
+    SQLite keeps the first deployment simple. All persistence is behind this class,
+    so a later move to Postgres does not affect the bot, plugins, or Feishu code.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_key TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    analysis_complete INTEGER NOT NULL DEFAULT 0,
+                    available_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS jobs_ready_idx
+                    ON jobs(status, available_at, created_at);
+
+                CREATE TABLE IF NOT EXISTS episodes (
+                    episode_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    show_name TEXT NOT NULL,
+                    published_at TEXT,
+                    result TEXT NOT NULL,
+                    checked_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS job_results (
+                    job_key TEXT NOT NULL,
+                    result_key TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(job_key, result_key),
+                    FOREIGN KEY(job_key) REFERENCES jobs(job_key) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_key TEXT NOT NULL,
+                    group_key TEXT NOT NULL,
+                    delivery_key TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    reply_in_thread INTEGER NOT NULL DEFAULT 0,
+                    part INTEGER NOT NULL,
+                    total_parts INTEGER NOT NULL,
+                    msg_type TEXT NOT NULL DEFAULT 'post',
+                    content TEXT NOT NULL,
+                    uuid TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    sent_at TEXT,
+                    last_error TEXT,
+                    UNIQUE(job_key, delivery_key, part),
+                    FOREIGN KEY(job_key) REFERENCES jobs(job_key) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS outbox_pending_idx
+                    ON outbox(job_key, status, id);
+                """
+            )
+            # Forward-compatible migration for databases created by 0.1.x.
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "analysis_complete" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN analysis_complete INTEGER NOT NULL DEFAULT 0"
+                )
+            outbox_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(outbox)").fetchall()
+            }
+            if "reply_in_thread" not in outbox_columns:
+                connection.execute(
+                    "ALTER TABLE outbox ADD COLUMN reply_in_thread INTEGER NOT NULL DEFAULT 0"
+                )
+            if "msg_type" not in outbox_columns:
+                connection.execute(
+                    "ALTER TABLE outbox ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'post'"
+                )
+
+    def recover_interrupted_jobs(self) -> int:
+        with self._connect() as connection:
+            result = connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'pending', available_at = ?, updated_at = ?,
+                    last_error = 'worker restarted while processing'
+                WHERE status = 'processing'
+                """,
+                (_now(), _now()),
+            )
+            return result.rowcount
+
+    def enqueue(self, key: str, kind: str, payload: dict) -> bool:
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = connection.execute(
+                """
+                INSERT OR IGNORE INTO jobs(
+                    job_key, kind, payload_json, status, attempts,
+                    available_at, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                """,
+                (key, kind, json.dumps(payload, ensure_ascii=False), now, now, now),
+            )
+            if result.rowcount == 1:
+                return True
+            # A daily job that exhausted its immediate retries may be revived
+            # later the same day by the scheduler. Its immutable results and
+            # outbox are deliberately retained and resumed.
+            if kind != "daily":
+                return False
+            revived = connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'pending', attempts = 0, updated_at = ?
+                WHERE job_key = ? AND kind = 'daily' AND status = 'failed'
+                    AND available_at <= ?
+                """,
+                (now, key, now),
+            )
+            return revived.rowcount == 1
+
+    def claim_next(self, kind: str | None = None) -> Job | None:
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if kind is None:
+                row = connection.execute(
+                    """
+                SELECT job_key, kind, payload_json, attempts
+                FROM jobs
+                WHERE status = 'pending' AND available_at <= ?
+                ORDER BY CASE kind WHEN 'message' THEN 0 ELSE 1 END, created_at
+                LIMIT 1
+                    """,
+                    (now,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT job_key, kind, payload_json, attempts
+                    FROM jobs
+                    WHERE status = 'pending' AND available_at <= ? AND kind = ?
+                    ORDER BY created_at
+                    LIMIT 1
+                    """,
+                    (now, kind),
+                ).fetchone()
+            if row is None:
+                return None
+            updated = connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'processing', attempts = attempts + 1, updated_at = ?
+                WHERE job_key = ? AND status = 'pending'
+                """,
+                (now, row["job_key"]),
+            )
+            if updated.rowcount != 1:
+                return None
+            return Job(
+                key=row["job_key"],
+                kind=row["kind"],
+                payload=json.loads(row["payload_json"]),
+                attempts=int(row["attempts"]) + 1,
+            )
+
+    def complete(self, key: str) -> None:
+        with self._connect() as connection:
+            result = connection.execute(
+                """
+                UPDATE jobs
+                SET status = 'completed', updated_at = ?, last_error = NULL
+                WHERE job_key = ? AND NOT EXISTS (
+                    SELECT 1 FROM outbox
+                    WHERE outbox.job_key = jobs.job_key AND outbox.status != 'sent'
+                )
+                """,
+                (_now(), key),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError(f"Cannot complete job with pending outbox: {key}")
+
+    def fail(
+        self,
+        key: str,
+        error: str,
+        attempts: int,
+        max_attempts: int = 5,
+        failed_daily_requeue_seconds: int = FAILED_DAILY_REQUEUE_SECONDS,
+    ) -> None:
+        now = datetime.now(UTC)
+        if attempts < max_attempts:
+            status = "pending"
+            delay_index = min(max(0, attempts - 1), len(RETRY_DELAYS_SECONDS) - 1)
+            available_at = now + timedelta(seconds=RETRY_DELAYS_SECONDS[delay_index])
+        else:
+            status = "failed"
+            available_at = now + timedelta(
+                seconds=max(0, failed_daily_requeue_seconds)
+                if self.job_kind(key) == "daily"
+                else 0
+            )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, available_at = ?, updated_at = ?, last_error = ?
+                WHERE job_key = ?
+                """,
+                (status, available_at.isoformat(), now.isoformat(), error[:2000], key),
+            )
+
+    def job_kind(self, key: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT kind FROM jobs WHERE job_key = ?", (key,)
+            ).fetchone()
+            return str(row["kind"]) if row else None
+
+    def save_job_result(
+        self, key: str, result_key: str, kind: str, payload: dict
+    ) -> dict:
+        """Persist the first result for a key and always return that canonical value."""
+
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO job_results(
+                    job_key, result_key, kind, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (key, result_key, kind, encoded, _now()),
+            )
+            row = connection.execute(
+                """
+                SELECT kind, payload_json FROM job_results
+                WHERE job_key = ? AND result_key = ?
+                """,
+                (key, result_key),
+            ).fetchone()
+        if row is None or str(row["kind"]) != kind:
+            raise RuntimeError(f"Conflicting immutable job result: {key}/{result_key}")
+        return json.loads(str(row["payload_json"]))
+
+    def get_job_result(self, key: str, result_key: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM job_results
+                WHERE job_key = ? AND result_key = ?
+                """,
+                (key, result_key),
+            ).fetchone()
+        return json.loads(str(row["payload_json"])) if row else None
+
+    def list_job_results(self, key: str, kind: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM job_results
+                WHERE job_key = ? AND kind = ?
+                ORDER BY created_at, result_key
+                """,
+                (key, kind),
+            ).fetchall()
+        return [json.loads(str(row["payload_json"])) for row in rows]
+
+    def mark_analysis_complete(self, key: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE jobs SET analysis_complete = 1, updated_at = ? WHERE job_key = ?",
+                (_now(), key),
+            )
+
+    def analysis_complete(self, key: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT analysis_complete FROM jobs WHERE job_key = ?", (key,)
+            ).fetchone()
+        return bool(row and row["analysis_complete"])
+
+    def ensure_outbox(
+        self,
+        *,
+        job_key: str,
+        group_key: str,
+        delivery_key: str,
+        operation: str,
+        target_id: str,
+        target_type: str,
+        reply_in_thread: bool,
+        parts: list[tuple[str, str, str]],
+    ) -> None:
+        """Create immutable delivery parts, rejecting any key/content mismatch."""
+
+        if operation not in {"reply", "send"}:
+            raise ValueError(f"Unsupported outbox operation: {operation}")
+        if not parts:
+            raise ValueError("Outbox delivery must contain at least one part")
+        now = _now()
+        total_parts = len(parts)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for part, (msg_type, content, item_uuid) in enumerate(parts, start=1):
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO outbox(
+                        job_key, group_key, delivery_key, operation,
+                        target_id, target_type, reply_in_thread, part,
+                        total_parts, msg_type, content, uuid, status, attempts,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                    """,
+                    (
+                        job_key,
+                        group_key,
+                        delivery_key,
+                        operation,
+                        target_id,
+                        target_type,
+                        int(reply_in_thread),
+                        part,
+                        total_parts,
+                        msg_type,
+                        content,
+                        item_uuid,
+                        now,
+                        now,
+                    ),
+                )
+                row = connection.execute(
+                    """
+                    SELECT group_key, operation, target_id, target_type,
+                           reply_in_thread, total_parts, msg_type, content, uuid
+                    FROM outbox
+                    WHERE job_key = ? AND delivery_key = ? AND part = ?
+                    """,
+                    (job_key, delivery_key, part),
+                ).fetchone()
+                expected = (
+                    group_key,
+                    operation,
+                    target_id,
+                    target_type,
+                    int(reply_in_thread),
+                    total_parts,
+                    msg_type,
+                    content,
+                    item_uuid,
+                )
+                actual = tuple(row) if row else None
+                if actual != expected:
+                    raise RuntimeError(
+                        f"Conflicting immutable outbox item: {job_key}/{delivery_key}/{part}"
+                    )
+
+    def pending_outbox(self, key: str) -> list[OutboxItem]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, job_key, group_key, delivery_key, operation,
+                       target_id, target_type, reply_in_thread, part,
+                       total_parts, msg_type, content, uuid, attempts
+                FROM outbox
+                WHERE job_key = ? AND status = 'pending'
+                ORDER BY id
+                """,
+                (key,),
+            ).fetchall()
+        return [
+            OutboxItem(
+                id=int(row["id"]),
+                job_key=str(row["job_key"]),
+                group_key=str(row["group_key"]),
+                delivery_key=str(row["delivery_key"]),
+                operation=str(row["operation"]),
+                target_id=str(row["target_id"]),
+                target_type=str(row["target_type"]),
+                reply_in_thread=bool(row["reply_in_thread"]),
+                part=int(row["part"]),
+                total_parts=int(row["total_parts"]),
+                msg_type=str(row["msg_type"]),
+                content=str(row["content"]),
+                uuid=str(row["uuid"]),
+                attempts=int(row["attempts"]),
+            )
+            for row in rows
+        ]
+
+    def mark_outbox_attempt(self, item_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE outbox
+                SET attempts = attempts + 1, updated_at = ?, last_error = NULL
+                WHERE id = ? AND status = 'pending'
+                """,
+                (_now(), item_id),
+            )
+
+    def mark_outbox_sent(self, item_id: int) -> None:
+        now = _now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE outbox
+                SET status = 'sent', sent_at = ?, updated_at = ?, last_error = NULL
+                WHERE id = ?
+                """,
+                (now, now, item_id),
+            )
+
+    def mark_outbox_error(self, item_id: int, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE outbox SET updated_at = ?, last_error = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (_now(), error[:2000], item_id),
+            )
+
+    def outbox_group_sent(self, key: str, group_key: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent
+                FROM outbox WHERE job_key = ? AND group_key = ?
+                """,
+                (key, group_key),
+            ).fetchone()
+        return bool(row and int(row["total"]) > 0 and int(row["sent"] or 0) == int(row["total"]))
+
+    def outbox_items(self, key: str) -> list[OutboxItem]:
+        """Return all parts for diagnostics and restart-focused tests."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, job_key, group_key, delivery_key, operation,
+                       target_id, target_type, reply_in_thread, part,
+                       total_parts, msg_type, content, uuid, attempts
+                FROM outbox WHERE job_key = ? ORDER BY id
+                """,
+                (key,),
+            ).fetchall()
+        return [
+            OutboxItem(
+                id=int(row["id"]),
+                job_key=str(row["job_key"]),
+                group_key=str(row["group_key"]),
+                delivery_key=str(row["delivery_key"]),
+                operation=str(row["operation"]),
+                target_id=str(row["target_id"]),
+                target_type=str(row["target_type"]),
+                reply_in_thread=bool(row["reply_in_thread"]),
+                part=int(row["part"]),
+                total_parts=int(row["total_parts"]),
+                msg_type=str(row["msg_type"]),
+                content=str(row["content"]),
+                uuid=str(row["uuid"]),
+                attempts=int(row["attempts"]),
+            )
+            for row in rows
+        ]
+
+    def has_episode(self, episode_id: str) -> bool:
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    "SELECT 1 FROM episodes WHERE episode_id = ?", (episode_id,)
+                ).fetchone()
+                is not None
+            )
+
+    def should_review_episode(
+        self, episode_id: str, no_transcript_retry_hours: int = 6
+    ) -> bool:
+        """Retry a missing transcript later, while final outcomes remain deduped."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result, checked_at FROM episodes WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()
+        if row is None:
+            return True
+        if row["result"] != "no_transcript":
+            return False
+        try:
+            checked_at = datetime.fromisoformat(str(row["checked_at"]))
+        except ValueError:
+            return True
+        return datetime.now(UTC) - checked_at >= timedelta(
+            hours=no_transcript_retry_hours
+        )
+
+    def record_episode(self, episode: Episode, result: str) -> None:
+        published_at = (
+            episode.published_at.isoformat() if episode.published_at else None
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO episodes(
+                    episode_id, title, url, show_name, published_at, result, checked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(episode_id) DO UPDATE SET
+                    title = excluded.title,
+                    url = excluded.url,
+                    show_name = excluded.show_name,
+                    published_at = excluded.published_at,
+                    result = excluded.result,
+                    checked_at = excluded.checked_at
+                """,
+                (
+                    episode.id,
+                    episode.title,
+                    episode.url,
+                    episode.show,
+                    published_at,
+                    result,
+                    _now(),
+                ),
+            )
+
+    def job_status(self, key: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM jobs WHERE job_key = ?", (key,)
+            ).fetchone()
+            return str(row["status"]) if row else None
