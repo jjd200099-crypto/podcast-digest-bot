@@ -1,4 +1,5 @@
 import argparse
+import base64
 import os
 import sys
 import unittest
@@ -11,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.bootstrap_railway import (
     BootstrapError,
     Railway,
+    decode_security_password,
     default_lark_config_path,
     has_mount_path,
     has_named_service,
@@ -72,6 +74,12 @@ class LarkConfigTests(unittest.TestCase):
             safe_keychain_filename("appsecret:cli_example"),
             "appsecret_cli_example.enc",
         )
+
+    def test_go_keyring_binary_wrapper_is_decoded(self):
+        master_key = b"k" * 32
+        lark_encoded = base64.b64encode(master_key)
+        security_value = b"go-keyring-base64:" + base64.b64encode(lark_encoded)
+        self.assertEqual(decode_security_password(security_value), master_key)
 
 
 class RailwayPayloadTests(unittest.TestCase):

@@ -33,6 +33,7 @@ LARK_KEYCHAIN_SERVICE = "lark-cli"
 LARK_MASTER_KEY_ACCOUNT = "master.key"
 LARK_MASTER_KEY_BYTES = 32
 LARK_GCM_NONCE_BYTES = 12
+GO_KEYRING_BASE64_PREFIX = b"go-keyring-base64:"
 
 
 class BootstrapError(RuntimeError):
@@ -123,6 +124,30 @@ def _lark_keychain_storage_dir() -> Path:
     return Path.home() / "Library" / "Application Support" / LARK_KEYCHAIN_SERVICE
 
 
+def decode_security_password(value: bytes) -> bytearray:
+    """Decode a binary password returned by macOS ``security -w``.
+
+    go-keyring wraps binary values once before storing them; lark-cli itself
+    stores its 32-byte master key as base64, so current installations require
+    two decoding layers. Older/plain keychain representations remain accepted.
+    """
+
+    encoded = value.strip()
+    if encoded.startswith(GO_KEYRING_BASE64_PREFIX):
+        try:
+            encoded = base64.b64decode(
+                encoded[len(GO_KEYRING_BASE64_PREFIX) :], validate=True
+            )
+        except ValueError as error:
+            raise BootstrapError("lark-cli 钥匙串包装格式无效。") from error
+    if len(encoded) == LARK_MASTER_KEY_BYTES:
+        return bytearray(encoded)
+    try:
+        return bytearray(base64.b64decode(encoded, validate=True))
+    except ValueError as error:
+        raise BootstrapError("lark-cli 钥匙串主密钥格式无效。") from error
+
+
 def _load_lark_master_key(storage_dir: Path) -> bytearray:
     file_fallback = storage_dir / "master.key.file"
     if file_fallback.is_file():
@@ -149,10 +174,7 @@ def _load_lark_master_key(storage_dir: Path) -> bytearray:
             raise BootstrapError(
                 "无法读取 lark-cli 系统钥匙串，请解锁钥匙串后重试。"
             )
-        try:
-            key = bytearray(base64.b64decode(result.stdout.strip(), validate=True))
-        except ValueError as error:
-            raise BootstrapError("lark-cli 钥匙串主密钥格式无效。") from error
+        key = decode_security_password(result.stdout)
 
     if len(key) != LARK_MASTER_KEY_BYTES:
         _wipe(key)
