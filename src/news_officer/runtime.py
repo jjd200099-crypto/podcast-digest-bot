@@ -8,6 +8,7 @@ from lark_channel import (
     ChatQueueConfig,
     Events,
     FeishuChannel,
+    LogLevel,
     PolicyConfig,
     SafetyConfig,
     TextBatchConfig,
@@ -45,6 +46,10 @@ class NewsOfficerRuntime:
         self.channel = FeishuChannel(
             app_id=settings.feishu_app_id,
             app_secret=settings.feishu_app_secret,
+            # The SDK's INFO connection line contains short-lived WebSocket
+            # access credentials. Keep production logs at WARNING and emit our
+            # own credential-free lifecycle message below.
+            log_level=LogLevel.WARNING,
             transport="ws",
             policy=PolicyConfig(
                 dm_policy="open",
