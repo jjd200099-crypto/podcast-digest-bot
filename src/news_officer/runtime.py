@@ -137,11 +137,9 @@ class NewsOfficerRuntime:
         markdown: str,
         idempotency_key: str,
     ) -> None:
-        targets = [
-            ("open_id", target) for target in self.settings.user_open_ids
-        ] + [("chat_id", target) for target in self.settings.group_chat_ids]
+        targets = self._daily_targets(job)
         if not targets:
-            raise RuntimeError("A daily delivery has no configured recipients")
+            raise RuntimeError("A daily delivery has no active subscribers")
         for target_type, target_id in targets:
             delivery_key = f"{idempotency_key}:{target_type}:{target_id}"
             self.store.ensure_outbox(
@@ -154,6 +152,23 @@ class NewsOfficerRuntime:
                 reply_in_thread=False,
                 parts=delivery_parts(markdown, delivery_key),
             )
+
+    def _daily_targets(self, job: Job) -> list[tuple[str, str]]:
+        """Freeze one DB-backed recipient snapshot for the whole daily job."""
+
+        persisted = self.store.get_job_result(job.key, "daily:recipients")
+        if persisted is None:
+            targets = self.store.list_subscriptions()
+            persisted = self.store.save_job_result(
+                job.key,
+                "daily:recipients",
+                "delivery_targets",
+                {"targets": [list(target) for target in targets]},
+            )
+        return [
+            (str(target[0]), str(target[1]))
+            for target in persisted.get("targets", ())
+        ]
 
     async def _drain_outbox(self, job: Job) -> None:
         failures: list[tuple[str, Exception]] = []
@@ -205,7 +220,15 @@ class NewsOfficerRuntime:
             self.store.get_job_result, job.key, "message:analysis"
         )
         if persisted is None:
-            response = await asyncio.to_thread(plugin.handle, text)
+            incoming = IncomingMessage(
+                message_id=message_id,
+                chat_id=str(payload.get("chat_id") or ""),
+                text=text,
+                chat_type=str(payload.get("chat_type") or ""),
+                sender_open_id=str(payload.get("sender_open_id") or ""),
+                thread_id=str(payload.get("thread_id") or ""),
+            )
+            response = await asyncio.to_thread(plugin.handle, text, incoming)
             persisted = await asyncio.to_thread(
                 self.store.save_job_result,
                 job.key,
@@ -270,6 +293,12 @@ class NewsOfficerRuntime:
                 self.store.record_episode(item.episode, "sent")
 
     async def _handle_daily_job(self, job: Job) -> None:
+        targets = await asyncio.to_thread(self._daily_targets, job)
+        if not targets:
+            # A queued job may race with the last recipient unsubscribing. Do
+            # not spend transcript/model capacity when nobody can receive it.
+            await asyncio.to_thread(self.store.mark_analysis_complete, job.key)
+            return
         # Always finish already-generated immutable deliveries before asking
         # providers or the model for more work.
         persisted = await asyncio.to_thread(
@@ -339,9 +368,8 @@ class NewsOfficerRuntime:
     async def _scheduler(self) -> None:
         while True:
             local_now = datetime.now(self.settings.timezone)
-            if (
-                self.settings.user_open_ids or self.settings.group_chat_ids
-            ) and local_now.time() >= self.settings.daily_time:
+            has_subscribers = await asyncio.to_thread(self.store.has_subscriptions)
+            if has_subscribers and local_now.time() >= self.settings.daily_time:
                 key = f"daily:{local_now.date().isoformat()}"
                 inserted = await asyncio.to_thread(
                     self.store.enqueue,
@@ -357,6 +385,11 @@ class NewsOfficerRuntime:
     async def run(self) -> None:
         self._main_loop = asyncio.get_running_loop()
         self.store.initialize()
+        seeded = self.store.seed_subscriptions(
+            self.settings.user_open_ids, self.settings.group_chat_ids
+        )
+        if seeded:
+            logger.info("Imported %s new daily recipient seed(s)", seeded)
         recovered = self.store.recover_interrupted_jobs()
         if recovered:
             logger.warning("Recovered %s interrupted jobs", recovered)

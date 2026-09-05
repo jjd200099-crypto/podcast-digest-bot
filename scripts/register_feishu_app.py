@@ -1,16 +1,31 @@
 """Create the minimal Feishu app and store its secret without printing it."""
 
+import argparse
 import subprocess
 
 import lark_oapi as lark
 
-KEYCHAIN_SERVICE = "news-officer-feishu-app-secret"
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--allow-existing",
+        action="store_true",
+        help="Allow selecting an existing app instead of forcing a new app.",
+    )
+    parser.add_argument(
+        "--app-id",
+        help="Bind one known existing app directly (implies --allow-existing).",
+    )
+    return parser.parse_args()
 
 
 def show_confirmation(info: dict) -> None:
     print("请在浏览器打开以下飞书官方确认页：")
     print(info["url"])
 
+
+args = parse_args()
 
 result = lark.register_app(
     on_qr_code=show_confirmation,
@@ -31,7 +46,8 @@ result = lark.register_app(
         "events": {"items": {"tenant": ["im.message.receive_v1"], "user": []}},
         "callbacks": {"items": []},
     },
-    create_only=True,
+    create_only=not (args.allow_existing or args.app_id),
+    app_id=args.app_id,
 )
 
 app_id = str(result["client_id"])
@@ -55,26 +71,8 @@ subprocess.run(
     stdout=subprocess.DEVNULL,
 )
 
-# Use a stable, project-specific keychain identifier for secure cloud bootstrap.
-subprocess.run(
-    [
-        "security",
-        "add-generic-password",
-        "-U",
-        "-a",
-        app_id,
-        "-s",
-        KEYCHAIN_SERVICE,
-        "-w",
-    ],
-    input=f"{app_secret}\n",
-    text=True,
-    check=True,
-    stdout=subprocess.DEVNULL,
-)
-
 user_info = result.get("user_info") or {}
 print(f"新闻官应用已创建：{app_id}")
 if user_info.get("open_id"):
     print(f"创建者 open_id：{user_info['open_id']}")
-print("App Secret 已安全存入系统钥匙串，未显示明文。")
+print("App Secret 已由 lark-cli 安全存入系统钥匙串，未显示明文。")

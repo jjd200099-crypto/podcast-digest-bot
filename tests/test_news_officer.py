@@ -9,10 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from news_officer.feishu import brand_message, split_message
-from news_officer.models import Episode, Transcript
+from news_officer.models import Episode, IncomingMessage, Transcript
 from news_officer.official import DwarkeshOfficialTranscriptProvider
 from news_officer.podcast import PodcastService, TranscriptResolver, _interleave
-from news_officer.router import CommandRouter, HelpPlugin, PodcastPlugin
+from news_officer.router import (
+    CommandRouter,
+    HelpPlugin,
+    PodcastPlugin,
+    SubscriptionPlugin,
+)
 from news_officer.store import Store
 
 
@@ -82,6 +87,56 @@ class NewsOfficerTests(unittest.TestCase):
             )
         )
 
+    def test_environment_seeds_do_not_revive_an_explicit_opt_out(self):
+        self.assertEqual(
+            self.store.seed_subscriptions(("ou_seed",), ("oc_seed",)), 2
+        )
+        self.assertEqual(
+            self.store.list_subscriptions(),
+            [("chat_id", "oc_seed"), ("open_id", "ou_seed")],
+        )
+        self.assertTrue(self.store.remove_subscription("open_id", "ou_seed"))
+
+        reopened = Store(self.store.path)
+        reopened.initialize()
+        self.assertEqual(
+            reopened.seed_subscriptions(("ou_seed",), ("oc_seed",)), 0
+        )
+        self.assertEqual(reopened.list_subscriptions(), [("chat_id", "oc_seed")])
+
+    def test_opt_out_before_first_subscription_blocks_future_environment_seed(self):
+        self.assertFalse(self.store.remove_subscription("open_id", "ou_later"))
+        self.assertEqual(self.store.seed_subscriptions(("ou_later",), ()), 0)
+        self.assertEqual(self.store.list_subscriptions(), [])
+
+    def test_private_and_group_subscription_commands_use_the_current_conversation(self):
+        plugin = SubscriptionPlugin(self.store)
+        private = IncomingMessage(
+            message_id="om_private",
+            chat_id="oc_private",
+            text="订阅",
+            chat_type="p2p",
+            sender_open_id="ou_user",
+        )
+        group = IncomingMessage(
+            message_id="om_group",
+            chat_id="oc_group",
+            text="<at user_id=\"bot\">新闻官</at> 订阅",
+            chat_type="group",
+            sender_open_id="ou_member",
+        )
+
+        self.assertTrue(plugin.matches(group.text))
+        self.assertIn("订阅成功", plugin.handle("订阅", private).messages[0])
+        self.assertIn("订阅成功", plugin.handle(group.text, group).messages[0])
+        self.assertEqual(
+            self.store.list_subscriptions(),
+            [("chat_id", "oc_group"), ("open_id", "ou_user")],
+        )
+        self.assertIn("已经订阅", plugin.handle("订阅", private).messages[0])
+        self.assertIn("退订成功", plugin.handle("退订", private).messages[0])
+        self.assertEqual(self.store.list_subscriptions(), [("chat_id", "oc_group")])
+
     def test_feed_candidates_are_interleaved(self):
         def episode(identifier):
             return Episode(
@@ -136,10 +191,14 @@ class NewsOfficerTests(unittest.TestCase):
         feeds.write_text('{"youtube_channels": []}')
         service = PodcastService(self.store, feeds, FakeSummarizer())
         podcast = PodcastPlugin(service)
+        subscriptions = SubscriptionPlugin(self.store)
         help_plugin = HelpPlugin()
-        router = CommandRouter([podcast, help_plugin])
+        router = CommandRouter([subscriptions, podcast, help_plugin])
+        self.assertIs(router.select("订阅"), subscriptions)
         self.assertIs(router.select("请分析 https://youtu.be/x"), podcast)
         self.assertIs(router.select("你能做什么"), help_plugin)
+        help_message = IncomingMessage("om", "oc", "帮助", "p2p", "ou")
+        self.assertIn("退订", help_plugin.handle("帮助", help_message).messages[0])
 
     def test_feishu_chunks_leave_space_for_part_suffix(self):
         chunks = split_message(brand_message("洞察" * 3000), max_bytes=500)

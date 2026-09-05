@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from news_officer.feishu import FeishuMessenger, delivery_parts
-from news_officer.models import DailyItem, Episode, OutboxItem
+from news_officer.models import DailyItem, Episode, IncomingMessage, OutboxItem
 from news_officer.router import PluginResponse
 from news_officer.runtime import NewsOfficerRuntime
 from news_officer.store import Store
@@ -24,12 +24,14 @@ from news_officer.store import Store
 class FakePlugin:
     def __init__(self):
         self.calls = 0
+        self.last_message = None
 
     def acknowledgement(self, text):
         return "ACK"
 
-    def handle(self, text):
+    def handle(self, text, message):
         self.calls += 1
+        self.last_message = message
         return PluginResponse((f"RESULT-{self.calls}",))
 
 
@@ -82,6 +84,7 @@ class FakeResponse:
 
 
 def runtime(store, messenger, podcast, plugin=None):
+    store.add_subscription("open_id", "ou_test", source="test")
     instance = object.__new__(NewsOfficerRuntime)
     instance.store = store
     instance.messenger = messenger
@@ -136,6 +139,17 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         reopened.complete(retry.key)
 
         self.assertEqual(plugin.calls, 1, "persisted result must not call the model twice")
+        self.assertEqual(
+            plugin.last_message,
+            IncomingMessage(
+                message_id="om_1",
+                chat_id="oc_1",
+                text="analyze",
+                chat_type="",
+                sender_open_id="",
+                thread_id="omt_1",
+            ),
+        )
         items = reopened.outbox_items(retry.key)
         self.assertEqual(len(items), 2)
         self.assertTrue(all(item.reply_in_thread for item in items))
@@ -250,6 +264,20 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             "daily:empty", {item.group_key for item in messenger.delivered.values()}
         )
 
+    async def test_daily_job_without_subscribers_does_not_call_podcast_service(self):
+        podcast = SequencePodcast([])
+        instance = runtime(self.store, FakeMessenger(), podcast)
+        self.store.remove_subscription("open_id", "ou_test")
+        self.store.enqueue("daily:nobody", "daily", {})
+        job = self.store.claim_next("daily")
+
+        await instance._handle_daily_job(job)
+        self.store.complete(job.key)
+
+        self.assertEqual(podcast.calls, 0)
+        self.assertTrue(self.store.analysis_complete(job.key))
+        self.assertEqual(self.store.outbox_items(job.key), [])
+
     def test_outbox_is_immutable_and_persists_every_part(self):
         self.store.enqueue("message:1", "message", {"text": "x"})
         parts = delivery_parts("# Title\n\nRead [source](https://example.com)", "fixed")
@@ -290,13 +318,14 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.store.enqueue("daily:many", "daily", {})
         job = self.store.claim_next("daily")
         instance = runtime(self.store, FakeMessenger(), SequencePodcast([]))
-        instance.settings = SimpleNamespace(
-            user_open_ids=("ou_1", "ou_2"),
-            group_chat_ids=("oc_1",),
-        )
+        self.store.remove_subscription("open_id", "ou_test")
+        self.store.add_subscription("open_id", "ou_1")
+        self.store.add_subscription("open_id", "ou_2")
+        self.store.add_subscription("chat_id", "oc_1")
         markdown = "# Long update\n\n" + ("洞察" * 5000)
         instance._ensure_broadcast(job, "episode:x", markdown, "daily:x")
         first = self.store.outbox_items(job.key)
+        self.store.add_subscription("open_id", "ou_too_late")
         instance._ensure_broadcast(job, "episode:x", markdown, "daily:x")
         second = self.store.outbox_items(job.key)
 
@@ -317,10 +346,10 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         job = self.store.claim_next("daily")
         messenger = OneBadRecipient()
         instance = runtime(self.store, messenger, SequencePodcast([]))
-        instance.settings = SimpleNamespace(
-            user_open_ids=("ou_bad", "ou_good"),
-            group_chat_ids=("oc_good",),
-        )
+        self.store.remove_subscription("open_id", "ou_test")
+        self.store.add_subscription("open_id", "ou_bad")
+        self.store.add_subscription("open_id", "ou_good")
+        self.store.add_subscription("chat_id", "oc_good")
         instance._ensure_broadcast(job, "episode:x", "SUMMARY", "daily:x")
 
         with self.assertRaisesRegex(RuntimeError, "delivery group"):

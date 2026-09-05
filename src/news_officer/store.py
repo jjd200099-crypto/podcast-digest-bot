@@ -70,6 +70,20 @@ class Store:
                     checked_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(target_type, target_id),
+                    CHECK(target_type IN ('open_id', 'chat_id')),
+                    CHECK(active IN (0, 1))
+                );
+                CREATE INDEX IF NOT EXISTS subscriptions_active_idx
+                    ON subscriptions(active, target_type, target_id);
+
                 CREATE TABLE IF NOT EXISTS job_results (
                     job_key TEXT NOT NULL,
                     result_key TEXT NOT NULL,
@@ -128,6 +142,120 @@ class Store:
                 connection.execute(
                     "ALTER TABLE outbox ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'post'"
                 )
+
+    @staticmethod
+    def _validate_subscription_target(target_type: str, target_id: str) -> None:
+        if target_type not in {"open_id", "chat_id"}:
+            raise ValueError(f"Unsupported subscription target type: {target_type}")
+        if not target_id.strip():
+            raise ValueError("Subscription target id cannot be empty")
+
+    def seed_subscriptions(
+        self,
+        user_open_ids: tuple[str, ...],
+        group_chat_ids: tuple[str, ...],
+    ) -> int:
+        """Import environment recipients without reviving explicit opt-outs.
+
+        Inactive rows are retained as tombstones. This lets operators add a new
+        seed later while ensuring a recipient that sent ``退订`` stays removed
+        across restarts even if its old id remains in the environment.
+        """
+
+        targets = [("open_id", item) for item in user_open_ids] + [
+            ("chat_id", item) for item in group_chat_ids
+        ]
+        now = _now()
+        inserted = 0
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for target_type, target_id in targets:
+                target_id = target_id.strip()
+                self._validate_subscription_target(target_type, target_id)
+                result = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO subscriptions(
+                        target_type, target_id, active, source, created_at, updated_at
+                    ) VALUES (?, ?, 1, 'environment', ?, ?)
+                    """,
+                    (target_type, target_id, now, now),
+                )
+                inserted += result.rowcount
+        return inserted
+
+    def add_subscription(
+        self, target_type: str, target_id: str, source: str = "command"
+    ) -> bool:
+        """Activate a delivery target and report whether its state changed."""
+
+        target_id = target_id.strip()
+        self._validate_subscription_target(target_type, target_id)
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            result = connection.execute(
+                """
+                INSERT INTO subscriptions(
+                    target_type, target_id, active, source, created_at, updated_at
+                ) VALUES (?, ?, 1, ?, ?, ?)
+                ON CONFLICT(target_type, target_id) DO UPDATE SET
+                    active = 1,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                WHERE subscriptions.active = 0
+                """,
+                (target_type, target_id, source, now, now),
+            )
+            return result.rowcount == 1
+
+    def remove_subscription(self, target_type: str, target_id: str) -> bool:
+        """Deactivate a target while retaining a tombstone for seed imports."""
+
+        target_id = target_id.strip()
+        self._validate_subscription_target(target_type, target_id)
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            was_active = connection.execute(
+                """
+                SELECT 1 FROM subscriptions
+                WHERE target_type = ? AND target_id = ? AND active = 1
+                """,
+                (target_type, target_id),
+            ).fetchone() is not None
+            connection.execute(
+                """
+                INSERT INTO subscriptions(
+                    target_type, target_id, active, source, created_at, updated_at
+                ) VALUES (?, ?, 0, 'command', ?, ?)
+                ON CONFLICT(target_type, target_id) DO UPDATE SET
+                    active = 0,
+                    source = 'command',
+                    updated_at = excluded.updated_at
+                WHERE subscriptions.active = 1
+                """,
+                (target_type, target_id, now, now),
+            )
+            return was_active
+
+    def list_subscriptions(self) -> list[tuple[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT target_type, target_id
+                FROM subscriptions
+                WHERE active = 1
+                ORDER BY target_type, target_id
+                """
+            ).fetchall()
+        return [(str(row["target_type"]), str(row["target_id"])) for row in rows]
+
+    def has_subscriptions(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM subscriptions WHERE active = 1 LIMIT 1"
+            ).fetchone()
+        return row is not None
 
     def recover_interrupted_jobs(self) -> int:
         with self._connect() as connection:

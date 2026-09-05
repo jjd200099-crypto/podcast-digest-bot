@@ -6,7 +6,7 @@ import logging
 from .config import Settings
 from .feishu import FeishuMessenger
 from .podcast import PodcastService
-from .router import CommandRouter, HelpPlugin, PodcastPlugin
+from .router import CommandRouter, HelpPlugin, PodcastPlugin, SubscriptionPlugin
 from .runtime import NewsOfficerRuntime
 from .store import Store
 from .summarizer import TranscriptSummarizer
@@ -24,7 +24,9 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         max_daily_candidates=settings.max_daily_candidates,
         max_daily_summaries=settings.max_daily_summaries,
     )
-    router = CommandRouter([PodcastPlugin(podcast), HelpPlugin()])
+    router = CommandRouter(
+        [SubscriptionPlugin(store), PodcastPlugin(podcast), HelpPlugin()]
+    )
     return NewsOfficerRuntime(settings, store, messenger, router, podcast)
 
 
