@@ -332,7 +332,14 @@ def walk_objects(value: Any) -> Iterable[Mapping[str, Any]]:
 
 
 def has_named_service(payload: Any, service_name: str) -> bool:
-    return any(str(item.get("name", "")) == service_name for item in walk_objects(payload))
+    return find_service_id(payload, service_name) is not None
+
+
+def find_service_id(payload: Any, service_name: str) -> str | None:
+    for item in walk_objects(payload):
+        if str(item.get("name", "")) == service_name and item.get("id"):
+            return str(item["id"])
+    return None
 
 
 def has_mount_path(payload: Any, mount_path: str) -> bool:
@@ -413,15 +420,25 @@ def ensure_project(railway: Railway, args: argparse.Namespace) -> None:
         railway.run(["status", "--json"], quiet=True)
 
 
-def ensure_service(railway: Railway, service_name: str) -> None:
+def ensure_service(railway: Railway, service_name: str) -> str:
     services = parse_json_output(railway.run(["service", "list", "--json"], quiet=True))
-    if not has_named_service(services, service_name):
+    service_id = find_service_id(services, service_name)
+    if service_id is None:
         railway.run(["add", "--service", service_name, "--json"])
+        services = parse_json_output(
+            railway.run(["service", "list", "--json"], quiet=True)
+        )
+        service_id = find_service_id(services, service_name)
+    if service_id is None:
+        raise BootstrapError(f"Railway 未返回 service ID：{service_name}")
     railway.run(["service", "link", service_name])
+    return service_id
 
 
-def ensure_volume(railway: Railway, service_name: str) -> None:
-    arguments = ["volume", "--service", service_name]
+def ensure_volume(railway: Railway, service_id: str) -> None:
+    # Railway CLI 5.49 requires the immutable service ID for volume creation;
+    # passing a name can panic inside the CLI even though volume listing works.
+    arguments = ["volume", "--service", service_id]
     volumes = parse_json_output(railway.run([*arguments, "list", "--json"], quiet=True))
     if not has_mount_path(volumes, "/data"):
         railway.run([*arguments, "add", "--mount-path", "/data", "--json"])
@@ -547,8 +564,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             feishu_secret = resolve_lark_secret(app, config_path)
             openai_secret = read_openai_key(args)
             ensure_project(railway, args)
-            ensure_service(railway, args.service)
-            ensure_volume(railway, args.service)
+            service_id = ensure_service(railway, args.service)
+            ensure_volume(railway, service_id)
             set_variables(
                 railway,
                 args.service,

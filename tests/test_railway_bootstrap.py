@@ -14,6 +14,7 @@ from scripts.bootstrap_railway import (
     Railway,
     decode_security_password,
     default_lark_config_path,
+    find_service_id,
     has_mount_path,
     has_named_service,
     runtime_variables,
@@ -89,6 +90,7 @@ class RailwayPayloadTests(unittest.TestCase):
             {"id": "vol_1", "service": {"id": "svc_1"}, "mountPath": "/data"}
         ]
         self.assertTrue(has_named_service(services, "news-officer"))
+        self.assertEqual(find_service_id(services, "news-officer"), "svc_1")
         self.assertTrue(has_mount_path(volumes, "/data"))
         self.assertFalse(has_mount_path(volumes, "/cache"))
 
