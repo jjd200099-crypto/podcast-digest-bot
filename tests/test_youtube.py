@@ -96,7 +96,10 @@ agents are changing software
 
     @patch("news_officer.youtube.requests.get")
     @patch("news_officer.youtube.run")
-    def test_video_metadata_falls_back_to_official_oembed(self, mock_run, mock_get):
+    @patch("news_officer.youtube._YTDLP_DISABLED_UNTIL", 0)
+    def test_video_metadata_falls_back_to_official_oembed(
+        self, mock_run, mock_get
+    ):
         mock_run.side_effect = subprocess.CalledProcessError(1, ["yt-dlp"])
         response = mock_get.return_value
         response.status_code = 200
@@ -120,6 +123,52 @@ agents are changing software
         self.assertIsNone(episode.duration_seconds)
         self.assertIn("www.youtube.com/oembed?", mock_get.call_args.args[0])
         self.assertFalse(mock_get.call_args.kwargs["allow_redirects"])
+
+    @patch("news_officer.youtube.requests.get")
+    @patch("news_officer.youtube.run")
+    @patch("news_officer.youtube._YTDLP_DISABLED_UNTIL", 0)
+    def test_metadata_circuit_breaker_skips_repeated_blocked_player_requests(
+        self, mock_run, mock_get
+    ):
+        mock_run.side_effect = subprocess.TimeoutExpired("yt-dlp", 25)
+        response = mock_get.return_value
+        response.status_code = 200
+        response.content = b"{}"
+        response.url = "https://www.youtube.com/oembed"
+        response.json.return_value = {
+            "type": "video",
+            "title": "Sam Altman",
+            "author_name": "David Senra",
+        }
+
+        video_metadata("https://youtu.be/kG8AoExkX40")
+        video_metadata("https://youtu.be/kG8AoExkX40")
+
+        mock_run.assert_called_once()
+        self.assertEqual(mock_get.call_count, 2)
+
+    @patch("news_officer.youtube.requests.get")
+    @patch("news_officer.youtube.run")
+    @patch("news_officer.youtube._YTDLP_DISABLED_UNTIL", 0)
+    def test_one_video_failure_does_not_open_the_global_circuit(
+        self, mock_run, mock_get
+    ):
+        mock_run.side_effect = subprocess.CalledProcessError(1, ["yt-dlp"])
+        response = mock_get.return_value
+        response.status_code = 200
+        response.content = b"{}"
+        response.url = "https://www.youtube.com/oembed"
+        response.json.return_value = {
+            "type": "video",
+            "title": "Unavailable video",
+            "author_name": "Example",
+        }
+
+        video_metadata("https://youtu.be/kG8AoExkX40")
+        video_metadata("https://youtu.be/kG8AoExkX40")
+
+        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(mock_get.call_count, 2)
 
     @patch("news_officer.youtube.run")
     def test_latest_videos_ignores_channel_tabs(self, mock_run):

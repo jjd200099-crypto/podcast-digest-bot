@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
@@ -30,6 +31,8 @@ YOUTUBE_FEED_URL = "https://www.youtube.com/feeds/videos.xml"
 YOUTUBE_EXTRACTOR_ARGS = (
     "youtube:player_client=web_embedded;player_skip=webpage;skip=translated_subs"
 )
+YTDLP_FAILURE_COOLDOWN_SECONDS = 15 * 60
+_YTDLP_DISABLED_UNTIL = 0.0
 VTT_CUE_RE = re.compile(
     r"(?m)^(?P<start>(?:\d{2}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+"
     r"(?P<end>(?:\d{2}:)?\d{2}:\d{2}\.\d{3})"
@@ -43,6 +46,15 @@ def run(*args: str, timeout_seconds: int = 180) -> str:
         stderr=subprocess.STDOUT,
         timeout=timeout_seconds,
     )
+
+
+def _yt_dlp_circuit_open() -> bool:
+    return time.monotonic() < _YTDLP_DISABLED_UNTIL
+
+
+def _mark_yt_dlp_failure() -> None:
+    global _YTDLP_DISABLED_UNTIL
+    _YTDLP_DISABLED_UNTIL = time.monotonic() + YTDLP_FAILURE_COOLDOWN_SECONDS
 
 
 def is_youtube_url(url: str) -> bool:
@@ -142,30 +154,31 @@ def video_metadata(url: str) -> Episode:
         raise ValueError("Only public YouTube URLs are accepted by this source")
     if youtube_video_id(url) is None:
         raise ValueError("Expected a public YouTube video URL")
-    try:
-        data = json.loads(
-            run(
-                sys.executable,
-                "-m",
-                "yt_dlp",
-                "--no-playlist",
-                "--skip-download",
-                "--ignore-no-formats-error",
-                "--extractor-args",
-                YOUTUBE_EXTRACTOR_ARGS,
-                "--dump-single-json",
-                url,
-                timeout_seconds=90,
+    if not _yt_dlp_circuit_open():
+        try:
+            data = json.loads(
+                run(
+                    sys.executable,
+                    "-m",
+                    "yt_dlp",
+                    "--no-playlist",
+                    "--skip-download",
+                    "--ignore-no-formats-error",
+                    "--extractor-args",
+                    YOUTUBE_EXTRACTOR_ARGS,
+                    "--dump-single-json",
+                    url,
+                    timeout_seconds=25,
+                )
             )
-        )
-        return episode_from_metadata(data, url)
-    except (
-        json.JSONDecodeError,
-        OSError,
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-    ):
-        return _oembed_metadata(url)
+            return episode_from_metadata(data, url)
+        except (OSError, subprocess.TimeoutExpired):
+            _mark_yt_dlp_failure()
+        except (json.JSONDecodeError, subprocess.CalledProcessError):
+            # A single private, removed, or region-blocked video must not
+            # disable extraction for every other candidate in the digest.
+            pass
+    return _oembed_metadata(url)
 
 
 def normalize_channel_videos_url(channel: str) -> str:
@@ -438,6 +451,8 @@ class YouTubeTranscriptProvider:
     def fetch(self, episode: Episode) -> Transcript | None:
         if not is_youtube_url(episode.url):
             return None
+        if _yt_dlp_circuit_open():
+            return None
         with tempfile.TemporaryDirectory() as temp_dir:
             target = str(Path(temp_dir) / "%(id)s.%(ext)s")
             try:
@@ -467,8 +482,12 @@ class YouTubeTranscriptProvider:
                     "-o",
                     target,
                     episode.url,
+                    timeout_seconds=60,
                 )
-            except (TypeError, ValueError):
+            except (OSError, subprocess.TimeoutExpired):
+                _mark_yt_dlp_failure()
+                return None
+            except (subprocess.CalledProcessError, TypeError, ValueError):
                 return None
             files = [
                 *Path(temp_dir).glob("*.json3"),
