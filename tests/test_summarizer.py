@@ -7,9 +7,26 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from news_officer.models import Episode, Transcript
-from news_officer.summarizer import TranscriptSummarizer
+from news_officer.summarizer import SummaryFormatError, TranscriptSummarizer
 
-VALID_SUMMARY = "\n".join(f"{number}. 洞察 {number}" for number in range(1, 11))
+VALID_TAKEAWAY = (
+    "核心判断来自完整文字稿中的明确论证，保留最关键数字或因果依据，"
+    "删除背景铺垫与重复表达，使这一条结论可以直接用于后续投资判断，"
+    "不需要重新查找原文上下文。"
+)
+
+
+def _summary(overrides=None):
+    overrides = overrides or {}
+    lines = ["节目：测试节目", "", "### 核心判断"]
+    for number in range(1, 11):
+        if number in {5, 8}:
+            lines.extend(["", f"### 主题{number}"])
+        lines.append(f"{number}. {overrides.get(number, VALID_TAKEAWAY)}")
+    return "\n".join(lines)
+
+
+VALID_SUMMARY = _summary()
 
 
 class FakeResponses:
@@ -45,6 +62,10 @@ class SummarizerTests(unittest.TestCase):
         self.assertEqual(result, VALID_SUMMARY)
         self.assertIn("不受信任", responses.kwargs["instructions"])
         self.assertIn("恰好精选 10 条", responses.kwargs["instructions"])
+        self.assertIn("70–100 个中文字符", responses.kwargs["instructions"])
+        self.assertIn("120 个可见字符", responses.kwargs["instructions"])
+        self.assertIn("最多 2 句话", responses.kwargs["instructions"])
+        self.assertIn("不铺背景、不堆多个例子", responses.kwargs["instructions"])
         self.assertIn("BEGIN UNTRUSTED TRANSCRIPT", responses.kwargs["input"])
         self.assertNotIn(
             transcript.text,
@@ -128,6 +149,80 @@ class SummarizerTests(unittest.TestCase):
                 Episode("id", "Title", "https://example.com", "Show"), transcript
             )
         self.assertEqual(responses.calls, [])
+
+    def test_120_visible_characters_with_markdown_are_accepted(self):
+        body = "**" + "字" * 118 + "**[证据](https://example.com/transcript)"
+        summary = _summary({1: body})
+        responses = FakeResponses([summary])
+        summarizer = object.__new__(TranscriptSummarizer)
+        summarizer.client = SimpleNamespace(responses=responses)
+        summarizer.model = "test-model"
+        transcript = Transcript("full", "official", "https://example.com", True)
+
+        result = summarizer.summarize(
+            Episode("id", "Title", "https://example.com", "Show"), transcript
+        )
+
+        self.assertEqual(result, summary)
+        self.assertEqual(len(responses.calls), 1)
+
+    def test_common_topic_heading_styles_are_accepted(self):
+        summary = (
+            VALID_SUMMARY.replace("### 主题5", "【人才密度】")
+            .replace("### 主题8", "**商业模式**")
+            .replace("**商业模式**\n8. ", "**商业模式**\n---\n8. ")
+        )
+        responses = FakeResponses([summary])
+        summarizer = object.__new__(TranscriptSummarizer)
+        summarizer.client = SimpleNamespace(responses=responses)
+        summarizer.model = "test-model"
+        transcript = Transcript("full", "official", "https://example.com", True)
+
+        result = summarizer.summarize(
+            Episode("id", "Title", "https://example.com", "Show"), transcript
+        )
+
+        self.assertEqual(result, summary)
+        self.assertEqual(len(responses.calls), 1)
+
+    def test_length_or_continuation_violations_are_rewritten_once(self):
+        invalid_bodies = {
+            "overlong": "字" * 121,
+            "wrapped_prose": "第一行结论。\n第二行续写不能绕过字数校验。",
+            "sub_bullet": "第一行结论。\n- 不允许另起补充要点。",
+        }
+        for label, body in invalid_bodies.items():
+            with self.subTest(label=label):
+                responses = FakeResponses([_summary({1: body}), VALID_SUMMARY])
+                summarizer = object.__new__(TranscriptSummarizer)
+                summarizer.client = SimpleNamespace(responses=responses)
+                summarizer.model = "test-model"
+                transcript = Transcript(
+                    "full", "official", "https://example.com", True
+                )
+
+                result = summarizer.summarize(
+                    Episode("id", "Title", "https://example.com", "Show"), transcript
+                )
+
+                self.assertEqual(result, VALID_SUMMARY)
+                self.assertEqual(len(responses.calls), 2)
+                self.assertIn("单行", responses.calls[1]["input"])
+                self.assertIn("不得超过 120 个可见字符", responses.calls[1]["input"])
+
+    def test_overlong_takeaway_is_never_returned_after_rewrite_fails(self):
+        invalid = _summary({10: "字" * 121})
+        responses = FakeResponses([invalid, invalid])
+        summarizer = object.__new__(TranscriptSummarizer)
+        summarizer.client = SimpleNamespace(responses=responses)
+        summarizer.model = "test-model"
+        transcript = Transcript("full", "official", "https://example.com", True)
+
+        with self.assertRaisesRegex(SummaryFormatError, "single-line"):
+            summarizer.summarize(
+                Episode("id", "Title", "https://example.com", "Show"), transcript
+            )
+        self.assertEqual(len(responses.calls), 2)
 
 
 if __name__ == "__main__":
