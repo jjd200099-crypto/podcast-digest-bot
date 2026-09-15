@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
@@ -38,6 +39,7 @@ class Settings:
     max_daily_summaries: int
     max_daily_candidates: int
     lookback_hours: int
+    manual_digest_id: str
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -82,6 +84,17 @@ class Settings:
         if legacy_user_id and legacy_user_id not in user_ids:
             user_ids += (legacy_user_id,)
 
+        manual_digest_id = os.environ.get(
+            "NEWS_OFFICER_MANUAL_DIGEST_ID", ""
+        ).strip()
+        if manual_digest_id and not re.fullmatch(
+            r"[A-Za-z0-9._-]{1,80}", manual_digest_id
+        ):
+            raise ValueError(
+                "NEWS_OFFICER_MANUAL_DIGEST_ID must contain only letters, "
+                "numbers, dot, underscore, or hyphen"
+            )
+
         return cls(
             feishu_app_id=os.environ["FEISHU_APP_ID"].strip(),
             feishu_app_secret=os.environ["FEISHU_APP_SECRET"].strip(),
@@ -102,4 +115,5 @@ class Settings:
             lookback_hours=max(
                 1, int(os.environ.get("NEWS_OFFICER_LOOKBACK_HOURS", "72"))
             ),
+            manual_digest_id=manual_digest_id,
         )

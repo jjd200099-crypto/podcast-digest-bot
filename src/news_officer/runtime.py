@@ -314,12 +314,40 @@ class NewsOfficerRuntime:
         if await asyncio.to_thread(self.store.analysis_complete, job.key):
             return
 
-        results = await asyncio.to_thread(self.podcast_service.build_daily)
+        try:
+            results = await asyncio.to_thread(self.podcast_service.build_daily)
+        except Exception:
+            # A broken source scan is not an empty digest. Persist and deliver a
+            # single idempotent warning while leaving the job retryable.
+            await asyncio.to_thread(
+                self._ensure_broadcast,
+                job,
+                "daily:scan-failure",
+                (
+                    "今日播客扫描暂未完成：节目源或文字稿服务暂时不可访问。"
+                    "本次不会判定为“无更新”，系统将自动重试。"
+                ),
+                f"{job.key}:scan-failure",
+            )
+            await self._drain_outbox(job)
+            raise
         failures = sum(item.status == "failed" for item in results)
         await asyncio.to_thread(self._persist_daily_items, job, results)
         persisted = await asyncio.to_thread(
             self._prepare_daily_outbox_and_terminal_states, job
         )
+
+        if failures:
+            await asyncio.to_thread(
+                self._ensure_broadcast,
+                job,
+                "daily:candidate-failure",
+                (
+                    f"今日有 {failures} 个节目源或候选节目处理失败，扫描结果可能不完整。"
+                    "失败项已保留，系统将自动重试。"
+                ),
+                f"{job.key}:candidate-failure",
+            )
 
         if not failures:
             had_summary = any(item.status == "summarized" for item in persisted)
@@ -375,16 +403,36 @@ class NewsOfficerRuntime:
             local_now = datetime.now(self.settings.timezone)
             has_subscribers = await asyncio.to_thread(self.store.has_subscriptions)
             if has_subscribers and local_now.time() >= self.settings.daily_time:
-                key = f"daily:{local_now.date().isoformat()}"
-                inserted = await asyncio.to_thread(
-                    self.store.enqueue,
-                    key,
-                    "daily",
-                    {"scheduled_for": local_now.isoformat()},
-                )
-                if inserted:
-                    logger.info("Queued daily digest %s", key)
-                    self._wake_worker("daily")
+                jobs = [
+                    (
+                        f"daily:{local_now.date().isoformat()}",
+                        {"scheduled_for": local_now.isoformat()},
+                    )
+                ]
+                # A one-time backfill is explicit operator state, not coupled
+                # to a code version. Keeping the ID stable makes it idempotent
+                # across deploys and prevents accidental same-day re-sends.
+                manual_digest_id = self.settings.manual_digest_id
+                if manual_digest_id:
+                    jobs.append(
+                        (
+                            f"daily:manual:{manual_digest_id}",
+                            {
+                                "scheduled_for": local_now.isoformat(),
+                                "manual_digest_id": manual_digest_id,
+                            },
+                        )
+                    )
+                for key, payload in jobs:
+                    inserted = await asyncio.to_thread(
+                        self.store.enqueue,
+                        key,
+                        "daily",
+                        payload,
+                    )
+                    if inserted:
+                        logger.info("Queued daily digest %s", key)
+                        self._wake_worker("daily")
             await asyncio.sleep(30)
 
     async def run(self) -> None:
@@ -405,7 +453,7 @@ class NewsOfficerRuntime:
             asyncio.create_task(self.channel.connect(), name="feishu-channel"),
         ]
         try:
-            logger.info("新闻官 is connecting to Feishu over WebSocket")
+            logger.info("情报官 is connecting to Feishu over WebSocket")
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             # More than one task can finish in the same event-loop tick. Surface
             # any real failure before reporting a merely unexpected clean stop.

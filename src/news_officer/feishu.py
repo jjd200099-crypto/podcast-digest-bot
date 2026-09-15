@@ -13,7 +13,7 @@ import requests
 
 from .models import OutboxItem
 
-BRAND_HEADER = "📰 新闻官｜每日播客情报"
+BRAND_HEADER = "🎧 情报官｜每日播客情报"
 FEISHU_API = "https://open.feishu.cn/open-apis"
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)]\((https?://[^\s)]+)\)")
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}

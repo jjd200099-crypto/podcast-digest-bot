@@ -30,7 +30,7 @@ args = parse_args()
 result = lark.register_app(
     on_qr_code=show_confirmation,
     app_preset={
-        "name": "新闻官",
+        "name": "情报官",
         "desc": "通过飞书收发播客与科技情报，分析和存储由独立云服务完成。",
     },
     addons={
@@ -72,7 +72,7 @@ subprocess.run(
 )
 
 user_info = result.get("user_info") or {}
-print(f"新闻官应用已创建：{app_id}")
+print(f"情报官应用已创建：{app_id}")
 if user_info.get("open_id"):
     print(f"创建者 open_id：{user_info['open_id']}")
 print("App Secret 已由 lark-cli 安全存入系统钥匙串，未显示明文。")

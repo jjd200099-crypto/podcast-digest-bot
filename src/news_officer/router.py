@@ -69,7 +69,7 @@ class HelpPlugin:
 
     def handle(self, text: str, message: IncomingMessage) -> PluginResponse:
         message = (
-            "我是新闻官。可用指令：\n\n"
+            "我是情报官。可用指令：\n\n"
             "- 订阅：私聊中为你订阅日报；群聊中 @我，可为本群订阅。\n"
             "- 退订：取消当前私聊或当前群的日报。\n"
             "- 帮助：查看这份说明。\n\n"
@@ -105,7 +105,7 @@ class SubscriptionPlugin:
         target = self._target(message)
         if target is None:
             return PluginResponse(
-                ("无法确认当前对话类型，请在与新闻官的私聊中发送，或在群聊中 @新闻官。",)
+                ("无法确认当前对话类型，请在与情报官的私聊中发送，或在群聊中 @情报官。",)
             )
         target_type, target_id, label = target
         command = clean_text(text)
@@ -113,13 +113,13 @@ class SubscriptionPlugin:
             changed = self.store.add_subscription(target_type, target_id)
             if changed:
                 return PluginResponse(
-                    (f"订阅成功。新闻官会按设定时间向{label}发送每日播客情报。",)
+                    (f"订阅成功。情报官会按设定时间向{label}发送每日播客情报。",)
                 )
             return PluginResponse((f"{label}已经订阅每日播客情报。",))
 
         changed = self.store.remove_subscription(target_type, target_id)
         if changed:
-            return PluginResponse((f"退订成功。新闻官将不再向{label}发送每日播客情报。",))
+            return PluginResponse((f"退订成功。情报官将不再向{label}发送每日播客情报。",))
         return PluginResponse((f"{label}当前没有订阅每日播客情报。",))
 
 

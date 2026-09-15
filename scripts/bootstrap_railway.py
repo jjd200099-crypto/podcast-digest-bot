@@ -499,7 +499,7 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="安全初始化新闻官的 Railway 项目（默认只预览，不部署）"
+        description="安全初始化情报官的 Railway 项目（默认只预览，不部署）"
     )
     project = parser.add_mutually_exclusive_group()
     project.add_argument("--create-project", action="store_true")

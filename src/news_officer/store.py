@@ -662,23 +662,42 @@ class Store:
     def should_review_episode(
         self, episode_id: str, no_transcript_retry_hours: int = 6
     ) -> bool:
-        """Retry a missing transcript later, while final outcomes remain deduped."""
+        """Return whether an unseen or transiently incomplete episode is due."""
+        return (
+            self.episode_review_state(
+                episode_id,
+                no_transcript_retry_hours=no_transcript_retry_hours,
+            )
+            is not None
+        )
+
+    def episode_review_state(
+        self, episode_id: str, no_transcript_retry_hours: int = 6
+    ) -> str | None:
+        """Classify an episode as new, retryable now, or not currently due.
+
+        ``unverified_date`` is a transient metadata failure just like a missing
+        transcript. Treating it as final permanently hid episodes when YouTube
+        returned only partial metadata during one scan.
+        """
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT result, checked_at FROM episodes WHERE episode_id = ?",
                 (episode_id,),
             ).fetchone()
         if row is None:
-            return True
-        if row["result"] != "no_transcript":
-            return False
+            return "new"
+        if row["result"] not in {"no_transcript", "unverified_date"}:
+            return None
         try:
             checked_at = datetime.fromisoformat(str(row["checked_at"]))
         except ValueError:
-            return True
-        return datetime.now(UTC) - checked_at >= timedelta(
+            return "retry"
+        if datetime.now(UTC) - checked_at >= timedelta(
             hours=no_transcript_retry_hours
-        )
+        ):
+            return "retry"
+        return None
 
     def record_episode(self, episode: Episode, result: str) -> None:
         published_at = (

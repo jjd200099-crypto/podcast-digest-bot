@@ -16,6 +16,12 @@ from .colossus import ColossusOfficialTranscriptProvider
 from .founders import DavidSenraOfficialTranscriptProvider
 from .models import AnalysisResult, DailyItem, Episode, Transcript
 from .official import DwarkeshOfficialTranscriptProvider
+from .rss import (
+    RSSDeclaredTranscriptProvider,
+    SubstackApprovedTranscriptProvider,
+    attach_youtube_fallbacks,
+    latest_rss_episodes,
+)
 from .sequoia import SequoiaOfficialTranscriptProvider
 from .store import Store
 from .youtube import (
@@ -112,6 +118,9 @@ class YouTubeFeedSource:
     url: str
     include_keywords: tuple[str, ...] = ()
     scan_depth: int = 4
+    name: str = ""
+    rss_url: str = ""
+    priority: str = "B"
 
     def accepts(self, episode: Episode) -> bool:
         if not self.include_keywords:
@@ -135,11 +144,10 @@ def load_youtube_sources(path: Path) -> list[YouTubeFeedSource]:
         ]
     sources: list[YouTubeFeedSource] = []
     for source in data.get("sources") or []:
-        if (
-            source.get("enabled", True)
-            and source.get("type") == "youtube"
-            and source.get("url")
-        ):
+        if source.get("enabled", True) and source.get("type") in {
+            "youtube",
+            "rss",
+        } and (source.get("url") or source.get("rss_url")):
             keywords = tuple(
                 str(keyword).strip()
                 for keyword in source.get("include_keywords") or ()
@@ -149,11 +157,17 @@ def load_youtube_sources(path: Path) -> list[YouTubeFeedSource]:
                 scan_depth = int(source.get("scan_depth", 4))
             except (TypeError, ValueError):
                 scan_depth = 4
+            priority = str(source.get("priority") or "B").strip().upper()
+            if priority not in {"A", "B"}:
+                priority = "B"
             sources.append(
                 YouTubeFeedSource(
-                    str(source["url"]),
-                    keywords,
-                    min(50, max(1, scan_depth)),
+                    url=str(source.get("url") or ""),
+                    include_keywords=keywords,
+                    scan_depth=min(50, max(1, scan_depth)),
+                    name=str(source.get("name") or ""),
+                    rss_url=str(source.get("rss_url") or ""),
+                    priority=priority,
                 )
             )
     return sources
@@ -162,7 +176,7 @@ def load_youtube_sources(path: Path) -> list[YouTubeFeedSource]:
 def load_youtube_feeds(path: Path) -> list[str]:
     """Compatibility helper for callers that only need source URLs."""
 
-    return [source.url for source in load_youtube_sources(path)]
+    return [source.url for source in load_youtube_sources(path) if source.url]
 
 
 def _interleave(groups: Iterable[Sequence[Episode]]) -> list[Episode]:
@@ -176,6 +190,92 @@ def _interleave(groups: Iterable[Sequence[Episode]]) -> list[Episode]:
                 output.append(group[index])
         index += 1
     return output
+
+
+def _weighted_priority_merge(
+    priority_a: Sequence[Episode], priority_b: Sequence[Episode]
+) -> list[Episode]:
+    """Merge two tiers at a 2:1 ratio so B can never be starved by A."""
+
+    output: list[Episode] = []
+    a_index = 0
+    b_index = 0
+    while a_index < len(priority_a) or b_index < len(priority_b):
+        for _ in range(2):
+            if a_index < len(priority_a):
+                output.append(priority_a[a_index])
+                a_index += 1
+        if b_index < len(priority_b):
+            output.append(priority_b[b_index])
+            b_index += 1
+        if a_index >= len(priority_a) and b_index < len(priority_b):
+            output.extend(priority_b[b_index:])
+            break
+    return output
+
+
+def _rotate_source_groups(
+    groups: list[list[Episode]], *, day_number: int
+) -> list[list[Episode]]:
+    """Deterministically rotate first consideration across calendar days."""
+
+    if len(groups) < 2:
+        return groups
+    offset = day_number % len(groups)
+    return [*groups[offset:], *groups[:offset]]
+
+
+def _rss_with_unmatched_youtube(
+    rss_episodes: list[Episode], youtube_episodes: list[Episode]
+) -> list[Episode]:
+    """Keep merged RSS episodes and every unconsumed YouTube release."""
+
+    episodes = attach_youtube_fallbacks(rss_episodes, youtube_episodes)
+    oldest = datetime.min.replace(tzinfo=UTC)
+    return sorted(
+        episodes,
+        key=lambda episode: episode.published_at or oldest,
+        reverse=True,
+    )
+
+
+def _episode_dedupe_keys(episode: Episode) -> set[str]:
+    """Build conservative cross-source identities for syndicated episodes."""
+
+    keys = {f"id:{episode.id}"}
+    feed_url = str(episode.metadata.get("rss_feed_url") or "").strip().rstrip("/")
+    for value in (
+        episode.metadata.get("audio_url"),
+        episode.metadata.get("youtube_url"),
+        episode.url,
+    ):
+        normalized_url = str(value or "").strip()
+        if normalized_url and normalized_url.rstrip("/") != feed_url:
+            keys.add(f"url:{normalized_url}")
+    normalized_title = " ".join(
+        re.findall(r"[a-z0-9]+", episode.title.casefold())
+    )
+    if episode.published_at and len(normalized_title) >= 12:
+        published_day = episode.published_at.astimezone(UTC).date().isoformat()
+        keys.add(f"title-day:{normalized_title}:{published_day}")
+    return keys
+
+
+def _transcript_preference(episode: Episode, resolver: TranscriptResolver) -> int:
+    """Prefer representations that expose a first-party complete transcript."""
+
+    score = 0
+    if episode.metadata.get("rss_transcripts"):
+        score += 40
+    if resolver.supports_url(episode.url):
+        score += 30
+    if episode.metadata.get("youtube_url") or is_youtube_url(episode.url):
+        score += 20
+    if episode.duration_seconds:
+        score += 2
+    if episode.published_at:
+        score += 1
+    return score
 
 
 class PodcastService:
@@ -194,6 +294,8 @@ class PodcastService:
         self.summarizer = summarizer
         self.transcript_resolver = transcript_resolver or TranscriptResolver(
             [
+                RSSDeclaredTranscriptProvider(),
+                SubstackApprovedTranscriptProvider(),
                 DavidSenraOfficialTranscriptProvider(),
                 DwarkeshOfficialTranscriptProvider(),
                 SequoiaOfficialTranscriptProvider(),
@@ -204,6 +306,7 @@ class PodcastService:
         self.lookback_hours = lookback_hours
         self.max_daily_candidates = max_daily_candidates
         self.max_daily_summaries = max_daily_summaries
+        self._last_failed_feeds: tuple[str, ...] = ()
 
     def supports_url(self, url: str) -> bool:
         return is_youtube_url(url) or self.transcript_resolver.supports_url(url)
@@ -212,18 +315,29 @@ class PodcastService:
     def _merge_episode(discovered: Episode, enriched: Episode) -> Episode:
         """Keep trustworthy feed fields when a fallback only returns partial metadata."""
 
+        rss_discovered = bool(discovered.metadata.get("rss_feed_url"))
         return Episode(
-            id=enriched.id or discovered.id,
-            title=enriched.title or discovered.title,
-            url=enriched.url or discovered.url,
-            show=enriched.show or discovered.show,
+            id=discovered.id if rss_discovered else enriched.id or discovered.id,
+            title=discovered.title if rss_discovered else enriched.title or discovered.title,
+            url=discovered.url if rss_discovered else enriched.url or discovered.url,
+            show=discovered.show if rss_discovered else enriched.show or discovered.show,
             duration_seconds=(
-                enriched.duration_seconds
+                discovered.duration_seconds
+                if rss_discovered and discovered.duration_seconds is not None
+                else enriched.duration_seconds
                 if enriched.duration_seconds is not None
                 else discovered.duration_seconds
             ),
-            duration_string=enriched.duration_string or discovered.duration_string,
-            published_at=enriched.published_at or discovered.published_at,
+            duration_string=(
+                discovered.duration_string
+                if rss_discovered and discovered.duration_string
+                else enriched.duration_string or discovered.duration_string
+            ),
+            published_at=(
+                discovered.published_at
+                if rss_discovered and discovered.published_at is not None
+                else enriched.published_at or discovered.published_at
+            ),
             metadata={**discovered.metadata, **enriched.metadata},
         )
 
@@ -302,56 +416,245 @@ class PodcastService:
             message=self.summarizer.summarize(episode, transcript),
         )
 
-    def discover_daily_candidates(self) -> list[Episode]:
-        groups: list[list[Episode]] = []
-        failed_feeds: list[str] = []
+    def discover_daily_candidates(
+        self, now: datetime | None = None
+    ) -> list[Episode]:
+        now = now or datetime.now(UTC)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        cutoff = now.astimezone(UTC) - timedelta(hours=self.lookback_hours)
+        groups_by_priority: dict[str, list[list[Episode]]] = {"A": [], "B": []}
+        failed_sources: list[str] = []
         sources = load_youtube_sources(self.feeds_path)
         for source in sources:
-            try:
-                groups.append(
-                    [
+            youtube_episodes: list[Episode] = []
+            rss_episodes: list[Episode] = []
+            channel_with_results = 0
+            if source.url:
+                try:
+                    discovered_youtube = latest_videos(
+                        source.url, playlist_end=source.scan_depth
+                    )
+                    if discovered_youtube:
+                        channel_with_results += 1
+                    youtube_episodes = [
                         episode
-                        for episode in latest_videos(
-                            source.url, playlist_end=source.scan_depth
-                        )
+                        for episode in discovered_youtube
                         if source.accepts(episode)
                     ]
+                except Exception as error:  # noqa: BLE001 - isolate source failures
+                    logger.warning(
+                        "Optional YouTube discovery failed for %s: %s",
+                        source.name or source.url,
+                        error,
+                    )
+            if source.rss_url:
+                try:
+                    discovered_rss = latest_rss_episodes(
+                        source.name or source.url,
+                        source.rss_url,
+                        limit=source.scan_depth,
+                    )
+                    if discovered_rss:
+                        channel_with_results += 1
+                    rss_episodes = [
+                        episode
+                        for episode in discovered_rss
+                        if source.accepts(episode)
+                    ]
+                except Exception as error:  # noqa: BLE001 - isolate source failures
+                    logger.warning(
+                        "RSS discovery failed for %s: %s",
+                        source.name or source.rss_url,
+                        error,
+                    )
+            if rss_episodes:
+                source_episodes = _rss_with_unmatched_youtube(
+                    rss_episodes, youtube_episodes
                 )
-            except Exception as error:  # noqa: BLE001 - one feed must not block the digest
-                failed_feeds.append(source.url)
-                logger.warning("Skipping unavailable feed %s: %s", source.url, error)
-        unique: dict[str, Episode] = {}
-        for episode in _interleave(groups):
-            if (
-                episode.id not in unique
-                and self.store.should_review_episode(episode.id)
-            ):
-                unique[episode.id] = episode
-        successful_feeds = len(sources) - len(failed_feeds)
-        if failed_feeds and (
-            not unique or len(failed_feeds) >= successful_feeds
+            elif youtube_episodes:
+                source_episodes = youtube_episodes
+            else:
+                source_episodes = []
+            if source_episodes:
+                groups_by_priority[source.priority].append(
+                    [
+                        replace(
+                            episode,
+                            metadata={
+                                **episode.metadata,
+                                "source_priority": source.priority,
+                            },
+                        )
+                        for episode in source_episodes
+                    ]
+                )
+            if channel_with_results == 0:
+                failed_sources.append(
+                    source.name or source.rss_url or source.url
+                )
+                logger.warning(
+                    "All discovery channels returned no usable feed for %s",
+                    failed_sources[-1],
+                )
+
+        new_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
+        retry_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
+        all_episodes = [
+            episode
+            for priority_groups in groups_by_priority.values()
+            for source_group in priority_groups
+            for episode in source_group
+        ]
+        identity_members: dict[str, list[Episode]] = {}
+        preferred_by_identity: dict[str, Episode] = {}
+        for episode in all_episodes:
+            for identity in _episode_dedupe_keys(episode):
+                identity_members.setdefault(identity, []).append(episode)
+                preferred = preferred_by_identity.get(identity)
+                if preferred is None or _transcript_preference(
+                    episode, self.transcript_resolver
+                ) > _transcript_preference(preferred, self.transcript_resolver):
+                    preferred_by_identity[identity] = episode
+
+        seen: set[str] = set()
+        for priority in ("A", "B"):
+            for source_group in groups_by_priority[priority]:
+                source_new: list[Episode] = []
+                source_retry: list[Episode] = []
+                for episode in source_group:
+                    published_at = episode.published_at
+                    if (
+                        published_at is not None
+                        and published_at.tzinfo is not None
+                        and published_at.astimezone(UTC) < cutoff
+                    ):
+                        continue
+                    identity_keys = _episode_dedupe_keys(episode)
+                    if any(
+                        preferred_by_identity[identity] is not episode
+                        for identity in identity_keys
+                    ):
+                        continue
+                    if seen & identity_keys:
+                        continue
+                    aliases = {
+                        member.id
+                        for identity in identity_keys
+                        for member in identity_members.get(identity, ())
+                    }
+                    alias_states = {
+                        alias: self.store.episode_review_state(alias)
+                        for alias in aliases
+                    }
+                    # A final or cooling-down alias means this canonical episode
+                    # must not be resent under a different syndicated ID.
+                    if any(
+                        state is None and self.store.has_episode(alias)
+                        for alias, state in alias_states.items()
+                    ):
+                        continue
+                    if any(state == "retry" for state in alias_states.values()):
+                        review_state = "retry"
+                    else:
+                        review_state = "new"
+                    seen.update(identity_keys)
+                    if review_state == "new":
+                        source_new.append(episode)
+                    elif review_state == "retry":
+                        source_retry.append(episode)
+                if source_new:
+                    new_groups[priority].append(source_new)
+                if source_retry:
+                    retry_groups[priority].append(source_retry)
+
+        candidates: list[Episode] = []
+        # Fresh episodes beat retries globally. Give every configured source a
+        # first slot (A before B), then spend remaining capacity on backlog by
+        # tier. This preserves priority without starving all B sources whenever
+        # the eight high-frequency A feeds each publish multiple episodes.
+        for grouped in (new_groups, retry_groups):
+            rotated = {
+                priority: _rotate_source_groups(
+                    grouped[priority],
+                    day_number=now.date().toordinal(),
+                )
+                for priority in ("A", "B")
+            }
+            first = {
+                priority: [
+                    source_group[0]
+                    for source_group in rotated[priority]
+                    if source_group
+                ]
+                for priority in ("A", "B")
+            }
+            candidates.extend(_weighted_priority_merge(first["A"], first["B"]))
+            rest = {
+                priority: _interleave(
+                    [source_group[1:] for source_group in rotated[priority]]
+                )
+                for priority in ("A", "B")
+            }
+            candidates.extend(_weighted_priority_merge(rest["A"], rest["B"]))
+
+        successful_sources = len(sources) - len(failed_sources)
+        self._last_failed_feeds = tuple(failed_sources)
+        if failed_sources and (
+            not candidates or len(failed_sources) >= successful_sources
         ):
             raise FeedDiscoveryError(
                 "The source scan was unhealthy: "
-                f"{len(failed_feeds)} of {len(sources)} feed(s) failed"
+                f"{len(failed_sources)} of {len(sources)} source(s) failed"
             )
-        return list(unique.values())[: self.max_daily_candidates]
+        # New releases take precedence over older no-transcript/date retries.
+        # Otherwise a backlog from a temporarily blocked provider can consume
+        # the bounded candidate budget and starve newly published episodes.
+        return candidates[: self.max_daily_candidates]
 
     def build_daily(self, now: datetime | None = None) -> list[DailyItem]:
         now = now or datetime.now(UTC)
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
         cutoff = now.astimezone(UTC) - timedelta(hours=self.lookback_hours)
-        results: list[DailyItem] = []
+        candidates = self.discover_daily_candidates(now)
+        results: list[DailyItem] = [
+            DailyItem(
+                Episode(
+                    id=f"source-failure:{source_url}",
+                    title="节目源扫描失败",
+                    url=source_url,
+                    show="订阅源",
+                ),
+                "failed",
+                "feed discovery failed",
+            )
+            for source_url in self._last_failed_feeds
+        ]
         summary_count = 0
-        for discovered in self.discover_daily_candidates():
+        priority_b_summaries = 0
+        reserve_b_slot = self.max_daily_summaries >= 2
+        priority_a_soft_cap = self.max_daily_summaries - int(reserve_b_slot)
+        deferred_priority_a: list[tuple[Episode, Transcript]] = []
+        for discovered in candidates:
             episode = discovered
             try:
                 # Flat playlist metadata often omits dates and duration. Enrich only
                 # the bounded, unseen candidate set instead of every channel item.
-                if episode.published_at is None or episode.duration_seconds is None:
+                youtube_url = (
+                    episode.url
+                    if is_youtube_url(episode.url)
+                    else str(episode.metadata.get("youtube_url") or "")
+                )
+                if (
+                    is_youtube_url(youtube_url)
+                    and (
+                        episode.published_at is None
+                        or episode.duration_seconds is None
+                    )
+                ):
                     episode = self._merge_episode(
-                        episode, video_metadata(episode.url)
+                        episode, video_metadata(youtube_url)
                     )
                 if episode.published_at is None:
                     results.append(DailyItem(episode, "unverified_date"))
@@ -363,12 +666,36 @@ class PodcastService:
                 if transcript is None:
                     results.append(DailyItem(episode, "no_transcript"))
                     continue
+                source_priority = str(
+                    episode.metadata.get("source_priority") or "B"
+                ).upper()
+                if (
+                    reserve_b_slot
+                    and source_priority == "A"
+                    and summary_count >= priority_a_soft_cap
+                    and priority_b_summaries == 0
+                ):
+                    deferred_priority_a.append((episode, transcript))
+                    continue
                 summary = self.summarizer.summarize(episode, transcript)
                 results.append(DailyItem(episode, "summarized", summary))
                 summary_count += 1
+                if source_priority == "B":
+                    priority_b_summaries += 1
                 if summary_count >= self.max_daily_summaries:
                     break
             except Exception as error:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
+        for episode, transcript in deferred_priority_a:
+            if summary_count >= self.max_daily_summaries:
+                break
+            try:
+                summary = self.summarizer.summarize(episode, transcript)
+            except Exception as error:  # noqa: BLE001 - one candidate is isolated
+                logger.exception("Deferred podcast analysis failed for %s", episode.url)
+                results.append(DailyItem(episode, "failed", str(error)))
+                continue
+            results.append(DailyItem(episode, "summarized", summary))
+            summary_count += 1
         return results

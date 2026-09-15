@@ -243,11 +243,15 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(summary_deliveries), 1)
         self.assertEqual(podcast.calls, 2)
+        self.assertIn(
+            "daily:candidate-failure",
+            {item.group_key for item in messenger.delivered.values()},
+        )
         self.assertNotIn(
             "daily:empty", {item.group_key for item in messenger.delivered.values()}
         )
 
-    async def test_unverified_date_is_a_final_skip_state(self):
+    async def test_unverified_date_is_a_retryable_skip_state(self):
         episode = Episode("ep-undated", "Undated", "https://youtu.be/u", "Show")
         podcast = SequencePodcast([DailyItem(episode, "unverified_date")])
         messenger = FakeMessenger()
@@ -257,12 +261,58 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         await runtime(self.store, messenger, podcast)._handle_daily_job(job)
         self.store.complete(job.key)
 
-        self.assertFalse(
+        self.assertTrue(
             self.store.should_review_episode(episode.id, no_transcript_retry_hours=0)
         )
         self.assertIn(
             "daily:empty", {item.group_key for item in messenger.delivered.values()}
         )
+
+    async def test_daily_source_failure_sends_warning_and_remains_retryable(self):
+        podcast = MagicMock()
+        podcast.build_daily.side_effect = TimeoutError("source unavailable")
+        messenger = FakeMessenger()
+        key = "daily:2026-09-08"
+        self.store.enqueue(key, "daily", {})
+        job = self.store.claim_next("daily")
+
+        with self.assertRaisesRegex(TimeoutError, "source unavailable"):
+            await runtime(self.store, messenger, podcast)._handle_daily_job(job)
+
+        groups = {item.group_key for item in messenger.delivered.values()}
+        self.assertIn("daily:scan-failure", groups)
+        self.assertNotIn("daily:empty", groups)
+        self.assertFalse(self.store.analysis_complete(key))
+
+    async def test_daily_source_warning_is_idempotent_across_retries(self):
+        podcast = MagicMock()
+        podcast.build_daily.side_effect = TimeoutError("source unavailable")
+        messenger = FakeMessenger()
+        key = "daily:2026-09-09"
+        self.store.enqueue(key, "daily", {})
+        first = self.store.claim_next("daily")
+        instance = runtime(self.store, messenger, podcast)
+
+        with self.assertRaises(TimeoutError):
+            await instance._handle_daily_job(first)
+        self.store.fail(
+            key,
+            "source unavailable",
+            first.attempts,
+            max_attempts=1,
+            failed_daily_requeue_seconds=0,
+        )
+        self.assertTrue(self.store.enqueue(key, "daily", {}))
+        retry = self.store.claim_next("daily")
+        with self.assertRaises(TimeoutError):
+            await instance._handle_daily_job(retry)
+
+        warnings = [
+            item
+            for item in messenger.attempts
+            if item.group_key == "daily:scan-failure"
+        ]
+        self.assertEqual(len(warnings), 1)
 
     async def test_daily_job_without_subscribers_does_not_call_podcast_service(self):
         podcast = SequencePodcast([])

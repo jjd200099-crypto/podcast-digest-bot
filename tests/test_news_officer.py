@@ -16,6 +16,7 @@ from news_officer.podcast import (
     TranscriptResolver,
     YouTubeFeedSource,
     _interleave,
+    load_youtube_sources,
 )
 from news_officer.router import (
     CommandRouter,
@@ -92,6 +93,22 @@ class NewsOfficerTests(unittest.TestCase):
             )
         )
 
+    def test_unverified_date_is_retryable_after_the_same_cooldown(self):
+        episode = Episode("episode-undated", "Title", "https://youtu.be/x", "Show")
+        self.store.record_episode(episode, "unverified_date")
+
+        self.assertFalse(
+            self.store.should_review_episode(
+                episode.id, no_transcript_retry_hours=6
+            )
+        )
+        self.assertEqual(
+            self.store.episode_review_state(
+                episode.id, no_transcript_retry_hours=0
+            ),
+            "retry",
+        )
+
     def test_environment_seeds_do_not_revive_an_explicit_opt_out(self):
         self.assertEqual(
             self.store.seed_subscriptions(("ou_seed",), ("oc_seed",)), 2
@@ -126,7 +143,7 @@ class NewsOfficerTests(unittest.TestCase):
         group = IncomingMessage(
             message_id="om_group",
             chat_id="oc_group",
-            text="<at user_id=\"bot\">新闻官</at> 订阅",
+            text="<at user_id=\"bot\">情报官</at> 订阅",
             chat_type="group",
             sender_open_id="ou_member",
         )
@@ -170,6 +187,20 @@ class NewsOfficerTests(unittest.TestCase):
         self.assertFalse(
             source.accepts(Episode("3", "Said rates may fall", "https://x", "x"))
         )
+
+    def test_feed_source_priority_is_loaded_and_invalid_values_fall_back(self):
+        feeds = Path(self.temp_dir.name) / "priorities.json"
+        feeds.write_text(
+            '{"sources": ['
+            '{"type": "youtube", "url": "https://youtu.be/a", "priority": "a"},'
+            '{"type": "rss", "rss_url": "https://example.test/rss", '
+            '"priority": "urgent"}'
+            ']}'
+        )
+
+        sources = load_youtube_sources(feeds)
+
+        self.assertEqual([source.priority for source in sources], ["A", "B"])
 
     def test_transcript_resolver_rejects_unverified_text_and_falls_through(self):
         incomplete = StaticTranscriptProvider(

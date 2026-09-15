@@ -449,19 +449,20 @@ class YouTubeTranscriptProvider:
     name = "YouTube captions"
 
     def fetch(self, episode: Episode) -> Transcript | None:
-        if not is_youtube_url(episode.url):
-            return None
-        if _yt_dlp_circuit_open():
+        youtube_url = (
+            episode.url
+            if is_youtube_url(episode.url)
+            else str(episode.metadata.get("youtube_url") or "")
+        )
+        if not is_youtube_url(youtube_url):
             return None
         with tempfile.TemporaryDirectory() as temp_dir:
             target = str(Path(temp_dir) / "%(id)s.%(ext)s")
             try:
-                current = episode
-                if not current.duration_seconds:
-                    current = video_metadata(episode.url)
-                duration_seconds = float(current.duration_seconds or 0)
-                if duration_seconds <= 0:
-                    return None
+                duration_seconds = float(episode.duration_seconds or 0)
+                # Fetch subtitles and duration in one independent extraction.
+                # A metadata-layer circuit breaker must not cascade into a
+                # global caption outage, even when the feed omits duration.
                 run(
                     sys.executable,
                     "-m",
@@ -470,6 +471,7 @@ class YouTubeTranscriptProvider:
                     "--skip-download",
                     "--write-subs",
                     "--write-auto-subs",
+                    "--write-info-json",
                     "--ignore-no-formats-error",
                     "--extractor-args",
                     YOUTUBE_EXTRACTOR_ARGS,
@@ -481,14 +483,21 @@ class YouTubeTranscriptProvider:
                     "1",
                     "-o",
                     target,
-                    episode.url,
+                    youtube_url,
                     timeout_seconds=60,
                 )
-            except (OSError, subprocess.TimeoutExpired):
-                _mark_yt_dlp_failure()
+                if duration_seconds <= 0:
+                    info_files = list(Path(temp_dir).glob("*.info.json"))
+                    if info_files:
+                        info = json.loads(info_files[0].read_text())
+                        duration_seconds = float(info.get("duration") or 0)
+                if duration_seconds <= 0:
+                    return None
+            except (TypeError, ValueError):
                 return None
-            except (subprocess.CalledProcessError, TypeError, ValueError):
-                return None
+            # Extraction/network failures intentionally propagate to the
+            # resolver. They are retryable source errors, not proof that a
+            # complete transcript does not exist.
             files = [
                 *Path(temp_dir).glob("*.json3"),
                 *Path(temp_dir).glob("*.vtt"),
@@ -518,7 +527,7 @@ class YouTubeTranscriptProvider:
                     return Transcript(
                         text=text,
                         source=self.name,
-                        source_url=episode.url,
+                        source_url=youtube_url,
                         verified_complete=True,
                     )
             return None

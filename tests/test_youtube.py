@@ -8,7 +8,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from news_officer.models import Episode
 from news_officer.youtube import (
+    YouTubeTranscriptProvider,
     _clean_vtt,
     _merge_caption_chunks,
     _parse_json3,
@@ -169,6 +171,79 @@ agents are changing software
 
         self.assertEqual(mock_run.call_count, 2)
         self.assertEqual(mock_get.call_count, 2)
+
+    @patch("news_officer.youtube.run")
+    @patch("news_officer.youtube._YTDLP_DISABLED_UNTIL", float("inf"))
+    def test_caption_lookup_ignores_the_metadata_circuit_breaker(self, mock_run):
+        mock_run.return_value = ""
+        episode = Episode(
+            "kG8AoExkX40",
+            "Sam Altman",
+            "https://youtu.be/kG8AoExkX40",
+            "David Senra",
+            duration_seconds=600,
+        )
+
+        transcript = YouTubeTranscriptProvider().fetch(episode)
+
+        self.assertIsNone(transcript)
+        mock_run.assert_called_once()
+
+    @patch("news_officer.youtube.run")
+    @patch("news_officer.youtube._YTDLP_DISABLED_UNTIL", float("inf"))
+    def test_caption_extraction_reads_duration_without_metadata_lookup(self, mock_run):
+        def write_caption_files(*args, **kwargs):
+            temp_dir = Path(args[args.index("-o") + 1]).parent
+            (temp_dir / "kG8AoExkX40.info.json").write_text(
+                json.dumps({"duration": 600})
+            )
+            events = [
+                {
+                    "tStartMs": index * 10_000,
+                    "dDurationMs": 10_000,
+                    "segs": [
+                        {
+                            "utf8": " ".join(
+                                f"word{index}_{word}" for word in range(17)
+                            )
+                        }
+                    ],
+                }
+                for index in range(60)
+            ]
+            (temp_dir / "kG8AoExkX40.en.json3").write_text(
+                json.dumps({"events": events})
+            )
+            return ""
+
+        mock_run.side_effect = write_caption_files
+        episode = Episode(
+            "kG8AoExkX40",
+            "Sam Altman",
+            "https://youtu.be/kG8AoExkX40",
+            "David Senra",
+        )
+
+        transcript = YouTubeTranscriptProvider().fetch(episode)
+
+        self.assertIsNotNone(transcript)
+        self.assertTrue(transcript.verified_complete)
+        mock_run.assert_called_once()
+        self.assertIn("--write-info-json", mock_run.call_args.args)
+
+    @patch("news_officer.youtube.run")
+    def test_caption_timeout_is_a_source_error_not_a_missing_transcript(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired("yt-dlp", 60)
+        episode = Episode(
+            "kG8AoExkX40",
+            "Sam Altman",
+            "https://youtu.be/kG8AoExkX40",
+            "David Senra",
+            duration_seconds=600,
+        )
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            YouTubeTranscriptProvider().fetch(episode)
 
     @patch("news_officer.youtube.run")
     def test_latest_videos_ignores_channel_tabs(self, mock_run):
