@@ -8,9 +8,9 @@
 
 ## 文字稿规则
 
-情报官优先通过节目官方 RSS 发现新集，再尝试官网的官方 transcript、RSS 声明的完整文字稿和出版方批准的 Substack 逐字稿，最后回退到公开视频字幕。只有来源明确、文本密度达标且覆盖节目主体时才会调用模型；否则固定回复“未取得完整文字稿，本次不摘要”。当前已接入 Acquired、Dwarkesh、Lenny's Podcast、The Generalist、David Senra/Founders、Sequoia、Invest Like the Best/Colossus 等官方来源。YouTube 只作为字幕与元数据补充；全链路不可用时会明确告知用户，不会把简介伪装成摘要。
+情报官优先通过节目官方 RSS 发现新集，再尝试官网的官方 transcript、RSS 声明的完整文字稿和出版方批准的 Substack 逐字稿，最后回退到公开视频字幕。只有来源明确、文本密度达标且覆盖节目主体时才会调用模型；否则固定回复“未取得完整文字稿，本次不摘要”。当前已接入 Acquired、Dwarkesh、Lenny's Podcast、The Generalist、David Senra、Sequoia、Invest Like the Best/Colossus 等官方来源。YouTube 只作为字幕与元数据补充；全链路不可用时会明确告知用户，不会把简介伪装成摘要。
 
-摘要遵循“会议纪要核心要点精简版”：中文输出，按 4–7 个主题组织 10–20 条连续编号洞察，优先保留数字、强观点、反共识判断和可执行启示，并明确标注嘉宾预测、公司主张与模型估算。
+摘要遵循“会议纪要核心要点精简版”：中文输出，按 3–5 个主题组织，每期恰好精选 10 条连续编号的 key takeaways。优先保留数字、强观点、反共识判断和可执行启示，并明确标注嘉宾预测、公司主张与模型估算。
 
 ## 飞书最小配置
 

@@ -24,6 +24,7 @@ from .rss import (
 )
 from .sequoia import SequoiaOfficialTranscriptProvider
 from .store import Store
+from .summarizer import SummaryFormatError
 from .youtube import (
     YouTubeTranscriptProvider,
     is_youtube_url,
@@ -360,7 +361,7 @@ class PodcastService:
             return AnalysisResult(
                 status="unsupported",
                 message=(
-                    "目前可直接分析公开 YouTube，以及 David Senra/Founders、"
+                    "目前可直接分析公开 YouTube，以及 David Senra、"
                     "Dwarkesh、Sequoia 和 Invest Like the Best/Colossus 的官方节目页。"
                 ),
             )
@@ -410,10 +411,22 @@ class PodcastService:
                     "未取得完整文字稿，本次不摘要。"
                 ),
             )
+        try:
+            summary = self.summarizer.summarize(episode, transcript)
+        except SummaryFormatError:
+            return AnalysisResult(
+                status="summary_format_error",
+                episode=episode,
+                message=(
+                    f"节目：{episode.title}\n链接：{episode.url}\n\n"
+                    "本次摘要没有稳定收敛为 10 条精选要点，因此没有发送不合格结果。"
+                    "请稍后重新发送这个链接。"
+                ),
+            )
         return AnalysisResult(
             status="summarized",
             episode=episode,
-            message=self.summarizer.summarize(episode, transcript),
+            message=summary,
         )
 
     def discover_daily_candidates(
@@ -684,6 +697,9 @@ class PodcastService:
                     priority_b_summaries += 1
                 if summary_count >= self.max_daily_summaries:
                     break
+            except SummaryFormatError as error:
+                logger.warning("Podcast summary format failed for %s: %s", episode.url, error)
+                results.append(DailyItem(episode, "summary_format_error", str(error)))
             except Exception as error:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
@@ -692,7 +708,15 @@ class PodcastService:
                 break
             try:
                 summary = self.summarizer.summarize(episode, transcript)
-            except Exception as error:  # noqa: BLE001 - one candidate is isolated
+            except SummaryFormatError as error:
+                logger.warning(
+                    "Deferred podcast summary format failed for %s: %s",
+                    episode.url,
+                    error,
+                )
+                results.append(DailyItem(episode, "summary_format_error", str(error)))
+                continue
+            except Exception as error:
                 logger.exception("Deferred podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
                 continue

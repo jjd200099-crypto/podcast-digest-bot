@@ -687,7 +687,11 @@ class Store:
             ).fetchone()
         if row is None:
             return "new"
-        if row["result"] not in {"no_transcript", "unverified_date"}:
+        if row["result"] not in {
+            "no_transcript",
+            "summary_format_error",
+            "unverified_date",
+        }:
             return None
         try:
             checked_at = datetime.fromisoformat(str(row["checked_at"]))

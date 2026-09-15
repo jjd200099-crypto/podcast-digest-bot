@@ -1,7 +1,7 @@
+import json
 import sys
 import tempfile
 import unittest
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -17,12 +17,18 @@ from news_officer.podcast import (
     TranscriptResolver,
 )
 from news_officer.store import Store
+from news_officer.summarizer import SummaryFormatError
 from news_officer.youtube import is_youtube_url
 
 
 class FakeSummarizer:
     def summarize(self, episode, transcript):
         return "summary"
+
+
+class BadFormatSummarizer:
+    def summarize(self, episode, transcript):
+        raise SummaryFormatError("not ten")
 
 
 class BrokenProvider:
@@ -84,6 +90,55 @@ class SourceFailureTests(unittest.TestCase):
             result = service.analyze_url(episode.url)
         self.assertEqual(result.status, "source_error")
         self.assertIn("未取得完整文字稿，本次不摘要", result.message)
+
+    def test_summary_format_failure_returns_a_terminal_interactive_result(self):
+        self.feeds.write_text('{"youtube_channels": []}')
+        service = PodcastService(
+            self.store,
+            self.feeds,
+            BadFormatSummarizer(),
+            TranscriptResolver([CompleteProvider()]),
+        )
+        episode = Episode(
+            "kG8AoExkX40",
+            "Sam Altman",
+            "https://www.youtube.com/watch?v=kG8AoExkX40",
+            "David Senra",
+            duration_seconds=3600,
+        )
+
+        with patch("news_officer.podcast.video_metadata", return_value=episode):
+            result = service.analyze_url(episode.url)
+
+        self.assertEqual(result.status, "summary_format_error")
+        self.assertIn("没有发送不合格结果", result.message)
+
+    def test_summary_format_failure_is_cooled_down_without_failing_daily_scan(self):
+        self.feeds.write_text(
+            '{"sources": [{"name": "David Senra", "type": "youtube", '
+            '"url": "https://www.youtube.com/@DavidSenra"}]}'
+        )
+        episode = Episode(
+            "format-error",
+            "Title",
+            "https://www.youtube.com/watch?v=kG8AoExkX40",
+            "David Senra",
+            duration_seconds=3600,
+            published_at=datetime(2026, 9, 5, tzinfo=UTC),
+        )
+        service = PodcastService(
+            self.store,
+            self.feeds,
+            BadFormatSummarizer(),
+            TranscriptResolver([CompleteProvider()]),
+        )
+
+        with patch("news_officer.podcast.latest_videos", return_value=[episode]):
+            items = service.build_daily(datetime(2026, 9, 6, tzinfo=UTC))
+
+        self.assertEqual([item.status for item in items], ["summary_format_error"])
+        self.store.record_episode(episode, items[0].status)
+        self.assertIsNone(self.store.episode_review_state(episode.id))
 
     def test_all_feed_outage_is_not_reported_as_an_empty_scan(self):
         self.feeds.write_text(

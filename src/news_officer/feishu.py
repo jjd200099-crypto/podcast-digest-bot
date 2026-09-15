@@ -49,7 +49,30 @@ def split_message(markdown: str, max_bytes: int = 3500) -> list[str]:
     chunks: list[str] = []
     current = ""
     for paragraph in markdown.split("\n\n"):
-        for piece in split_utf8(paragraph, content_limit):
+        if len(paragraph.encode("utf-8")) <= content_limit:
+            pieces = [paragraph]
+        else:
+            # Model output may place every numbered takeaway on a single-newline
+            # list. Prefer whole lines before falling back to character chunks so
+            # a Feishu part does not start halfway through an insight.
+            pieces = []
+            line_group = ""
+            for line in paragraph.splitlines():
+                for line_piece in split_utf8(line, content_limit):
+                    candidate = (
+                        f"{line_group}\n{line_piece}" if line_group else line_piece
+                    )
+                    if (
+                        line_group
+                        and len(candidate.encode("utf-8")) > content_limit
+                    ):
+                        pieces.append(line_group)
+                        line_group = line_piece
+                    else:
+                        line_group = candidate
+            if line_group:
+                pieces.append(line_group)
+        for piece in pieces:
             candidate = (current + "\n\n" + piece).strip()
             if current and len(candidate.encode("utf-8")) > content_limit:
                 chunks.append(current)

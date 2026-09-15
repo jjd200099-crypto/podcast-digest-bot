@@ -285,6 +285,7 @@ class NewsOfficerRuntime:
             elif item.status in {
                 "no_transcript",
                 "outside_window",
+                "summary_format_error",
                 "unverified_date",
             }:
                 self.store.record_episode(item.episode, item.status)

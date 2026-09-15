@@ -107,6 +107,26 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    async def test_long_takeaways_are_split_between_complete_numbered_lines(self):
+        takeaways = [
+            f"{number}. 洞察 {number}：" + ("高密度内容" * 40)
+            for number in range(1, 11)
+        ]
+
+        parts = delivery_parts("\n".join(takeaways), "ten-takeaways")
+        rendered_lines: list[str] = []
+        for _msg_type, content, _uuid in parts:
+            post = json.loads(content)["zh_cn"]["content"]
+            rendered_lines.extend(
+                "".join(element.get("text", "") for element in paragraph)
+                for paragraph in post
+            )
+        rendered = "\n".join(rendered_lines)
+
+        self.assertGreater(len(parts), 1)
+        for takeaway in takeaways:
+            self.assertEqual(rendered.count(takeaway), 1)
+
     async def test_message_result_and_thread_outbox_survive_restart(self):
         plugin = FakePlugin()
         messenger = FakeMessenger()
