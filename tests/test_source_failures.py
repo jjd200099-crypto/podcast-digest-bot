@@ -116,6 +116,30 @@ class SourceFailureTests(unittest.TestCase):
         self.assertIsNotNone(archived)
         self.assertEqual(archived.transcript.text, "complete transcript")
 
+    def test_successful_summary_is_cached_for_readable_transcript_navigation(self):
+        self.feeds.write_text('{"youtube_channels": []}')
+        service = PodcastService(
+            self.store,
+            self.feeds,
+            FakeSummarizer(),
+            TranscriptResolver([CompleteProvider()]),
+        )
+        episode = Episode(
+            "digest-cache",
+            "Cached digest",
+            "https://www.youtube.com/watch?v=kG8AoExkX40",
+            "David Senra",
+            duration_seconds=3600,
+        )
+
+        with patch("news_officer.podcast.video_metadata", return_value=episode):
+            result = service.analyze_url(episode.url)
+
+        self.assertEqual(result.status, "summarized")
+        self.assertEqual(
+            self.store.get_transcript_digest(episode.id), result.message
+        )
+
     def test_summary_format_failure_is_cooled_down_without_failing_daily_scan(self):
         self.feeds.write_text(
             '{"sources": [{"name": "David Senra", "type": "youtube", '
@@ -478,6 +502,75 @@ class SourceFailureTests(unittest.TestCase):
         self.assertEqual(
             [item.episode.id for item in items if item.status == "summarized"],
             ["a1", "a2", "a3"],
+        )
+
+    def test_deferred_digest_save_failure_isolated_and_next_candidate_backfills(self):
+        self.feeds.write_text('{"sources": []}')
+        candidates = [
+            Episode(
+                identifier,
+                identifier,
+                f"https://publisher.example.com/{identifier}",
+                identifier,
+                duration_seconds=3600,
+                published_at=datetime(2026, 9, 5, 12, tzinfo=UTC),
+                metadata={"source_priority": priority},
+            )
+            for identifier, priority in (
+                ("a1", "A"),
+                ("a2", "A"),
+                ("a3", "A"),
+                ("a4", "A"),
+                ("a5", "A"),
+                ("b1", "B"),
+            )
+        ]
+        resolver = TranscriptResolver([CompleteProvider()])
+        service = PodcastService(
+            self.store,
+            self.feeds,
+            FakeSummarizer(),
+            resolver,
+            max_daily_summaries=4,
+        )
+        save_digest = self.store.save_transcript_digest
+
+        def save_with_one_cas_failure(
+            episode_id, digest, source_sha256, record_revision_sha256
+        ):
+            if episode_id == "a4":
+                raise ValueError("Transcript source changed during digest generation")
+            return save_digest(
+                episode_id,
+                digest,
+                source_sha256,
+                record_revision_sha256,
+            )
+
+        with (
+            patch.object(service, "discover_daily_candidates", return_value=candidates),
+            patch.object(
+                resolver,
+                "fetch",
+                side_effect=lambda episode: (
+                    None if episode.id == "b1" else CompleteProvider().fetch(episode)
+                ),
+            ),
+            patch.object(
+                self.store,
+                "save_transcript_digest",
+                side_effect=save_with_one_cas_failure,
+            ),
+        ):
+            items = service.build_daily(datetime(2026, 9, 6, tzinfo=UTC))
+
+        self.assertEqual(
+            [item.episode.id for item in items if item.status == "summarized"],
+            ["a1", "a2", "a3", "a5"],
+        )
+        self.assertEqual(
+            [item.episode.id for item in items if item.status == "failed"],
+            ["a4"],
         )
 
     def test_new_candidates_are_selected_before_due_retries(self):

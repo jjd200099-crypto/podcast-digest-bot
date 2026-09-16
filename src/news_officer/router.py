@@ -4,10 +4,11 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from .models import IncomingMessage, StoredTranscript
+from .models import IncomingMessage, StoredTranscript, TranscriptAttachment
 from .podcast import PodcastService
 from .qa import QAFormatError, TranscriptQAService, TranscriptTooLongError
 from .store import Store
+from .transcript_view import RENDERER_VERSION, render_readable_transcript
 
 URL_RE = re.compile(r"https?://[^\s<>]+")
 MENTION_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE)
@@ -58,6 +59,7 @@ class PluginResponse:
     messages: tuple[str, ...]
     attachment_episode_ids: tuple[str, ...] = ()
     context_episode_id: str = ""
+    attachments: tuple[TranscriptAttachment, ...] = ()
 
 
 class BotPlugin(Protocol):
@@ -99,6 +101,7 @@ class PodcastPlugin:
             (result.message,),
             attachment_episode_ids=(result.episode.id,),
             context_episode_id=result.episode.id,
+            attachments=((result.attachment,) if result.attachment else ()),
         )
 
 
@@ -255,15 +258,37 @@ class TranscriptInteractionPlugin:
     ) -> PluginResponse:
         self.store.save_conversation_context(key, episode_id=record.episode.id)
         if action == "transcript":
+            revision = self.store.get_transcript_digest_revision(
+                record.episode.id
+            )
+            digest_markdown = (
+                revision[2]
+                if revision is not None
+                and revision[0] == record.content_sha256
+                and revision[1] == record.record_revision_sha256
+                else ""
+            )
+            filename, content = render_readable_transcript(
+                record, digest_markdown=digest_markdown
+            )
+            attachment = TranscriptAttachment.from_rendered(
+                record,
+                digest_markdown=digest_markdown,
+                renderer_version=RENDERER_VERSION,
+                filename=filename,
+                content=content,
+            )
             return PluginResponse(
                 (
                     (
-                        f"已附上完整文字稿：{record.episode.title}\n"
+                        f"已附上精编可读版文字稿：{record.episode.title}\n"
+                        f"原始核验全文仍由情报官保存并用于问答。\n"
                         f"文字稿来源：{record.transcript.source_url}"
                     ),
                 ),
                 attachment_episode_ids=(record.episode.id,),
                 context_episode_id=record.episode.id,
+                attachments=(attachment,),
             )
         try:
             answer = self.qa.answer(record, question)
@@ -365,10 +390,11 @@ class HelpPlugin:
             "- 退订：取消当前私聊或当前群的日报。\n"
             "- 帮助：查看这份说明。\n\n"
             "- 最近播客：查看已有完整文字稿、可继续问答的节目。\n"
-            "- 文字稿 <编号/节目/嘉宾>：下载完整 Markdown 文字稿。\n"
+            "- 文字稿 <编号/节目/嘉宾>：下载精编可读版 Markdown 文字稿；原始核验全文保留用于问答。\n"
             "- 问 <编号> <问题>：只基于该期完整文字稿回答。\n\n"
             "你也可以直接发送 YouTube 或已支持的播客官网链接。我会先取得并核验完整文字稿，"
-            "再按投研会议纪要整理并附上全文；没有完整文字稿时，不会根据标题或简介猜测。"
+            "再按投研会议纪要整理，并附上去除广告、机械噪声和无信息量重复的可读版；"
+            "没有完整文字稿时，不会根据标题或简介猜测。"
         )
         return PluginResponse((message,))
 
