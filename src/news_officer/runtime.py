@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 
 from lark_channel import (
@@ -15,9 +16,10 @@ from lark_channel import (
 )
 
 from .config import Settings
-from .feishu import FeishuMessenger, delivery_parts
+from .feishu import FeishuMessenger, delivery_parts, file_delivery_part
 from .models import DailyItem, IncomingMessage, Job
 from .podcast import PodcastService
+from .qa import render_transcript_attachment
 from .router import CommandRouter
 from .store import Store
 
@@ -94,6 +96,13 @@ class NewsOfficerRuntime:
         if not message_id or not chat_id or not text:
             logger.info("Ignored an inbound event without text, chat_id, or message_id")
             return
+        raw = getattr(message, "raw", {}) or {}
+        raw_parent_id = (
+            str(raw.get("parent_id", "") or "") if isinstance(raw, Mapping) else ""
+        )
+        raw_root_id = (
+            str(raw.get("root_id", "") or "") if isinstance(raw, Mapping) else ""
+        )
         incoming = IncomingMessage(
             message_id=message_id,
             chat_id=chat_id,
@@ -103,6 +112,12 @@ class NewsOfficerRuntime:
             thread_id=str(
                 getattr(message, "thread_id", "")
                 or getattr(getattr(message, "conversation", None), "thread_id", "")
+                or ""
+            ),
+            parent_message_id=str(
+                getattr(getattr(message, "reply", None), "message_id", "")
+                or raw_parent_id
+                or raw_root_id
                 or ""
             ),
         )
@@ -123,7 +138,13 @@ class NewsOfficerRuntime:
         message_id: str,
         idempotency_key: str,
         reply_in_thread: bool,
+        file_keys: tuple[str, ...] = (),
     ) -> None:
+        parts = delivery_parts(markdown, idempotency_key)
+        for file_key in file_keys:
+            parts.append(
+                file_delivery_part(file_key, idempotency_key, len(parts) + 1)
+            )
         self.store.ensure_outbox(
             job_key=job.key,
             group_key=group_key,
@@ -132,7 +153,7 @@ class NewsOfficerRuntime:
             target_id=message_id,
             target_type="",
             reply_in_thread=reply_in_thread,
-            parts=delivery_parts(markdown, idempotency_key),
+            parts=parts,
         )
 
     def _ensure_broadcast(
@@ -141,12 +162,18 @@ class NewsOfficerRuntime:
         group_key: str,
         markdown: str,
         idempotency_key: str,
+        file_key: str = "",
     ) -> None:
         targets = self._daily_targets(job)
         if not targets:
             raise RuntimeError("A daily delivery has no active subscribers")
         for target_type, target_id in targets:
             delivery_key = f"{idempotency_key}:{target_type}:{target_id}"
+            parts = delivery_parts(markdown, delivery_key)
+            if file_key:
+                parts.append(
+                    file_delivery_part(file_key, delivery_key, len(parts) + 1)
+                )
             self.store.ensure_outbox(
                 job_key=job.key,
                 group_key=group_key,
@@ -155,8 +182,31 @@ class NewsOfficerRuntime:
                 target_id=target_id,
                 target_type=target_type,
                 reply_in_thread=False,
-                parts=delivery_parts(markdown, delivery_key),
+                parts=parts,
             )
+
+    def _uploaded_transcript_file(self, job: Job, episode_id: str) -> str:
+        result_key = f"transcript-file:{episode_id}"
+        persisted = self.store.get_job_result(job.key, result_key)
+        if persisted is not None:
+            return str(persisted["file_key"])
+        record = self.store.get_verified_transcript(episode_id)
+        if record is None:
+            return ""
+        filename, content = render_transcript_attachment(record)
+        file_key = self.messenger.upload_file(content, filename)
+        canonical = self.store.save_job_result(
+            job.key,
+            result_key,
+            "transcript_file",
+            {
+                "episode_id": episode_id,
+                "content_sha256": record.content_sha256,
+                "filename": filename,
+                "file_key": file_key,
+            },
+        )
+        return str(canonical["file_key"])
 
     def _daily_targets(self, job: Job) -> list[tuple[str, str]]:
         """Freeze one DB-backed recipient snapshot for the whole daily job."""
@@ -185,7 +235,9 @@ class NewsOfficerRuntime:
                 continue
             await asyncio.to_thread(self.store.mark_outbox_attempt, item.id)
             try:
-                await asyncio.to_thread(self.messenger.deliver, item)
+                remote_message_id = await asyncio.to_thread(
+                    self.messenger.deliver, item
+                )
             except Exception as error:  # noqa: BLE001 - isolate failures per recipient
                 await asyncio.to_thread(
                     self.store.mark_outbox_error, item.id, str(error)
@@ -193,7 +245,11 @@ class NewsOfficerRuntime:
                 blocked_deliveries.add(item.delivery_key)
                 failures.append((item.delivery_key, error))
             else:
-                await asyncio.to_thread(self.store.mark_outbox_sent, item.id)
+                await asyncio.to_thread(
+                    self.store.mark_outbox_sent,
+                    item.id,
+                    str(remote_message_id or ""),
+                )
         if failures:
             delivery_key, error = failures[0]
             raise RuntimeError(
@@ -232,6 +288,7 @@ class NewsOfficerRuntime:
                 chat_type=str(payload.get("chat_type") or ""),
                 sender_open_id=str(payload.get("sender_open_id") or ""),
                 thread_id=str(payload.get("thread_id") or ""),
+                parent_message_id=str(payload.get("parent_message_id") or ""),
             )
             response = await asyncio.to_thread(plugin.handle, text, incoming)
             persisted = await asyncio.to_thread(
@@ -239,17 +296,61 @@ class NewsOfficerRuntime:
                 job.key,
                 "message:analysis",
                 "message",
-                {"messages": list(response.messages)},
+                {
+                    "messages": list(response.messages),
+                    "attachment_episode_ids": list(
+                        response.attachment_episode_ids
+                    ),
+                    "context_episode_id": response.context_episode_id,
+                },
             )
-        for index, reply in enumerate(persisted.get("messages") or (), start=1):
+        attachment_episode_ids = tuple(
+            str(item)
+            for item in persisted.get("attachment_episode_ids") or ()
+        )
+        uploaded_file_keys: list[str] = []
+        missing_attachment_ids: list[str] = []
+        for episode_id in attachment_episode_ids:
+            file_key = await asyncio.to_thread(
+                self._uploaded_transcript_file, job, episode_id
+            )
+            if file_key:
+                uploaded_file_keys.append(file_key)
+            else:
+                missing_attachment_ids.append(episode_id)
+        file_keys = tuple(uploaded_file_keys)
+        replies = tuple(str(reply) for reply in persisted.get("messages") or ())
+        if missing_attachment_ids:
+            unavailable = (
+                "完整文字稿附件暂不可用：归档记录缺失。请重新发送节目链接，"
+                "待完整文字稿重新核验后再下载。"
+            )
+            replies = tuple(
+                reply.replace("已附上完整文字稿", "未能附上完整文字稿")
+                for reply in replies
+            )
+            if replies:
+                replies = (*replies[:-1], f"{replies[-1]}\n\n{unavailable}")
+            else:
+                replies = (unavailable,)
+        if not replies and file_keys:
+            replies = ("完整文字稿见附件。",)
+        context_episode_id = str(persisted.get("context_episode_id") or "")
+        for index, reply in enumerate(replies, start=1):
+            group_key = (
+                f"episode:{context_episode_id}"
+                if context_episode_id
+                else f"message:result:{index}"
+            )
             await asyncio.to_thread(
                 self._ensure_reply,
                 job,
-                f"message:result:{index}",
-                str(reply),
+                group_key,
+                reply,
                 message_id,
                 f"{job.key}:result:{index}",
                 reply_in_thread,
+                file_keys if index == len(replies) else (),
             )
         await asyncio.to_thread(self.store.mark_analysis_complete, job.key)
         await self._drain_outbox(job)
@@ -276,11 +377,18 @@ class NewsOfficerRuntime:
         items = self._persisted_daily_items(job)
         for item in items:
             if item.status == "summarized":
+                file_key = self._uploaded_transcript_file(job, item.episode.id)
+                if not file_key:
+                    raise RuntimeError(
+                        "A summarized daily episode has no archived transcript: "
+                        f"{item.episode.id}"
+                    )
                 self._ensure_broadcast(
                     job,
                     f"episode:{item.episode.id}",
                     item.message,
                     f"daily:{item.episode.id}",
+                    file_key,
                 )
             elif item.status in {
                 "no_transcript",

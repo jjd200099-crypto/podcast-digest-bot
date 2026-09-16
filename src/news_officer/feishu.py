@@ -15,6 +15,7 @@ from .models import OutboxItem
 
 BRAND_HEADER = "🎧 情报官｜每日播客情报"
 FEISHU_API = "https://open.feishu.cn/open-apis"
+MAX_FILE_BYTES = 30 * 1024 * 1024
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)]\((https?://[^\s)]+)\)")
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 
@@ -86,6 +87,33 @@ def split_message(markdown: str, max_bytes: int = 3500) -> list[str]:
 
 def idempotency_uuid(key: str, part: int) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"news-officer:{key}:{part}"))
+
+
+def sanitize_file_name(filename: str) -> str:
+    """Return a safe, human-readable filename for a multipart upload."""
+
+    if not isinstance(filename, str):
+        raise TypeError("filename must be a string")
+    # Treat both POSIX and Windows separators as path boundaries, even when the
+    # service is running on a different operating system.
+    name = re.split(r"[\\/]", filename)[-1]
+    name = re.sub(r'[\x00-\x1f\x7f<>:"|?*]+', "_", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    return name or "transcript.md"
+
+
+def file_delivery_part(
+    file_key: str, idempotency_key: str, part: int
+) -> tuple[str, str, str]:
+    """Freeze a Feishu file message and its idempotency UUID for the outbox."""
+
+    key = file_key.strip()
+    if not key:
+        raise ValueError("file_key must not be empty")
+    content = json.dumps(
+        {"file_key": key}, ensure_ascii=False, separators=(",", ":")
+    )
+    return "file", content, idempotency_uuid(idempotency_key, part)
 
 
 def _post_elements(line: str) -> list[dict]:
@@ -203,6 +231,52 @@ class FeishuMessenger:
             self._token = ""
             self._token_expires_at = 0.0
 
+    def upload_file(self, content: bytes, filename: str) -> str:
+        """Upload one file for a later ``file`` message and return its key."""
+
+        if not isinstance(content, (bytes, bytearray, memoryview)):
+            raise TypeError("content must be bytes-like")
+        file_content = bytes(content)
+        if not file_content:
+            raise ValueError("file content must not be empty")
+        if len(file_content) > MAX_FILE_BYTES:
+            raise ValueError(
+                f"file content exceeds Feishu's {MAX_FILE_BYTES}-byte limit"
+            )
+        safe_filename = sanitize_file_name(filename)
+
+        refreshed = False
+        response = None
+        for attempt in range(5):
+            response = requests.post(
+                f"{FEISHU_API}/im/v1/files",
+                headers={"Authorization": f"Bearer {self.token()}"},
+                data={"file_type": "stream", "file_name": safe_filename},
+                files={
+                    "file": (
+                        safe_filename,
+                        file_content,
+                        "application/octet-stream",
+                    )
+                },
+                timeout=30,
+            )
+            if response.status_code == 401 and not refreshed:
+                self._invalidate_token()
+                refreshed = True
+                continue
+            if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < 4:
+                time.sleep(_retry_delay(response, attempt))
+                continue
+            body = self._check(response, "file upload")
+            file_key = str((body.get("data") or {}).get("file_key") or "").strip()
+            if not file_key:
+                raise RuntimeError("Feishu file upload response missing file_key")
+            return file_key
+        if response is not None:  # pragma: no cover - final branch raises
+            self._check(response, "file upload")
+        raise RuntimeError("Feishu file upload did not complete")
+
     def reply(self, markdown: str, message_id: str, idempotency_key: str) -> None:
         parts = delivery_parts(markdown, idempotency_key)
         for index, (msg_type, content, item_uuid) in enumerate(parts, start=1):
@@ -247,7 +321,7 @@ class FeishuMessenger:
                 )
             )
 
-    def deliver(self, item: OutboxItem) -> None:
+    def deliver(self, item: OutboxItem) -> str:
         """Deliver one already-frozen outbox item without re-splitting it."""
 
         payload = {
@@ -290,10 +364,12 @@ class FeishuMessenger:
             if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < 4:
                 time.sleep(_retry_delay(response, attempt))
                 continue
-            self._check(response, operation)
-            return
+            body = self._check(response, operation)
+            return str((body.get("data") or {}).get("message_id") or "")
         if response is not None:  # pragma: no cover - final branch returns or raises
-            self._check(response, operation)
+            body = self._check(response, operation)
+            return str((body.get("data") or {}).get("message_id") or "")
+        raise RuntimeError("Feishu message delivery did not run")
 
     def broadcast(
         self,

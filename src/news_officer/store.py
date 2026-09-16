@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator
@@ -7,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .models import Episode, Job, OutboxItem
+from .models import Episode, Job, OutboxItem, StoredTranscript, Transcript
 
 RETRY_DELAYS_SECONDS = (60, 300, 900, 1800)
 FAILED_DAILY_REQUEUE_SECONDS = 3600
@@ -70,6 +71,37 @@ class Store:
                     checked_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS episode_transcripts (
+                    episode_id TEXT PRIMARY KEY,
+                    reference TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    episode_url TEXT NOT NULL,
+                    show_name TEXT NOT NULL,
+                    duration_seconds REAL,
+                    duration_string TEXT,
+                    published_at TEXT,
+                    transcript_text TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    stored_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK(length(transcript_text) > 0)
+                );
+                CREATE INDEX IF NOT EXISTS episode_transcripts_recent_idx
+                    ON episode_transcripts(published_at DESC, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS conversation_contexts (
+                    context_key TEXT PRIMARY KEY,
+                    episode_id TEXT NOT NULL DEFAULT '',
+                    pending_episode_ids_json TEXT NOT NULL DEFAULT '[]',
+                    recent_episode_ids_json TEXT NOT NULL DEFAULT '[]',
+                    pending_question TEXT NOT NULL DEFAULT '',
+                    pending_action TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS subscriptions (
                     target_type TEXT NOT NULL,
                     target_id TEXT NOT NULL,
@@ -113,6 +145,7 @@ class Store:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     sent_at TEXT,
+                    remote_message_id TEXT NOT NULL DEFAULT '',
                     last_error TEXT,
                     UNIQUE(job_key, delivery_key, part),
                     FOREIGN KEY(job_key) REFERENCES jobs(job_key) ON DELETE CASCADE
@@ -141,6 +174,21 @@ class Store:
             if "msg_type" not in outbox_columns:
                 connection.execute(
                     "ALTER TABLE outbox ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'post'"
+                )
+            if "remote_message_id" not in outbox_columns:
+                connection.execute(
+                    "ALTER TABLE outbox ADD COLUMN remote_message_id TEXT NOT NULL DEFAULT ''"
+                )
+            context_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(conversation_contexts)"
+                ).fetchall()
+            }
+            if "recent_episode_ids_json" not in context_columns:
+                connection.execute(
+                    "ALTER TABLE conversation_contexts "
+                    "ADD COLUMN recent_episode_ids_json TEXT NOT NULL DEFAULT '[]'"
                 )
 
     @staticmethod
@@ -583,16 +631,20 @@ class Store:
                 (_now(), item_id),
             )
 
-    def mark_outbox_sent(self, item_id: int) -> None:
+    def mark_outbox_sent(self, item_id: int, remote_message_id: str = "") -> None:
         now = _now()
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE outbox
-                SET status = 'sent', sent_at = ?, updated_at = ?, last_error = NULL
+                SET status = 'sent', sent_at = ?, updated_at = ?,
+                    remote_message_id = CASE
+                        WHEN ? != '' THEN ? ELSE remote_message_id
+                    END,
+                    last_error = NULL
                 WHERE id = ?
                 """,
-                (now, now, item_id),
+                (now, now, remote_message_id, remote_message_id, item_id),
             )
 
     def mark_outbox_error(self, item_id: int, error: str) -> None:
@@ -649,6 +701,267 @@ class Store:
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _stored_transcript(row: sqlite3.Row) -> StoredTranscript:
+        published_at = str(row["published_at"] or "")
+        return StoredTranscript(
+            episode=Episode(
+                id=str(row["episode_id"]),
+                title=str(row["title"]),
+                url=str(row["episode_url"]),
+                show=str(row["show_name"]),
+                duration_seconds=(
+                    float(row["duration_seconds"])
+                    if row["duration_seconds"] is not None
+                    else None
+                ),
+                duration_string=(
+                    str(row["duration_string"])
+                    if row["duration_string"] is not None
+                    else None
+                ),
+                published_at=(
+                    datetime.fromisoformat(published_at) if published_at else None
+                ),
+            ),
+            transcript=Transcript(
+                text=str(row["transcript_text"]),
+                source=str(row["source"]),
+                source_url=str(row["source_url"]),
+                verified_complete=True,
+                language=str(row["language"]),
+            ),
+            content_sha256=str(row["content_sha256"]),
+            stored_at=datetime.fromisoformat(str(row["stored_at"])),
+        )
+
+    def save_verified_transcript(
+        self, episode: Episode, transcript: Transcript
+    ) -> StoredTranscript:
+        """Archive one complete transcript before any model or delivery work."""
+
+        if not transcript.verified_complete:
+            raise ValueError("Only verified complete transcripts may be archived")
+        if not transcript.text.strip():
+            raise ValueError("A verified transcript cannot be empty")
+        now = _now()
+        content_sha256 = hashlib.sha256(
+            transcript.text.encode("utf-8")
+        ).hexdigest()
+        reference = hashlib.sha256(episode.id.encode("utf-8")).hexdigest()[:8]
+        published_at = (
+            episode.published_at.isoformat() if episode.published_at else None
+        )
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO episode_transcripts(
+                    episode_id, reference, title, episode_url, show_name,
+                    duration_seconds, duration_string, published_at,
+                    transcript_text, source, source_url, language,
+                    content_sha256, stored_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(episode_id) DO UPDATE SET
+                    reference = excluded.reference,
+                    title = excluded.title,
+                    episode_url = excluded.episode_url,
+                    show_name = excluded.show_name,
+                    duration_seconds = excluded.duration_seconds,
+                    duration_string = excluded.duration_string,
+                    published_at = excluded.published_at,
+                    transcript_text = excluded.transcript_text,
+                    source = excluded.source,
+                    source_url = excluded.source_url,
+                    language = excluded.language,
+                    content_sha256 = excluded.content_sha256,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    episode.id,
+                    reference,
+                    episode.title,
+                    episode.url,
+                    episode.show,
+                    episode.duration_seconds,
+                    episode.duration_string,
+                    published_at,
+                    transcript.text,
+                    transcript.source,
+                    transcript.source_url,
+                    transcript.language,
+                    content_sha256,
+                    now,
+                    now,
+                ),
+            )
+        stored = self.get_verified_transcript(episode.id)
+        if stored is None:  # pragma: no cover - the insert above must create a row
+            raise RuntimeError(f"Transcript archive failed for {episode.id}")
+        return stored
+
+    def get_verified_transcript(self, episode_id_or_reference: str) -> StoredTranscript | None:
+        value = episode_id_or_reference.strip()
+        if not value:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM episode_transcripts
+                WHERE episode_id = ? OR reference = ?
+                LIMIT 1
+                """,
+                (value, value.lower()),
+            ).fetchone()
+        return self._stored_transcript(row) if row else None
+
+    def list_recent_transcripts(self, limit: int = 10) -> list[StoredTranscript]:
+        limit = max(1, min(50, int(limit)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM episode_transcripts
+                ORDER BY COALESCE(published_at, updated_at) DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [self._stored_transcript(row) for row in rows]
+
+    def search_verified_transcripts(
+        self, term: str, limit: int = 5
+    ) -> list[StoredTranscript]:
+        value = term.strip()
+        if not value:
+            return []
+        limit = max(1, min(20, int(limit)))
+        escaped = (
+            value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM episode_transcripts
+                WHERE title LIKE ? ESCAPE '\\' COLLATE NOCASE
+                   OR show_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+                   OR transcript_text LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY
+                    CASE
+                        WHEN title = ? COLLATE NOCASE THEN 0
+                        WHEN title LIKE ? ESCAPE '\\' COLLATE NOCASE THEN 1
+                        WHEN show_name LIKE ? ESCAPE '\\' COLLATE NOCASE THEN 2
+                        ELSE 3
+                    END,
+                    COALESCE(published_at, updated_at) DESC,
+                    updated_at DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, pattern, value, pattern, pattern, limit),
+            ).fetchall()
+        return [self._stored_transcript(row) for row in rows]
+
+    def save_conversation_context(
+        self,
+        context_key: str,
+        *,
+        episode_id: str = "",
+        pending_episode_ids: tuple[str, ...] = (),
+        pending_question: str = "",
+        pending_action: str = "",
+    ) -> None:
+        if pending_action not in {"", "qa", "transcript"}:
+            raise ValueError(f"Unsupported pending action: {pending_action}")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_contexts(
+                    context_key, episode_id, pending_episode_ids_json,
+                    pending_question, pending_action, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(context_key) DO UPDATE SET
+                    episode_id = excluded.episode_id,
+                    pending_episode_ids_json = excluded.pending_episode_ids_json,
+                    pending_question = excluded.pending_question,
+                    pending_action = excluded.pending_action,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    context_key,
+                    episode_id,
+                    json.dumps(list(pending_episode_ids), ensure_ascii=False),
+                    pending_question,
+                    pending_action,
+                    _now(),
+                ),
+            )
+
+    def get_conversation_context(
+        self, context_key: str, max_age_hours: int = 168
+    ) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM conversation_contexts WHERE context_key = ?",
+                (context_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            updated_at = datetime.fromisoformat(str(row["updated_at"]))
+        except ValueError:
+            return None
+        if datetime.now(UTC) - updated_at > timedelta(hours=max(1, max_age_hours)):
+            return None
+        return {
+            "episode_id": str(row["episode_id"]),
+            "pending_episode_ids": tuple(
+                str(item)
+                for item in json.loads(str(row["pending_episode_ids_json"]))
+            ),
+            "recent_episode_ids": tuple(
+                str(item)
+                for item in json.loads(str(row["recent_episode_ids_json"]))
+            ),
+            "pending_question": str(row["pending_question"]),
+            "pending_action": str(row["pending_action"]),
+            "updated_at": updated_at.isoformat(),
+        }
+
+    def save_recent_transcript_snapshot(
+        self, context_key: str, episode_ids: tuple[str, ...]
+    ) -> None:
+        """Freeze the numbering shown by ``最近播客`` for one conversation."""
+
+        encoded = json.dumps(list(episode_ids), ensure_ascii=False)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_contexts(
+                    context_key, recent_episode_ids_json, updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(context_key) DO UPDATE SET
+                    recent_episode_ids_json = excluded.recent_episode_ids_json,
+                    updated_at = excluded.updated_at
+                """,
+                (context_key, encoded, _now()),
+            )
+
+    def episode_for_remote_message(self, remote_message_id: str) -> str | None:
+        value = remote_message_id.strip()
+        if not value:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT group_key FROM outbox
+                WHERE remote_message_id = ? AND group_key LIKE 'episode:%'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (value,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["group_key"])[len("episode:") :]
 
     def has_episode(self, episode_id: str) -> bool:
         with self._connect() as connection:
