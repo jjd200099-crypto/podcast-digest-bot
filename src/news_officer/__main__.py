@@ -6,7 +6,14 @@ import logging
 from .config import Settings
 from .feishu import FeishuMessenger
 from .podcast import PodcastService
-from .router import CommandRouter, HelpPlugin, PodcastPlugin, SubscriptionPlugin
+from .qa import TranscriptQAService
+from .router import (
+    CommandRouter,
+    HelpPlugin,
+    PodcastPlugin,
+    SubscriptionPlugin,
+    TranscriptInteractionPlugin,
+)
 from .runtime import NewsOfficerRuntime
 from .store import Store
 from .summarizer import TranscriptSummarizer
@@ -16,6 +23,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
     store = Store(settings.db_path)
     messenger = FeishuMessenger(settings.feishu_app_id, settings.feishu_app_secret)
     summarizer = TranscriptSummarizer(settings.openai_api_key, settings.openai_model)
+    qa = TranscriptQAService(settings.openai_api_key, settings.openai_model)
     podcast = PodcastService(
         store=store,
         feeds_path=settings.feeds_path,
@@ -25,7 +33,12 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         max_daily_summaries=settings.max_daily_summaries,
     )
     router = CommandRouter(
-        [SubscriptionPlugin(store), PodcastPlugin(podcast), HelpPlugin()]
+        [
+            SubscriptionPlugin(store),
+            PodcastPlugin(podcast),
+            TranscriptInteractionPlugin(store, qa),
+            HelpPlugin(),
+        ]
     )
     return NewsOfficerRuntime(settings, store, messenger, router, podcast)
 

@@ -15,7 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from news_officer.feishu import FeishuMessenger, delivery_parts
-from news_officer.models import DailyItem, Episode, IncomingMessage, OutboxItem
+from news_officer.models import (
+    DailyItem,
+    Episode,
+    IncomingMessage,
+    OutboxItem,
+    Transcript,
+)
 from news_officer.router import PluginResponse
 from news_officer.runtime import NewsOfficerRuntime
 from news_officer.store import Store
@@ -48,6 +54,11 @@ class FakeMessenger:
         self.attempts = []
         self.delivered = {}
         self.fail_groups_once = set()
+        self.uploads = []
+
+    def upload_file(self, content, filename):
+        self.uploads.append((content, filename))
+        return f"file_{len(self.uploads)}"
 
     def deliver(self, item):
         self.attempts.append(item)
@@ -208,6 +219,10 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_daily_crash_after_record_never_sends_false_empty(self):
         episode = Episode("ep-1", "Episode", "https://youtu.be/x", "Show")
+        self.store.save_verified_transcript(
+            episode,
+            Transcript("complete transcript", "test", "https://example.test", True),
+        )
         podcast = SequencePodcast([DailyItem(episode, "summarized", "SUMMARY")])
         messenger = FakeMessenger()
         self.store.enqueue("daily:2026-09-05", "daily", {})
@@ -231,6 +246,10 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_daily_can_requeue_without_resending_saved_output(self):
         sent = Episode("ep-sent", "Sent", "https://youtu.be/s", "Show")
         failed = Episode("ep-failed", "Failed", "https://youtu.be/f", "Show")
+        self.store.save_verified_transcript(
+            sent,
+            Transcript("complete transcript", "test", "https://example.test", True),
+        )
         podcast = SequencePodcast(
             [
                 DailyItem(sent, "summarized", "SUMMARY"),
@@ -261,7 +280,9 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         summary_deliveries = [
             item for item in messenger.delivered.values() if item.group_key == "episode:ep-sent"
         ]
-        self.assertEqual(len(summary_deliveries), 1)
+        self.assertEqual(
+            [item.msg_type for item in summary_deliveries], ["post", "file"]
+        )
         self.assertEqual(podcast.calls, 2)
         self.assertIn(
             "daily:candidate-failure",

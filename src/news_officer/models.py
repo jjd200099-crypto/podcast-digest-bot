@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -13,6 +14,7 @@ class IncomingMessage:
     chat_type: str = ""
     sender_open_id: str = ""
     thread_id: str = ""
+    parent_message_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,20 @@ class Transcript:
     source_url: str
     verified_complete: bool
     language: str = "en"
+
+
+@dataclass(frozen=True)
+class StoredTranscript:
+    """One verified complete transcript archived for later delivery and Q&A."""
+
+    episode: Episode
+    transcript: Transcript
+    content_sha256: str
+    stored_at: datetime
+
+    @property
+    def reference(self) -> str:
+        return hashlib.sha256(self.episode.id.encode("utf-8")).hexdigest()[:8]
 
 
 @dataclass(frozen=True)

@@ -411,6 +411,9 @@ class PodcastService:
                     "未取得完整文字稿，本次不摘要。"
                 ),
             )
+        # Archive the verified source before any model call. A formatting or
+        # delivery failure must never discard the only copy available for Q&A.
+        self.store.save_verified_transcript(episode, transcript)
         try:
             summary = self.summarizer.summarize(episode, transcript)
         except SummaryFormatError:
@@ -679,6 +682,7 @@ class PodcastService:
                 if transcript is None:
                     results.append(DailyItem(episode, "no_transcript"))
                     continue
+                self.store.save_verified_transcript(episode, transcript)
                 source_priority = str(
                     episode.metadata.get("source_priority") or "B"
                 ).upper()

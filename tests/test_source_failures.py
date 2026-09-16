@@ -112,6 +112,9 @@ class SourceFailureTests(unittest.TestCase):
 
         self.assertEqual(result.status, "summary_format_error")
         self.assertIn("没有发送不合格结果", result.message)
+        archived = self.store.get_verified_transcript(episode.id)
+        self.assertIsNotNone(archived)
+        self.assertEqual(archived.transcript.text, "complete transcript")
 
     def test_summary_format_failure_is_cooled_down_without_failing_daily_scan(self):
         self.feeds.write_text(
@@ -137,6 +140,9 @@ class SourceFailureTests(unittest.TestCase):
             items = service.build_daily(datetime(2026, 9, 6, tzinfo=UTC))
 
         self.assertEqual([item.status for item in items], ["summary_format_error"])
+        archived = self.store.get_verified_transcript(episode.id)
+        self.assertIsNotNone(archived)
+        self.assertEqual(archived.transcript.text, "complete transcript")
         self.store.record_episode(episode, items[0].status)
         self.assertIsNone(self.store.episode_review_state(episode.id))
 
