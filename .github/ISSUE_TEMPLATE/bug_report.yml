@@ -1,0 +1,42 @@
+name: Bug 报告
+description: 报告可复现的问题；安全问题请走私密漏洞报告
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: 请勿粘贴 App Secret、API Key、真实用户/群聊 ID 或包含凭证的日志。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么？预期结果是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请提供最小、稳定的复现步骤。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 提交版本、Python 版本、本地或 Railway；请先删除敏感信息。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 已脱敏的日志或证据
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全确认
+      options:
+        - label: 我已确认以上内容不含任何密钥或真实收件人 ID
+          required: true

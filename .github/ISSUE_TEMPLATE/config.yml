@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私密安全报告
+    url: https://github.com/jjd200099-crypto/podcast-digest-bot/security/advisories/new
+    about: 密钥泄露或安全漏洞请使用私密报告，不要创建公开 Issue。

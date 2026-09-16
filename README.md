@@ -60,3 +60,11 @@ docker run --env-file .env -v news-officer-data:/data news-officer
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## 一起贡献
+
+项目通过 GitHub Pull Request 协作。请从最新的 `main` 创建短生命周期分支，完成修改和测试后提交 PR；不要直接把功能分支长期堆在 `main` 上。CI 会自动执行 Ruff、单元测试与 Python 编译检查。
+
+新增播客源时，PR 必须说明节目官方来源、完整文字稿的取得方式，以及文字稿不完整时的失败行为。任何 App Secret、API Key、用户或群聊 ID 都不得提交到仓库；本地配置放在未跟踪的 `.env`，云端密钥放在 Railway Variables。
+
+完整开发流程、质量要求和 PR 清单见 [CONTRIBUTING.md](CONTRIBUTING.md)。漏洞或密钥泄露请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开创建 Issue。
