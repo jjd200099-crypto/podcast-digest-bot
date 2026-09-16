@@ -1,4 +1,4 @@
-beautifulsoup4>=4.12,<5
+beautifulsoup4>=4.15.0,<5
 lark-channel-sdk==1.4.0
 openai>=1.0.0
 requests>=2.31.0
