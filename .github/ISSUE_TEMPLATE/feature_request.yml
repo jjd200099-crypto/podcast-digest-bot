@@ -1,0 +1,30 @@
+name: 功能建议
+description: 建议新能力、播客源或质量改进
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: 使用场景
+      description: 谁在什么情况下需要它？当前痛点是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 描述期望行为和不在范围内的内容。
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: 官方来源或文字稿方案
+      description: 若建议新增播客源，请提供官网、官方 RSS 和可核验完整文字稿的取得方式。
+  - type: textarea
+    id: risks
+    attributes:
+      label: 风险与配置影响
+      description: 是否需要新增权限、云端变量或第三方服务？
