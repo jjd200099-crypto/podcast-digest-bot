@@ -157,6 +157,21 @@ class NewsOfficerTests(unittest.TestCase):
         )
         self.assertIn("已经订阅", plugin.handle("订阅", private).messages[0])
         self.assertIn("退订成功", plugin.handle("退订", private).messages[0])
+
+        natural = IncomingMessage(
+            "m-natural", "private", "帮我订阅每天的播客日报", "p2p", "user-natural"
+        )
+        self.assertTrue(plugin.matches(natural.text))
+        self.assertIn("订阅成功", plugin.handle(natural.text, natural).messages[0])
+        self.assertTrue(plugin.matches("不要再发了"))
+        self.assertIn(
+            "退订成功", plugin.handle("不要再发了", natural).messages[0]
+        )
+        self.assertFalse(plugin.matches("订阅这个播客"))
+        self.assertFalse(plugin.matches("开始吧"))
+        self.assertFalse(plugin.matches("开启一下"))
+        self.assertFalse(plugin.matches("开始更新"))
+        self.assertTrue(plugin.matches("开始每天的播客日报"))
         self.assertEqual(self.store.list_subscriptions(), [("chat_id", "oc_group")])
 
     def test_feed_candidates_are_interleaved(self):
@@ -253,6 +268,8 @@ class NewsOfficerTests(unittest.TestCase):
         self.assertIs(router.select("你能做什么"), help_plugin)
         help_message = IncomingMessage("om", "oc", "帮助", "p2p", "ou")
         self.assertIn("退订", help_plugin.handle("帮助", help_message).messages[0])
+        self.assertIn("你好，我在", help_plugin.handle("你好啊", help_message).messages[0])
+        self.assertNotIn("可用指令", help_plugin.handle("你好啊", help_message).messages[0])
 
     def test_feishu_chunks_leave_space_for_part_suffix(self):
         chunks = split_message(brand_message("洞察" * 3000), max_bytes=500)

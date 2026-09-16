@@ -13,6 +13,9 @@ from .models import Episode, Job, OutboxItem, StoredTranscript, Transcript
 
 RETRY_DELAYS_SECONDS = (60, 300, 900, 1800)
 FAILED_DAILY_REQUEUE_SECONDS = 3600
+MAX_CONVERSATION_TURNS = 4
+MAX_HISTORY_USER_CHARS = 500
+MAX_HISTORY_ASSISTANT_CHARS = 2_000
 
 
 def _now() -> str:
@@ -110,6 +113,7 @@ class Store:
                     episode_id TEXT NOT NULL DEFAULT '',
                     pending_episode_ids_json TEXT NOT NULL DEFAULT '[]',
                     recent_episode_ids_json TEXT NOT NULL DEFAULT '[]',
+                    history_json TEXT NOT NULL DEFAULT '[]',
                     pending_question TEXT NOT NULL DEFAULT '',
                     pending_action TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
@@ -202,6 +206,11 @@ class Store:
                 connection.execute(
                     "ALTER TABLE conversation_contexts "
                     "ADD COLUMN recent_episode_ids_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "history_json" not in context_columns:
+                connection.execute(
+                    "ALTER TABLE conversation_contexts "
+                    "ADD COLUMN history_json TEXT NOT NULL DEFAULT '[]'"
                 )
             digest_columns = {
                 str(row["name"])
@@ -974,7 +983,14 @@ class Store:
             rows = connection.execute(
                 """
                 SELECT * FROM episode_transcripts
-                ORDER BY COALESCE(published_at, updated_at) DESC, updated_at DESC
+                ORDER BY
+                    CASE
+                        WHEN published_at IS NULL OR trim(published_at) = '' THEN 1
+                        ELSE 0
+                    END,
+                    published_at DESC,
+                    stored_at DESC,
+                    episode_id ASC
                 LIMIT ?
                 """,
                 (limit,),
@@ -984,6 +1000,13 @@ class Store:
     def search_verified_transcripts(
         self, term: str, limit: int = 5
     ) -> list[StoredTranscript]:
+        """Search episode metadata only; transcript text never selects an episode.
+
+        Full transcript text is evidence after an episode has been selected. It
+        is deliberately excluded here so a passing mention of a guest or show
+        cannot silently bind a question to the wrong episode.
+        """
+
         value = term.strip()
         if not value:
             return []
@@ -998,7 +1021,6 @@ class Store:
                 SELECT * FROM episode_transcripts
                 WHERE title LIKE ? ESCAPE '\\' COLLATE NOCASE
                    OR show_name LIKE ? ESCAPE '\\' COLLATE NOCASE
-                   OR transcript_text LIKE ? ESCAPE '\\' COLLATE NOCASE
                 ORDER BY
                     CASE
                         WHEN title = ? COLLATE NOCASE THEN 0
@@ -1006,11 +1028,16 @@ class Store:
                         WHEN show_name LIKE ? ESCAPE '\\' COLLATE NOCASE THEN 2
                         ELSE 3
                     END,
-                    COALESCE(published_at, updated_at) DESC,
-                    updated_at DESC
+                    CASE
+                        WHEN published_at IS NULL OR trim(published_at) = '' THEN 1
+                        ELSE 0
+                    END,
+                    published_at DESC,
+                    stored_at DESC,
+                    episode_id ASC
                 LIMIT ?
                 """,
-                (pattern, pattern, pattern, value, pattern, pattern, limit),
+                (pattern, pattern, value, pattern, pattern, limit),
             ).fetchall()
         return [self._stored_transcript(row) for row in rows]
 
@@ -1065,6 +1092,23 @@ class Store:
             return None
         if datetime.now(UTC) - updated_at > timedelta(hours=max(1, max_age_hours)):
             return None
+        try:
+            raw_history = json.loads(str(row["history_json"]))
+        except (json.JSONDecodeError, TypeError):
+            raw_history = []
+        history = tuple(
+            {
+                "user": str(item.get("user") or "")[:MAX_HISTORY_USER_CHARS],
+                "assistant": str(item.get("assistant") or "")[
+                    :MAX_HISTORY_ASSISTANT_CHARS
+                ],
+                "episode_id": str(item.get("episode_id") or ""),
+            }
+            for item in raw_history[-MAX_CONVERSATION_TURNS:]
+            if isinstance(item, dict)
+            and str(item.get("user") or "").strip()
+            and str(item.get("assistant") or "").strip()
+        )
         return {
             "episode_id": str(row["episode_id"]),
             "pending_episode_ids": tuple(
@@ -1075,10 +1119,61 @@ class Store:
                 str(item)
                 for item in json.loads(str(row["recent_episode_ids_json"]))
             ),
+            "history": history,
             "pending_question": str(row["pending_question"]),
             "pending_action": str(row["pending_action"]),
             "updated_at": updated_at.isoformat(),
         }
+
+    def append_conversation_turn(
+        self,
+        context_key: str,
+        *,
+        user_text: str,
+        assistant_text: str,
+        episode_id: str = "",
+    ) -> None:
+        """Persist a small dialogue window for pronoun and topic follow-ups."""
+
+        key = str(context_key or "").strip()
+        user = re.sub(r"\s+", " ", str(user_text or "")).strip()[
+            :MAX_HISTORY_USER_CHARS
+        ]
+        assistant = str(assistant_text or "").strip()[:MAX_HISTORY_ASSISTANT_CHARS]
+        if not key or not user or not assistant:
+            return
+        entry = {
+            "user": user,
+            "assistant": assistant,
+            "episode_id": str(episode_id or ""),
+        }
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT history_json FROM conversation_contexts WHERE context_key = ?",
+                (key,),
+            ).fetchone()
+            try:
+                history = json.loads(str(row["history_json"])) if row else []
+            except (json.JSONDecodeError, TypeError):
+                history = []
+            if not isinstance(history, list):
+                history = []
+            history = [item for item in history if isinstance(item, dict)]
+            history = (history + [entry])[-MAX_CONVERSATION_TURNS:]
+            encoded = json.dumps(history, ensure_ascii=False, separators=(",", ":"))
+            connection.execute(
+                """
+                INSERT INTO conversation_contexts(
+                    context_key, episode_id, history_json, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(context_key) DO UPDATE SET
+                    history_json = excluded.history_json,
+                    updated_at = excluded.updated_at
+                """,
+                (key, str(episode_id or ""), encoded, now),
+            )
 
     def save_recent_transcript_snapshot(
         self, context_key: str, episode_ids: tuple[str, ...]
@@ -1090,10 +1185,15 @@ class Store:
             connection.execute(
                 """
                 INSERT INTO conversation_contexts(
-                    context_key, recent_episode_ids_json, updated_at
-                ) VALUES (?, ?, ?)
+                    context_key, recent_episode_ids_json,
+                    pending_episode_ids_json, pending_question,
+                    pending_action, updated_at
+                ) VALUES (?, ?, '[]', '', '', ?)
                 ON CONFLICT(context_key) DO UPDATE SET
                     recent_episode_ids_json = excluded.recent_episode_ids_json,
+                    pending_episode_ids_json = '[]',
+                    pending_question = '',
+                    pending_action = '',
                     updated_at = excluded.updated_at
                 """,
                 (context_key, encoded, _now()),

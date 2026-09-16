@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from .agent import AgentIntentResolver
 from .config import Settings
 from .feishu import FeishuMessenger
 from .podcast import PodcastService
@@ -24,6 +25,9 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
     messenger = FeishuMessenger(settings.feishu_app_id, settings.feishu_app_secret)
     summarizer = TranscriptSummarizer(settings.openai_api_key, settings.openai_model)
     qa = TranscriptQAService(settings.openai_api_key, settings.openai_model)
+    intent_resolver = AgentIntentResolver(
+        settings.openai_api_key, settings.openai_model
+    )
     podcast = PodcastService(
         store=store,
         feeds_path=settings.feeds_path,
@@ -36,7 +40,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         [
             SubscriptionPlugin(store),
             PodcastPlugin(podcast),
-            TranscriptInteractionPlugin(store, qa),
+            TranscriptInteractionPlugin(store, qa, intent_resolver),
             HelpPlugin(),
         ]
     )
