@@ -4,4 +4,4 @@ openai>=1.0.0
 requests>=2.31.0
 socksio>=1.0,<2
 tzdata>=2025.2
-yt-dlp[default,curl-cffi,deno]>=2025.1.0
+yt-dlp[default,curl-cffi,deno]>=2025.12.8
