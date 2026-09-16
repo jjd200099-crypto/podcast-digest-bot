@@ -21,10 +21,25 @@ from news_officer.models import (
     IncomingMessage,
     OutboxItem,
     Transcript,
+    TranscriptAttachment,
 )
 from news_officer.router import PluginResponse
 from news_officer.runtime import NewsOfficerRuntime
 from news_officer.store import Store
+from news_officer.transcript_view import RENDERER_VERSION, render_readable_transcript
+
+
+def attachment_for(record, digest_markdown):
+    filename, content = render_readable_transcript(
+        record, digest_markdown=digest_markdown
+    )
+    return TranscriptAttachment.from_rendered(
+        record,
+        digest_markdown=digest_markdown,
+        renderer_version=RENDERER_VERSION,
+        filename=filename,
+        content=content,
+    )
 
 
 class FakePlugin:
@@ -219,11 +234,26 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_daily_crash_after_record_never_sends_false_empty(self):
         episode = Episode("ep-1", "Episode", "https://youtu.be/x", "Show")
-        self.store.save_verified_transcript(
+        stored = self.store.save_verified_transcript(
             episode,
             Transcript("complete transcript", "test", "https://example.test", True),
         )
-        podcast = SequencePodcast([DailyItem(episode, "summarized", "SUMMARY")])
+        self.store.save_transcript_digest(
+            episode.id,
+            "SUMMARY",
+            stored.content_sha256,
+            stored.record_revision_sha256,
+        )
+        podcast = SequencePodcast(
+            [
+                DailyItem(
+                    episode,
+                    "summarized",
+                    "SUMMARY",
+                    attachment_for(stored, "SUMMARY"),
+                )
+            ]
+        )
         messenger = FakeMessenger()
         self.store.enqueue("daily:2026-09-05", "daily", {})
         first = self.store.claim_next("daily")
@@ -246,13 +276,24 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_daily_can_requeue_without_resending_saved_output(self):
         sent = Episode("ep-sent", "Sent", "https://youtu.be/s", "Show")
         failed = Episode("ep-failed", "Failed", "https://youtu.be/f", "Show")
-        self.store.save_verified_transcript(
+        stored = self.store.save_verified_transcript(
             sent,
             Transcript("complete transcript", "test", "https://example.test", True),
         )
+        self.store.save_transcript_digest(
+            sent.id,
+            "SUMMARY",
+            stored.content_sha256,
+            stored.record_revision_sha256,
+        )
         podcast = SequencePodcast(
             [
-                DailyItem(sent, "summarized", "SUMMARY"),
+                DailyItem(
+                    sent,
+                    "summarized",
+                    "SUMMARY",
+                    attachment_for(stored, "SUMMARY"),
+                ),
                 DailyItem(failed, "failed", "temporary outage"),
             ],
             [],

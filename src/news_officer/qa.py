@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 from openai import OpenAI
 
+from .transcript_view import render_readable_transcript
+
 if TYPE_CHECKING:
     from .models import StoredTranscript
 
@@ -16,6 +18,8 @@ MAX_QA_TRANSCRIPT_CHARS = 260_000
 MAX_QA_QUESTION_CHARS = 500
 MAX_QA_OUTPUT_TOKENS = 1_200
 MAX_POINT_CHARS = 160
+MAX_QUOTE_CHARS = 120
+MAX_TOTAL_QUOTE_UNITS = 25
 CHUNK_TARGET_CHARS = 1_800
 CHUNK_MIN_CHARS = 1_200
 CHUNK_MAX_CHARS = 2_200
@@ -26,7 +30,6 @@ SPEAKER_LINE_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9 .,'’\-]{0,59}|[\u3400-\u9fff]{2,16})"
     r"\s*:\s+\S"
 )
-FILENAME_UNSAFE_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
 
 class QAFormatError(ValueError):
@@ -78,15 +81,6 @@ def _plain_metadata(value: object) -> str:
     return re.sub(r"[\r\n]+", " ", str(value or "")).strip()
 
 
-def _duration(record: StoredTranscript) -> str:
-    episode = record.episode
-    if episode.duration_string:
-        return _plain_metadata(episode.duration_string)
-    if episode.duration_seconds:
-        return f"{round(episode.duration_seconds / 60)} 分钟"
-    return "未提供"
-
-
 def _safe_link(label: str, url: str) -> str:
     clean_label = _plain_metadata(label).replace("[", "［").replace("]", "］")
     parts = urlsplit(url)
@@ -95,55 +89,14 @@ def _safe_link(label: str, url: str) -> str:
     return clean_label
 
 
-def _attachment_filename(record: StoredTranscript) -> str:
-    title = FILENAME_UNSAFE_RE.sub("_", _plain_metadata(record.episode.title))
-    title = re.sub(r"\s+", " ", title).strip(" ._") or "podcast"
-    # Keep filenames usable across Feishu, macOS and Windows while retaining a
-    # short content-addressed reference for provenance.
-    title = title[:80].rstrip(" ._") or "podcast"
-    return f"{title}_{record.reference}_完整文字稿.md"
-
-
 def render_transcript_attachment(
     record: StoredTranscript,
+    *,
+    digest_markdown: str = "",
 ) -> tuple[str, bytes]:
-    """Render the verified transcript as a searchable, provenance-rich file."""
+    """Render a readable view while the archived source remains unchanged."""
 
-    transcript = record.transcript
-    if not transcript.verified_complete:
-        raise ValueError("An unverified transcript cannot be attached")
-    chunks = chunk_transcript(transcript.text)
-    if not chunks:
-        raise ValueError("A complete transcript cannot be empty")
-
-    episode = record.episode
-    published_at = (
-        episode.published_at.isoformat() if episode.published_at else "未提供"
-    )
-    stored_at = record.stored_at.isoformat()
-    lines = [
-        f"# {_plain_metadata(episode.title)}｜完整文字稿",
-        "",
-        f"- 节目：{_plain_metadata(episode.show) or '未提供'}",
-        f"- 节目链接：{_safe_link('原节目', episode.url)}",
-        f"- 发布时间：{published_at}",
-        f"- 时长：{_duration(record)}",
-        f"- 文字稿来源：{_safe_link(transcript.source, transcript.source_url)}",
-        "- 完整性：已核验完整",
-        f"- 内容哈希：{record.content_sha256}",
-        f"- 检索编号：{record.reference}",
-        f"- 存档时间：{stored_at}",
-        "",
-        "> 来源与使用说明：本文按来源原文存档，未补充节目外信息。仅供团队内部研究；",
-        "> 引用、转载或对外发布前，请核对原始来源及相应权利要求。C 编号用于情报官回答中的证据定位。",
-        "",
-        "## 完整文字稿",
-        "",
-    ]
-    for chunk_id, chunk in chunks:
-        lines.extend((f"### [{chunk_id}]", "", chunk, ""))
-    markdown = "\n".join(lines)
-    return _attachment_filename(record), markdown.encode("utf-8")
+    return render_readable_transcript(record, digest_markdown=digest_markdown)
 
 
 def _has_reliable_speaker_labels(text: str) -> bool:
@@ -155,7 +108,28 @@ def _has_reliable_speaker_labels(text: str) -> bool:
     return sum(count >= 2 for count in speakers.values()) >= 2
 
 
-def _parse_answer(raw: str, valid_chunk_ids: set[str]) -> dict[str, Any]:
+def _quote_units(text: str) -> int:
+    # Count Han characters individually, as promised to the model, while
+    # treating words in any other Unicode script (not just ASCII English) as
+    # one unit.  The Han alternative comes first so a run of Chinese text is
+    # not consumed as a single Unicode ``word`` by the second alternative.
+    return len(
+        re.findall(
+            r"[\u3400-\u9fff]|[^\W_]+(?:['’\-][^\W_]+)*",
+            text,
+            flags=re.UNICODE,
+        )
+    )
+
+
+def _evidence_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_answer(
+    raw: str,
+    chunks_by_id: dict[str, str],
+) -> dict[str, Any]:
     if not isinstance(raw, str):
         raise QAFormatError("Q&A response must be strict JSON")
     try:
@@ -191,11 +165,17 @@ def _parse_answer(raw: str, valid_chunk_ids: set[str]) -> dict[str, Any]:
             "an answerable response needs 1-6 points and an empty reason"
         )
     parsed_points: list[dict[str, Any]] = []
+    total_quote_units = 0
     for point in points:
-        if not isinstance(point, dict) or set(point) != {"text", "citations"}:
+        if not isinstance(point, dict) or set(point) != {
+            "text",
+            "citations",
+            "quote",
+        }:
             raise QAFormatError("a point has an invalid schema")
         text = point["text"]
         citations = point["citations"]
+        quote = point["quote"]
         if (
             not isinstance(text, str)
             or not text.strip()
@@ -206,6 +186,14 @@ def _parse_answer(raw: str, valid_chunk_ids: set[str]) -> dict[str, Any]:
             raise QAFormatError("a point is empty, multiline, or too long")
         if not isinstance(citations, list) or not 1 <= len(citations) <= 3:
             raise QAFormatError("a point must have 1-3 citations")
+        if (
+            not isinstance(quote, str)
+            or not quote.strip()
+            or len(quote.strip()) > MAX_QUOTE_CHARS
+            or "\n" in quote
+            or "\r" in quote
+        ):
+            raise QAFormatError("an evidence quote is empty, multiline, or too long")
         if any(type(citation) is not str for citation in citations):
             raise QAFormatError("citation IDs must be strings")
         normalized_citations = [citation.strip() for citation in citations]
@@ -213,13 +201,31 @@ def _parse_answer(raw: str, valid_chunk_ids: set[str]) -> dict[str, Any]:
             len(set(normalized_citations)) != len(normalized_citations)
             or any(
                 not CHUNK_ID_RE.fullmatch(citation)
-                or citation not in valid_chunk_ids
+                or citation not in chunks_by_id
                 for citation in normalized_citations
             )
         ):
             raise QAFormatError("a point contains an invalid citation")
+        normalized_quote = _evidence_text(quote)
+        if not any(
+            normalized_quote in _evidence_text(chunks_by_id[citation])
+            for citation in normalized_citations
+        ):
+            raise QAFormatError("an evidence quote is not present in its cited chunk")
+        quote_units = _quote_units(normalized_quote)
+        if quote_units <= 0:
+            raise QAFormatError(
+                "an evidence quote must contain at least one word or Han character"
+            )
+        total_quote_units += quote_units
+        if total_quote_units > MAX_TOTAL_QUOTE_UNITS:
+            raise QAFormatError("the combined evidence quotes are too long")
         parsed_points.append(
-            {"text": text.strip(), "citations": normalized_citations}
+            {
+                "text": text.strip(),
+                "citations": normalized_citations,
+                "quote": normalized_quote,
+            }
         )
     return {"answerable": True, "points": parsed_points, "reason": ""}
 
@@ -251,13 +257,14 @@ def _render_answer(
                 for chunk_id in point["citations"]
             )
             lines.append(f"{index}. {point['text']}（{citations}）")
+            lines.append(f"> 原文摘录：{point['quote']}")
     else:
         lines.append(f"文字稿中的证据不足，无法可靠回答：{answer['reason']}")
 
     lines.extend(
         (
             "",
-            "> 依据范围：回答仅使用这份已核验完整文字稿；引用编号对应所附文字稿中的 C 段落。",
+            "> 依据范围：回答仅使用已归档的原始核验全文；每条原文摘录都经过逐字匹配，C 编号是情报官内部原文位置。附件为精编可读版，可用摘录在官方文字稿中复核。",
         )
     )
     if not speaker_labeled:
@@ -288,7 +295,7 @@ class TranscriptQAService:
 - `points`: 数组；能回答时包含 1–6 项，不能回答时必须为空；
 - `reason`: 字符串；能回答时必须为空，不能回答时用不超过 160 字的一句话说明缺少什么证据。
 
-每个 point 必须且只能包含 `text` 和 `citations`。`text` 是不超过 160 个字符的单行中文结论；`citations` 是 1–3 个直接支撑该结论的 C 编号。不得虚构编号。区分嘉宾观点、主持人提问、预测、公司自述和已经发生的事实；不得把问题改写成结论。如果文字稿证据不足或无法可靠归因，将 `answerable` 设为 false，不能猜测。"""
+每个 point 必须且只能包含 `text`、`citations` 和 `quote`。`text` 是不超过 160 个字符的单行中文结论；`citations` 是 1–3 个直接支撑该结论的 C 编号；`quote` 必须是这些引用段中逐字存在的一小段原文，只摘录足以定位的最短短语。所有 point 的 quote 合计不得超过 25 个英文单词或汉字，不得改写、翻译或使用省略号。不得虚构编号。区分嘉宾观点、主持人提问、预测、公司自述和已经发生的事实；不得把问题改写成结论。如果文字稿证据不足或无法可靠归因，将 `answerable` 设为 false，不能猜测。"""
 
     @staticmethod
     def _input(
@@ -341,7 +348,7 @@ class TranscriptQAService:
             )
 
         chunks = chunk_transcript(transcript.text)
-        valid_chunk_ids = {chunk_id for chunk_id, _chunk in chunks}
+        chunks_by_id = dict(chunks)
         speaker_labeled = _has_reliable_speaker_labels(transcript.text)
         instructions = self._instructions(speaker_labeled=speaker_labeled)
         for attempt in range(2):
@@ -359,7 +366,7 @@ class TranscriptQAService:
             )
             try:
                 parsed = _parse_answer(
-                    getattr(response, "output_text", None), valid_chunk_ids
+                    getattr(response, "output_text", None), chunks_by_id
                 )
             except QAFormatError:
                 if attempt == 0:

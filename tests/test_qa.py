@@ -53,8 +53,12 @@ def answer_json(*points, answerable=True, reason=""):
     )
 
 
-def point(text="这是由完整文字稿直接支持的结论。", citations=("C0001",)):
-    return {"text": text, "citations": list(citations)}
+def point(
+    text="这是由完整文字稿直接支持的结论。",
+    citations=("C0001",),
+    quote="complete evidence",
+):
+    return {"text": text, "citations": list(citations), "quote": quote}
 
 
 class FakeResponses:
@@ -102,22 +106,46 @@ class TranscriptChunkTests(unittest.TestCase):
 
 
 class TranscriptAttachmentTests(unittest.TestCase):
-    def test_attachment_has_provenance_and_every_complete_chunk(self):
-        text = "opening-unique " + "x" * 4_500 + " closing-unique"
+    def test_attachment_is_a_readable_view_with_source_provenance(self):
+        text = (
+            "Host: Welcome to the show.\n"
+            "Guest: The durable result is $2.4B, but not before 2027.\n"
+            "Host: Yeah.\n"
+            "Guest: The condition matters."
+        )
         stored = record(text)
 
         filename, data = render_transcript_attachment(stored)
         rendered = data.decode("utf-8")
 
-        self.assertEqual(filename, "A Great_Podcast_ Episode_abcdef12_完整文字稿.md")
-        self.assertIn("完整性：已核验完整", rendered)
-        self.assertIn(stored.content_sha256, rendered)
+        self.assertEqual(
+            filename,
+            "2026-09-16_A Great_Podcast_ Episode_abcdef12_精编文字稿.md",
+        )
+        self.assertIn("精编可读版文字稿", rendered)
+        self.assertIn("来源覆盖：已取得并核验完整文字稿", rendered)
+        self.assertIn(stored.content_sha256[:12], rendered)
         self.assertIn("检索编号：abcdef12", rendered)
-        self.assertIn("仅供团队内部研究", rendered)
         self.assertIn("https://example.com/transcript", rendered)
-        for chunk_id, chunk in chunk_transcript(text):
-            self.assertEqual(rendered.count(f"### [{chunk_id}]"), 1)
-            self.assertEqual(rendered.count(chunk), 1)
+        self.assertIn("**Guest**", rendered)
+        self.assertIn("$2.4B, but not before 2027", rendered)
+        self.assertNotIn("### [C0001]", rendered)
+        self.assertNotIn("Host: Yeah", rendered)
+
+    def test_daily_digest_points_are_reused_as_navigation(self):
+        _filename, data = render_transcript_attachment(
+            record("Guest: Evidence."),
+            digest_markdown=(
+                "节目：测试\n链接：https://example.com\n\n"
+                "### 商业模式\n1. 第一条核心判断。\n2. 第二条核心判断。"
+            ),
+        )
+        rendered = data.decode("utf-8")
+
+        self.assertIn("## 核心论点", rendered)
+        self.assertIn("### 商业模式", rendered)
+        self.assertIn("1. 第一条核心判断。", rendered)
+        self.assertNotIn("节目：测试", rendered)
 
     def test_unverified_transcript_cannot_be_attached(self):
         with self.assertRaisesRegex(ValueError, "unverified"):
@@ -131,8 +159,8 @@ class TranscriptQAServiceTests(unittest.TestCase):
         stored = record(text)
         qa = service(
             answer_json(
-                point("第一项结论。", ("C0001",)),
-                point("第二项结论。", ("C0002", "C0003")),
+                point("第一项结论。", ("C0001",), "first-unique"),
+                point("第二项结论。", ("C0002", "C0003"), malicious),
             )
         )
 
@@ -156,6 +184,7 @@ class TranscriptQAServiceTests(unittest.TestCase):
         self.assertIn("第一项结论", markdown)
         self.assertIn("C0001·文字稿定位", markdown)
         self.assertIn("C0003·文字稿定位", markdown)
+        self.assertIn(f"原文摘录：{malicious}", markdown)
         self.assertIn("official transcript", markdown)
         self.assertIn("未保留可靠的说话人标签", markdown)
 
@@ -166,7 +195,11 @@ class TranscriptQAServiceTests(unittest.TestCase):
             "Host: Why?\n"
             "Guest: Distribution improved.\n"
         )
-        qa = service(answer_json(point(citations=("C0001",))))
+        qa = service(
+            answer_json(
+                point(citations=("C0001",), quote="The market changed.")
+            )
+        )
 
         markdown = qa.answer(record(text), "嘉宾为什么改变判断？")
 
@@ -202,6 +235,39 @@ class TranscriptQAServiceTests(unittest.TestCase):
             qa.client.responses.calls[1]["input"].count("complete evidence"), 1
         )
         self.assertIn("C0001·文字稿定位", markdown)
+
+    def test_non_verbatim_evidence_quote_is_retried(self):
+        invalid = answer_json(point(quote="rewritten evidence"))
+        valid = answer_json(point(quote="complete evidence"))
+        qa = service(invalid, valid)
+
+        markdown = qa.answer(record("complete evidence"), "核心观点？")
+
+        self.assertEqual(len(qa.client.responses.calls), 2)
+        self.assertIn("原文摘录：complete evidence", markdown)
+
+    def test_punctuation_only_evidence_quote_is_retried(self):
+        invalid = answer_json(point(quote="……"))
+        valid = answer_json(point(quote="有效证据"))
+        qa = service(invalid, valid)
+
+        markdown = qa.answer(record("节目文字……后续提供有效证据。"), "核心观点？")
+
+        self.assertEqual(len(qa.client.responses.calls), 2)
+        self.assertIn("原文摘录：有效证据", markdown)
+
+    def test_quote_budget_counts_non_latin_words_and_retries_over_25(self):
+        twenty_six_cyrillic_words = (
+            "а б в г д е ё ж з и й к л м н о п р с т у ф х ц ч ш"
+        )
+        invalid = answer_json(point(quote=twenty_six_cyrillic_words))
+        valid = answer_json(point(quote="а б"))
+        qa = service(invalid, valid)
+
+        markdown = qa.answer(record(twenty_six_cyrillic_words), "核心观点？")
+
+        self.assertEqual(len(qa.client.responses.calls), 2)
+        self.assertIn("原文摘录：а б", markdown)
 
     def test_invalid_json_twice_raises_safe_format_error(self):
         qa = service("not json", "still not json")

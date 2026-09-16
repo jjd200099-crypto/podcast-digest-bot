@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -91,6 +92,18 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS episode_transcripts_recent_idx
                     ON episode_transcripts(published_at DESC, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS episode_digests (
+                    episode_id TEXT PRIMARY KEY,
+                    source_sha256 TEXT NOT NULL,
+                    record_revision_sha256 TEXT NOT NULL,
+                    digest_markdown TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK(length(digest_markdown) > 0),
+                    FOREIGN KEY(episode_id) REFERENCES episode_transcripts(episode_id)
+                        ON DELETE CASCADE
+                );
 
                 CREATE TABLE IF NOT EXISTS conversation_contexts (
                     context_key TEXT PRIMARY KEY,
@@ -189,6 +202,19 @@ class Store:
                 connection.execute(
                     "ALTER TABLE conversation_contexts "
                     "ADD COLUMN recent_episode_ids_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            digest_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(episode_digests)"
+                ).fetchall()
+            }
+            if "record_revision_sha256" not in digest_columns:
+                # Existing digest rows predate full metadata binding. The empty
+                # default deliberately makes them stale until regenerated.
+                connection.execute(
+                    "ALTER TABLE episode_digests ADD COLUMN "
+                    "record_revision_sha256 TEXT NOT NULL DEFAULT ''"
                 )
 
     @staticmethod
@@ -795,10 +821,137 @@ class Store:
                     now,
                 ),
             )
-        stored = self.get_verified_transcript(episode.id)
-        if stored is None:  # pragma: no cover - the insert above must create a row
-            raise RuntimeError(f"Transcript archive failed for {episode.id}")
+            # Read back through the same write transaction. A second worker
+            # cannot replace this episode between the upsert and snapshot;
+            # callers therefore summarize exactly the revision they saved.
+            row = connection.execute(
+                "SELECT * FROM episode_transcripts WHERE episode_id = ?",
+                (episode.id,),
+            ).fetchone()
+            if row is None:  # pragma: no cover - the upsert above must create it
+                raise RuntimeError(f"Transcript archive failed for {episode.id}")
+            stored = self._stored_transcript(row)
         return stored
+
+    def save_transcript_digest(
+        self,
+        episode_id: str,
+        digest_markdown: str,
+        expected_source_sha256: str,
+        expected_record_revision_sha256: str,
+    ) -> str:
+        """Bind the first validated digest to exact text and metadata inputs."""
+
+        digest = str(digest_markdown or "").strip()
+        if not digest:
+            raise ValueError("A transcript digest cannot be empty")
+        expected_hash = str(expected_source_sha256 or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            raise ValueError("A transcript digest requires an expected source hash")
+        expected_revision = str(
+            expected_record_revision_sha256 or ""
+        ).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_revision):
+            raise ValueError(
+                "A transcript digest requires an expected record revision"
+            )
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM episode_transcripts WHERE episode_id = ?",
+                (episode_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("A transcript digest requires an archived transcript")
+            current_hash = str(row["content_sha256"])
+            if current_hash != expected_hash:
+                raise ValueError(
+                    "The transcript changed before its digest could be stored"
+                )
+            current_revision = self._stored_transcript(
+                row
+            ).record_revision_sha256
+            if current_revision != expected_revision:
+                raise ValueError(
+                    "The transcript metadata changed before its digest could be stored"
+                )
+            connection.execute(
+                """
+                INSERT INTO episode_digests(
+                    episode_id, source_sha256, record_revision_sha256,
+                    digest_markdown, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(episode_id) DO UPDATE SET
+                    source_sha256 = excluded.source_sha256,
+                    record_revision_sha256 = excluded.record_revision_sha256,
+                    digest_markdown = excluded.digest_markdown,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at
+                WHERE episode_digests.source_sha256 != excluded.source_sha256
+                   OR episode_digests.record_revision_sha256
+                      != excluded.record_revision_sha256
+                """,
+                (
+                    episode_id,
+                    expected_hash,
+                    expected_revision,
+                    digest,
+                    now,
+                    now,
+                ),
+            )
+            canonical = connection.execute(
+                """
+                SELECT source_sha256, record_revision_sha256, digest_markdown
+                FROM episode_digests WHERE episode_id = ?
+                """,
+                (episode_id,),
+            ).fetchone()
+            if (
+                canonical is None
+                or str(canonical["source_sha256"]) != expected_hash
+                or str(canonical["record_revision_sha256"])
+                != expected_revision
+            ):
+                raise RuntimeError("Transcript digest revision was not stored")
+            return str(canonical["digest_markdown"])
+
+    def get_transcript_digest_revision(
+        self, episode_id: str
+    ) -> tuple[str, str, str] | None:
+        """Return source hash, full record revision, and digest, even if stale."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT source_sha256, record_revision_sha256, digest_markdown
+                FROM episode_digests WHERE episode_id = ?
+                """,
+                (episode_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            str(row["source_sha256"]),
+            str(row["record_revision_sha256"]),
+            str(row["digest_markdown"]),
+        )
+
+    def get_transcript_digest(self, episode_id: str) -> str:
+        """Return a digest only when it still matches the current source text."""
+
+        record = self.get_verified_transcript(episode_id)
+        revision = self.get_transcript_digest_revision(episode_id)
+        if record is None or revision is None:
+            return ""
+        source_sha256, record_revision_sha256, digest = revision
+        if (
+            source_sha256 != record.content_sha256
+            or record_revision_sha256 != record.record_revision_sha256
+        ):
+            return ""
+        return digest
 
     def get_verified_transcript(self, episode_id_or_reference: str) -> StoredTranscript | None:
         value = episode_id_or_reference.strip()

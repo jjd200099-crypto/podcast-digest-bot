@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Mapping
 from datetime import datetime
@@ -17,11 +18,12 @@ from lark_channel import (
 
 from .config import Settings
 from .feishu import FeishuMessenger, delivery_parts, file_delivery_part
-from .models import DailyItem, IncomingMessage, Job
+from .models import DailyItem, IncomingMessage, Job, TranscriptAttachment
 from .podcast import PodcastService
 from .qa import render_transcript_attachment
 from .router import CommandRouter
 from .store import Store
+from .transcript_view import RENDERER_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -185,27 +187,71 @@ class NewsOfficerRuntime:
                 parts=parts,
             )
 
-    def _uploaded_transcript_file(self, job: Job, episode_id: str) -> str:
-        result_key = f"transcript-file:{episode_id}"
+    def _uploaded_transcript_file(
+        self,
+        job: Job,
+        attachment: TranscriptAttachment,
+    ) -> str:
+        filename_sha256 = hashlib.sha256(
+            attachment.filename.encode("utf-8")
+        ).hexdigest()
+        result_key = (
+            f"transcript-file:{attachment.renderer_version}:"
+            f"{attachment.episode_id}:{attachment.source_sha256}:"
+            f"{attachment.record_revision_sha256}:"
+            f"{attachment.digest_sha256}:{attachment.rendered_sha256}:"
+            f"{filename_sha256}"
+        )
         persisted = self.store.get_job_result(job.key, result_key)
         if persisted is not None:
+            if persisted.get("attachment") != attachment.to_persisted_dict():
+                return ""
             return str(persisted["file_key"])
-        record = self.store.get_verified_transcript(episode_id)
-        if record is None:
+        # A previously uploaded artifact remains safe to replay even after its
+        # source row changes. Without such an upload, however, an old renderer
+        # or changed input cannot be reconstructed and must fail closed.
+        if attachment.renderer_version != RENDERER_VERSION:
             return ""
-        filename, content = render_transcript_attachment(record)
+        record = self.store.get_verified_transcript(attachment.episode_id)
+        if record is None or record.content_sha256 != attachment.source_sha256:
+            return ""
+        if record.record_revision_sha256 != attachment.record_revision_sha256:
+            return ""
+        revision = self.store.get_transcript_digest_revision(
+            attachment.episode_id
+        )
+        if (
+            revision is not None
+            and revision[0] == attachment.source_sha256
+            and revision[1] == attachment.record_revision_sha256
+        ):
+            digest_markdown = revision[2]
+        else:
+            digest_markdown = ""
+        digest_sha256 = hashlib.sha256(
+            digest_markdown.encode("utf-8")
+        ).hexdigest()
+        if digest_sha256 != attachment.digest_sha256:
+            return ""
+        filename, content = render_transcript_attachment(
+            record, digest_markdown=digest_markdown
+        )
+        if filename != attachment.filename:
+            return ""
+        if hashlib.sha256(content).hexdigest() != attachment.rendered_sha256:
+            return ""
         file_key = self.messenger.upload_file(content, filename)
         canonical = self.store.save_job_result(
             job.key,
             result_key,
             "transcript_file",
             {
-                "episode_id": episode_id,
-                "content_sha256": record.content_sha256,
-                "filename": filename,
+                "attachment": attachment.to_persisted_dict(),
                 "file_key": file_key,
             },
         )
+        if canonical.get("attachment") != attachment.to_persisted_dict():
+            return ""
         return str(canonical["file_key"])
 
     def _daily_targets(self, job: Job) -> list[tuple[str, str]]:
@@ -291,6 +337,11 @@ class NewsOfficerRuntime:
                 parent_message_id=str(payload.get("parent_message_id") or ""),
             )
             response = await asyncio.to_thread(plugin.handle, text, incoming)
+            attachment_descriptors = [
+                descriptor.to_persisted_dict()
+                for descriptor in response.attachments
+                if descriptor.episode_id in response.attachment_episode_ids
+            ]
             persisted = await asyncio.to_thread(
                 self.store.save_job_result,
                 job.key,
@@ -301,6 +352,7 @@ class NewsOfficerRuntime:
                     "attachment_episode_ids": list(
                         response.attachment_episode_ids
                     ),
+                    "attachments": attachment_descriptors,
                     "context_episode_id": response.context_episode_id,
                 },
             )
@@ -308,11 +360,31 @@ class NewsOfficerRuntime:
             str(item)
             for item in persisted.get("attachment_episode_ids") or ()
         )
+        descriptor_by_episode: dict[str, TranscriptAttachment] = {}
+        for value in persisted.get("attachments") or ():
+            if not isinstance(value, dict):
+                continue
+            try:
+                descriptor = TranscriptAttachment.from_persisted_dict(value)
+            except (TypeError, ValueError):
+                continue
+            if (
+                descriptor.episode_id in attachment_episode_ids
+                and descriptor.episode_id not in descriptor_by_episode
+            ):
+                descriptor_by_episode[descriptor.episode_id] = descriptor
         uploaded_file_keys: list[str] = []
         missing_attachment_ids: list[str] = []
         for episode_id in attachment_episode_ids:
+            descriptor = descriptor_by_episode.get(episode_id)
+            if descriptor is None:
+                # Analyses persisted by older versions intentionally do not
+                # snapshot today's transcript. That would pair an old reply
+                # with a new attachment after a retry.
+                missing_attachment_ids.append(episode_id)
+                continue
             file_key = await asyncio.to_thread(
-                self._uploaded_transcript_file, job, episode_id
+                self._uploaded_transcript_file, job, descriptor
             )
             if file_key:
                 uploaded_file_keys.append(file_key)
@@ -322,11 +394,13 @@ class NewsOfficerRuntime:
         replies = tuple(str(reply) for reply in persisted.get("messages") or ())
         if missing_attachment_ids:
             unavailable = (
-                "完整文字稿附件暂不可用：归档记录缺失。请重新发送节目链接，"
-                "待完整文字稿重新核验后再下载。"
+                "精编文字稿附件暂不可用：生成时核验的原稿版本已缺失或发生变化。"
+                "请重新发送节目链接，待完整文字稿重新核验后再下载。"
             )
             replies = tuple(
-                reply.replace("已附上完整文字稿", "未能附上完整文字稿")
+                reply.replace(
+                    "已附上精编可读版文字稿", "未能附上精编可读版文字稿"
+                ).replace("已附上完整文字稿", "未能附上完整文字稿")
                 for reply in replies
             )
             if replies:
@@ -334,7 +408,7 @@ class NewsOfficerRuntime:
             else:
                 replies = (unavailable,)
         if not replies and file_keys:
-            replies = ("完整文字稿见附件。",)
+            replies = ("精编可读版文字稿见附件；原始核验全文已保留用于问答。",)
         context_episode_id = str(persisted.get("context_episode_id") or "")
         for index, reply in enumerate(replies, start=1):
             group_key = (
@@ -363,6 +437,20 @@ class NewsOfficerRuntime:
         for item in results:
             if item.status == "failed":
                 continue
+            if item.status == "summarized":
+                descriptor = item.attachment
+                if (
+                    descriptor is None
+                    or descriptor.episode_id != item.episode.id
+                    or descriptor.digest_sha256
+                    != hashlib.sha256(
+                        item.message.strip().encode("utf-8")
+                    ).hexdigest()
+                ):
+                    raise RuntimeError(
+                        "A summarized daily episode has no matching immutable "
+                        f"transcript revision: {item.episode.id}"
+                    )
             canonical = self.store.save_job_result(
                 job.key,
                 f"episode:{item.episode.id}",
@@ -377,12 +465,35 @@ class NewsOfficerRuntime:
         items = self._persisted_daily_items(job)
         for item in items:
             if item.status == "summarized":
-                file_key = self._uploaded_transcript_file(job, item.episode.id)
-                if not file_key:
-                    raise RuntimeError(
-                        "A summarized daily episode has no archived transcript: "
-                        f"{item.episode.id}"
+                if item.attachment is None:
+                    self._ensure_broadcast(
+                        job,
+                        f"attachment-unavailable:{item.episode.id}",
+                        (
+                            f"《{item.episode.title}》的精编文字稿版本信息已过期，"
+                            "本次未发送摘要；系统会在后续扫描中重新核验。"
+                        ),
+                        f"daily:attachment-unavailable:{item.episode.id}",
                     )
+                    self.store.record_episode(
+                        item.episode, "summary_format_error"
+                    )
+                    continue
+                file_key = self._uploaded_transcript_file(job, item.attachment)
+                if not file_key:
+                    self._ensure_broadcast(
+                        job,
+                        f"attachment-unavailable:{item.episode.id}",
+                        (
+                            f"《{item.episode.title}》的原稿或摘要版本在发送前发生变化，"
+                            "本次未发送；系统会在后续扫描中重新核验。"
+                        ),
+                        f"daily:attachment-unavailable:{item.episode.id}",
+                    )
+                    self.store.record_episode(
+                        item.episode, "summary_format_error"
+                    )
+                    continue
                 self._ensure_broadcast(
                     job,
                     f"episode:{item.episode.id}",

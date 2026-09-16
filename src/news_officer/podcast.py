@@ -14,7 +14,14 @@ import requests
 
 from .colossus import ColossusOfficialTranscriptProvider
 from .founders import DavidSenraOfficialTranscriptProvider
-from .models import AnalysisResult, DailyItem, Episode, Transcript
+from .models import (
+    AnalysisResult,
+    DailyItem,
+    Episode,
+    StoredTranscript,
+    Transcript,
+    TranscriptAttachment,
+)
 from .official import DwarkeshOfficialTranscriptProvider
 from .rss import (
     RSSDeclaredTranscriptProvider,
@@ -25,6 +32,7 @@ from .rss import (
 from .sequoia import SequoiaOfficialTranscriptProvider
 from .store import Store
 from .summarizer import SummaryFormatError
+from .transcript_view import RENDERER_VERSION, render_readable_transcript
 from .youtube import (
     YouTubeTranscriptProvider,
     is_youtube_url,
@@ -33,6 +41,21 @@ from .youtube import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _readable_attachment(
+    record: StoredTranscript, digest_markdown: str
+) -> TranscriptAttachment:
+    filename, content = render_readable_transcript(
+        record, digest_markdown=digest_markdown
+    )
+    return TranscriptAttachment.from_rendered(
+        record,
+        digest_markdown=digest_markdown,
+        renderer_version=RENDERER_VERSION,
+        filename=filename,
+        content=content,
+    )
 
 
 class TranscriptLookupError(RuntimeError):
@@ -413,9 +436,9 @@ class PodcastService:
             )
         # Archive the verified source before any model call. A formatting or
         # delivery failure must never discard the only copy available for Q&A.
-        self.store.save_verified_transcript(episode, transcript)
+        stored = self.store.save_verified_transcript(episode, transcript)
         try:
-            summary = self.summarizer.summarize(episode, transcript)
+            summary_candidate = self.summarizer.summarize(episode, transcript)
         except SummaryFormatError:
             return AnalysisResult(
                 status="summary_format_error",
@@ -426,10 +449,17 @@ class PodcastService:
                     "请稍后重新发送这个链接。"
                 ),
             )
+        summary = self.store.save_transcript_digest(
+            episode.id,
+            summary_candidate,
+            stored.content_sha256,
+            stored.record_revision_sha256,
+        )
         return AnalysisResult(
             status="summarized",
             episode=episode,
             message=summary,
+            attachment=_readable_attachment(stored, summary),
         )
 
     def discover_daily_candidates(
@@ -651,7 +681,9 @@ class PodcastService:
         priority_b_summaries = 0
         reserve_b_slot = self.max_daily_summaries >= 2
         priority_a_soft_cap = self.max_daily_summaries - int(reserve_b_slot)
-        deferred_priority_a: list[tuple[Episode, Transcript]] = []
+        deferred_priority_a: list[
+            tuple[Episode, Transcript, StoredTranscript]
+        ] = []
         for discovered in candidates:
             episode = discovered
             try:
@@ -682,7 +714,7 @@ class PodcastService:
                 if transcript is None:
                     results.append(DailyItem(episode, "no_transcript"))
                     continue
-                self.store.save_verified_transcript(episode, transcript)
+                stored = self.store.save_verified_transcript(episode, transcript)
                 source_priority = str(
                     episode.metadata.get("source_priority") or "B"
                 ).upper()
@@ -692,10 +724,25 @@ class PodcastService:
                     and summary_count >= priority_a_soft_cap
                     and priority_b_summaries == 0
                 ):
-                    deferred_priority_a.append((episode, transcript))
+                    deferred_priority_a.append(
+                        (episode, transcript, stored)
+                    )
                     continue
-                summary = self.summarizer.summarize(episode, transcript)
-                results.append(DailyItem(episode, "summarized", summary))
+                summary_candidate = self.summarizer.summarize(episode, transcript)
+                summary = self.store.save_transcript_digest(
+                    episode.id,
+                    summary_candidate,
+                    stored.content_sha256,
+                    stored.record_revision_sha256,
+                )
+                results.append(
+                    DailyItem(
+                        episode,
+                        "summarized",
+                        summary,
+                        _readable_attachment(stored, summary),
+                    )
+                )
                 summary_count += 1
                 if source_priority == "B":
                     priority_b_summaries += 1
@@ -707,11 +754,17 @@ class PodcastService:
             except Exception as error:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
-        for episode, transcript in deferred_priority_a:
+        for episode, transcript, stored in deferred_priority_a:
             if summary_count >= self.max_daily_summaries:
                 break
             try:
-                summary = self.summarizer.summarize(episode, transcript)
+                summary_candidate = self.summarizer.summarize(episode, transcript)
+                summary = self.store.save_transcript_digest(
+                    episode.id,
+                    summary_candidate,
+                    stored.content_sha256,
+                    stored.record_revision_sha256,
+                )
             except SummaryFormatError as error:
                 logger.warning(
                     "Deferred podcast summary format failed for %s: %s",
@@ -724,6 +777,13 @@ class PodcastService:
                 logger.exception("Deferred podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
                 continue
-            results.append(DailyItem(episode, "summarized", summary))
+            results.append(
+                DailyItem(
+                    episode,
+                    "summarized",
+                    summary,
+                    _readable_attachment(stored, summary),
+                )
+            )
             summary_count += 1
         return results
