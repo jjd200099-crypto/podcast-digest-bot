@@ -1,5 +1,7 @@
 """Explicit public-podcast corpus; never a silent fallback for private Drive."""
 
+import re
+
 from .library import LibraryDocument
 
 
@@ -28,7 +30,11 @@ class PodcastArchive:
             LibraryDocument(
                 r.reference,
                 f"{r.episode.title} | {r.episode.show}",
-                r.transcript.source_url,
+                re.sub(
+                    r"^https://app\.podwise\.ai/api/open/v1/episodes/(\d+)/transcripts$",
+                    r"https://podwise.ai/episodes/\1",
+                    r.transcript.source_url,
+                ),
                 r.transcript.text,
             )
             for r in records

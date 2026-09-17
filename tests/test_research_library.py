@@ -523,6 +523,13 @@ class ResearchTests(LibraryFixture):
             result = service.analyze_discovered_episode(record.episode)
         self.assertEqual(result.message, item.message)
 
+    def test_podwise_citation_uses_public_episode_page_not_token_required_api(self):
+        record = self.archive_record()
+        self.store.save_verified_transcript(record.episode, Transcript(
+            record.transcript.text, "Podwise", "https://app.podwise.ai/api/open/v1/episodes/123/transcripts", True))
+        docs, _ = PodcastArchive(self.store).snapshot()
+        self.assertEqual(docs[0].url, "https://podwise.ai/episodes/123")
+
     def setUp(self):
         super().setUp()
         self.agent = PodcastResearchAgent(
