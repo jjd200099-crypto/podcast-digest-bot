@@ -15,8 +15,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .agent_runtime import MAX_HISTORY_TURNS, dialogue_input, run_research
+from .models import TranscriptAttachment
 from .qa import _evidence_text, _quote_units, chunk_transcript
 from .router import PluginResponse, clean_text, conversation_key
+from .transcript_view import RENDERER_VERSION, render_readable_transcript
 
 
 def function(name, description, **properties):
@@ -37,6 +39,11 @@ def function(name, description, **properties):
 STRING = {"type": "string"}
 INTEGER = {"type": "integer"}
 TOOLS = [
+    function(
+        "get_transcript",
+        "准备已核验播客全文的可读版 Markdown 附件；编号取 list_documents 的 document_id。",
+        reference=STRING,
+    ),
     function(
         "analyze_podcast",
         "对用户提供或本轮 recent_updates 查到的单期链接寻找完整文字稿并整理；未取得全文则不摘要。",
@@ -139,6 +146,9 @@ class PodcastResearchAgent:
                     session TEXT NOT NULL, message_id TEXT NOT NULL, step INTEGER NOT NULL,
                     tool TEXT NOT NULL, status TEXT NOT NULL, elapsed_ms INTEGER NOT NULL,
                     PRIMARY KEY(session, message_id, step));
+                CREATE TABLE IF NOT EXISTS research_files (
+                    session TEXT NOT NULL, message_id TEXT NOT NULL, files_json TEXT NOT NULL,
+                    PRIMARY KEY(session, message_id));
             """)
 
     def matches(self, text):
@@ -165,7 +175,23 @@ class PodcastResearchAgent:
                 (key, message.message_id),
             ).fetchone()
             if old:
-                return PluginResponse((old[0],))
+                row = db.execute(
+                    "SELECT files_json FROM research_files WHERE session=? AND message_id=?",
+                    (key, message.message_id),
+                ).fetchone()
+                files = (
+                    tuple(
+                        TranscriptAttachment.from_persisted_dict(x)
+                        for x in json.loads(row[0])
+                    )
+                    if row
+                    else ()
+                )
+                return PluginResponse(
+                    (old[0],),
+                    attachment_episode_ids=tuple(a.episode_id for a in files),
+                    attachments=files,
+                )
             history = [
                 dict(r)
                 for r in db.execute(
@@ -187,7 +213,13 @@ class PodcastResearchAgent:
         }
         state = ResearchTools(self, key, message)
         messages = dialogue_input(history, json.dumps(context, ensure_ascii=False))
-        answer = asyncio.run(run_research(self, state, messages, INSTRUCTIONS, TOOLS))
+        instructions = INSTRUCTIONS
+        if getattr(self.library, "mode", "") == "podcast_archive":
+            instructions = instructions.replace(
+                "飞书文件夹", "已核验播客全文档案"
+            ).replace("文件夹", "播客档案")
+            instructions += "\n当前为公开播客档案模式：资料库只包含机器人取得并核验的完整播客文字稿，不是组织云文档。组织云文档尚未接通；如果用户问组织文档，请直接解释此限制，不声称搜索过组织文档。播客内容问答、跨期比较和 get_transcript 附件不依赖飞书文档权限。用户索取文字稿时须实际调用 get_transcript，附件由后端发送。\n"
+        answer = asyncio.run(run_research(self, state, messages, instructions, TOOLS))
         with self.store._connect() as db:
             db.execute(
                 "INSERT OR IGNORE INTO research_turns(session,message_id,question,answer) VALUES (?,?,?,?)",
@@ -207,7 +239,19 @@ class PodcastResearchAgent:
                     for i, s in enumerate(state.steps)
                 ],
             )
-        return PluginResponse((answer,))
+            db.execute(
+                "INSERT OR IGNORE INTO research_files VALUES (?,?,?)",
+                (
+                    key,
+                    message.message_id,
+                    json.dumps([a.to_persisted_dict() for a in state.attachments]),
+                ),
+            )
+        return PluginResponse(
+            (answer,),
+            attachment_episode_ids=tuple(a.episode_id for a in state.attachments),
+            attachments=tuple(state.attachments),
+        )
 
 
 class ResearchTools:
@@ -220,6 +264,7 @@ class ResearchTools:
         self.catalog_evidence = set()
         self.evidence = {}
         self.steps = []
+        self.attachments = []
         self.discovered_episode_urls = set()
         self._sequence = 0
 
@@ -253,6 +298,45 @@ class ResearchTools:
             if schema["type"] == "integer" and type(args[key]) is not int:
                 raise ValueError("Invalid integer")
         registry = self.agent.registry
+        if name == "get_transcript":
+            reference = args["reference"]
+            if (
+                getattr(self.agent.library, "mode", "") != "podcast_archive"
+                or reference not in self.corpus()
+            ):
+                return {
+                    "error": "请从播客全文档案选择有效编号；组织文档不能通过这个工具下载。"
+                }
+            record = self.agent.store.get_verified_transcript(reference)
+            if record is None:
+                return {"error": "文字稿已不可用，请重新查询。"}
+            revision = self.agent.store.get_transcript_digest_revision(
+                record.episode.id
+            )
+            digest = (
+                revision[2]
+                if revision
+                and revision[:2]
+                == (record.content_sha256, record.record_revision_sha256)
+                else ""
+            )
+            filename, content = render_readable_transcript(
+                record, digest_markdown=digest
+            )
+            attachment = TranscriptAttachment.from_rendered(
+                record,
+                digest_markdown=digest,
+                renderer_version=RENDERER_VERSION,
+                filename=filename,
+                content=content,
+            )
+            if attachment not in self.attachments:
+                self.attachments.append(attachment)
+            return self.evidence_item(
+                "已准备可读版文字稿附件：" + record.episode.title,
+                record.transcript.source_url,
+                record.episode.title,
+            )
         if name == "analyze_podcast":
             url = args["url"]
             if (
@@ -267,6 +351,14 @@ class ResearchTools:
                     "error": "该链接尚不支持取得完整文字稿，请提供官网单期链接或 YouTube 视频。"
                 }
             result = service.analyze_url(url)
+            if (
+                getattr(result, "attachment", None)
+                and result.attachment not in self.attachments
+            ):
+                self.attachments.append(result.attachment)
+            self.documents = (
+                None  # Newly acquired transcripts are immediately searchable.
+            )
             return self.evidence_item(result.message, url, "节目分析结果")
         if name == "list_sources":
             return [

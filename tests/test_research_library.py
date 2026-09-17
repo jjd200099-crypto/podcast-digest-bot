@@ -29,6 +29,7 @@ from news_officer.library import (
 )
 from news_officer.models import Episode, IncomingMessage, Transcript
 from news_officer.podcast import PodcastService
+from news_officer.podcast_archive import PodcastArchive
 from news_officer.research_agent import PodcastResearchAgent, ResearchTools
 from news_officer.source_registry import SourceRegistry
 from news_officer.store import Store
@@ -446,6 +447,63 @@ class ResearchTests(LibraryFixture):
         self.agent.initialize()
         self.message = IncomingMessage("m1", "team", "帮我添加追踪", "group", "user")
         self.state = ResearchTools(self.agent, "group:team:user", self.message)
+
+    def test_public_archive_reads_verified_text_without_any_feishu_call(self):
+        record = self.archive_record()
+        self.agent.library = PodcastArchive(self.store)
+        with patch.object(self.api, "files", side_effect=AssertionError):
+            results = self.state.execute(
+                "search_library", {"query": "acquire software"}
+            )
+        self.assertTrue(results["matches"])
+        self.assertIn(record.transcript.source_url, results["matches"][0]["url"])
+        self.assertIn(record.reference, self.state.documents)
+
+    def test_public_archive_download_survives_duplicate_event(self):
+        record = self.archive_record()
+        self.agent.library = PodcastArchive(self.store)
+        model = self.agent.sdk_model = ScriptedModel(
+            [
+                tool_call("get_transcript", {"reference": record.reference}),
+                final_output(
+                    {"kind": "conversation", "message": "已附文字稿。", "points": []}
+                ),
+            ]
+        )
+        first = self.agent.handle("发文字稿", self.message)
+        second = self.agent.handle("发文字稿", self.message)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first.attachments), 1)
+        self.assertEqual(first.attachments[0].episode_id, record.episode.id)
+        self.assertEqual(first.attachment_episode_ids, (record.episode.id,))
+        self.assertEqual(len(model.inputs), 2)
+
+    def test_private_folder_cannot_fall_back_to_public_archive(self):
+        record = self.archive_record()
+        reply = self.state.execute("get_transcript", {"reference": record.reference})
+        self.assertIn("error", reply)
+        self.assertEqual(self.state.attachments, [])
+
+    def test_public_archive_prompt_discloses_organization_docs_unavailable(self):
+        self.agent.library = PodcastArchive(self.store)
+        self.agent.sdk_model = ScriptedModel(
+            [
+                final_output(
+                    {
+                        "kind": "conversation",
+                        "message": "组织云文档暂未接通。",
+                        "points": [],
+                    }
+                )
+            ]
+        )
+        from news_officer.agent_runtime import Runner
+
+        with patch("news_officer.agent_runtime.Runner.run", wraps=Runner.run) as run:
+            self.agent.handle("读组织文档", self.message)
+        prompt = run.call_args.args[0].instructions
+        self.assertIn("组织云文档尚未接通", prompt)
+        self.assertIn("公开播客档案模式", prompt)
 
     def test_unknown_show_filter_requests_correction_not_no_updates(self):
         result = self.state.execute(

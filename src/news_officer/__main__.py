@@ -8,6 +8,7 @@ from .config import Settings
 from .feishu import FeishuMessenger
 from .library import FeishuLibraryAPI, PodcastLibrary
 from .podcast import PodcastService
+from .podcast_archive import PodcastArchive
 from .qa import TranscriptQAService
 from .research_agent import PodcastResearchAgent
 from .router import (
@@ -26,7 +27,11 @@ from .summarizer import TranscriptSummarizer
 def build_runtime(settings: Settings) -> NewsOfficerRuntime:
     store = Store(settings.db_path)
     messenger = FeishuMessenger(settings.feishu_app_id, settings.feishu_app_secret)
-    registry = SourceRegistry(store, settings.feeds_path) if settings.research_agent_enabled else None
+    registry = (
+        SourceRegistry(store, settings.feeds_path)
+        if settings.research_agent_enabled
+        else None
+    )
     summarizer = TranscriptSummarizer(settings.openai_api_key, settings.openai_model)
     qa = TranscriptQAService(settings.openai_api_key, settings.openai_model)
     intent_resolver = AgentIntentResolver(
@@ -44,19 +49,35 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
     plugins = [SubscriptionPlugin(store)]
     research = None
     if settings.research_agent_enabled:
-        library = PodcastLibrary(store, FeishuLibraryAPI(messenger), settings.library_folder_token)
-        research = PodcastResearchAgent(store, registry, library, settings.openai_api_key,
-            settings.openai_model, users=settings.research_user_open_ids,
-            chats=settings.research_group_chat_ids, podcast_service=podcast)
+        library = (
+            PodcastArchive(store)
+            if settings.knowledge_mode == "podcast_archive"
+            else PodcastLibrary(
+                store, FeishuLibraryAPI(messenger), settings.library_folder_token
+            )
+        )
+        research = PodcastResearchAgent(
+            store,
+            registry,
+            library,
+            settings.openai_api_key,
+            settings.openai_model,
+            users=settings.research_user_open_ids,
+            chats=settings.research_group_chat_ids,
+            podcast_service=podcast,
+        )
         plugins.append(research)
     router = CommandRouter(
-        plugins + [
+        plugins
+        + [
             PodcastPlugin(podcast),
             TranscriptInteractionPlugin(store, qa, intent_resolver),
             HelpPlugin(),
         ]
     )
-    return NewsOfficerRuntime(settings, store, messenger, router, podcast, research_agent=research)
+    return NewsOfficerRuntime(
+        settings, store, messenger, router, podcast, research_agent=research
+    )
 
 
 def main() -> None:
