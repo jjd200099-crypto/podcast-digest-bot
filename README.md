@@ -22,7 +22,11 @@
 
 仅使用官方 Open API 的搜索和逐段文字稿读取，不调用处理/导入接口，不发起付费转写。按原始链接匹配，或严格匹配标题、节目名、日期和时长；歧义匹配跳过。获取后再次核对身份，检查首尾与中间覆盖、文本密度，搜索片段和 AI 摘要不充当全文。仅有起点时间戳时采用更保守的覆盖门槛，可能跳过长段落格式。当前文本密度规则面向本项目英文播客，不声称通用语言支持。
 
-授权前只能验证模拟接口，真实覆盖率需配置 token 后确认。401 表示 token 问题，402 表示套餐/用量受限，429 表示限流；失败不降级为猜测摘要。参考 [授权文档](https://docs.podwise.ai/open-api-v1/basics/authorization)、[搜索 API](https://docs.podwise.ai/open-api-v1/discovery/search-episodes)、[文字稿 API](https://docs.podwise.ai/open-api-v1/get-episode-transcripts)。
+授权前只能验证模拟接口，真实覆盖率需配置 token 后确认。可运行 `scripts/smoke_podwise.py` 检查四个来源各最新一期、过去 72 小时内的节目；加 `--summarize` 会使用现有模型测试其中最短一期的全文摘要和附件，仅写临时数据库，不发送飞书消息。这不是全来源覆盖率报告。
+
+真实接口兼容性：Podwise 的原始链接可能是音频地址，需与 RSS enclosure 匹配；未处理的重复索引不阻挡唯一已转写版本，但多个已转写匹配仍拒绝猜选。数字时间戳的秒/毫秒单位以独立的可读时间戳逐段交叉核验，不按数值大小猜测。容许源音频末尾小幅超出 RSS 标注时长，但首尾与中段完整性门槛不变。
+
+401 表示 token 问题，402 表示套餐/用量受限，429 表示限流；失败不降级为猜测摘要。参考 [授权文档](https://docs.podwise.ai/open-api-v1/basics/authorization)、[搜索 API](https://docs.podwise.ai/open-api-v1/discovery/search-episodes)、[文字稿 API](https://docs.podwise.ai/open-api-v1/get-episode-transcripts)。
 
 ## 精编文字稿与交互问答
 

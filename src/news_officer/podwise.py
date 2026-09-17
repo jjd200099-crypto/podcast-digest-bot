@@ -56,6 +56,7 @@ def _matches(episode: Episode, item: dict) -> bool:
     known = {
         _url_key(episode.url),
         _url_key(str(episode.metadata.get("youtube_url") or "")),
+        _url_key(str(episode.metadata.get("audio_url") or "")),
     }
     if link and link in known:
         return True
@@ -75,9 +76,7 @@ def _matches(episode: Episode, item: dict) -> bool:
     )
 
 
-def _start(segment: dict) -> float | None:
-    if segment.get("start") is not None:
-        return _number(segment["start"])
+def _timestamp(segment: dict) -> float | None:
     parts = str(segment.get("time") or "").split(":")
     if len(parts) not in {2, 3} or not all(
         re.fullmatch(r"\d+", part) for part in parts
@@ -88,6 +87,43 @@ def _start(segment: dict) -> float | None:
     return float(
         sum(int(part) * 60**index for index, part in enumerate(reversed(parts)))
     )
+
+
+def _timing_scale(segments: list[dict]) -> float | None:
+    """Infer seconds/ms from the independent human-readable timestamps.
+
+    Live Podwise transcripts return millisecond start/end numbers, while some
+    exports use seconds. Never infer the unit from magnitude alone.
+    """
+    anchors = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            return None
+        timestamp = _timestamp(segment)
+        if timestamp is None:
+            return None
+        if segment.get("start") is not None:
+            numeric = _number(segment["start"])
+            if numeric is None:
+                return None
+            anchors.append((numeric, timestamp))
+    if not anchors:
+        return 1.0 if all(s.get("end") is None for s in segments) else None
+    scales = [
+        scale
+        for scale in (1.0, 0.001)
+        if all(
+            abs(numeric * scale - timestamp) <= 1.01 for numeric, timestamp in anchors
+        )
+    ]
+    return scales[0] if len(scales) == 1 else None
+
+
+def _start(segment: dict, scale: float = 1.0) -> float | None:
+    if segment.get("start") is None:
+        return _timestamp(segment)
+    numeric = _number(segment["start"])
+    return numeric * scale if numeric is not None else None
 
 
 class PodwiseTranscriptProvider:
@@ -139,6 +175,7 @@ class PodwiseTranscriptProvider:
             if isinstance(item, dict)
             and type(item.get("seq")) is int
             and item["seq"] > 0
+            and item.get("transcribed") is True
             and _matches(episode, item)
         }
         if len(matches) != 1:
@@ -166,19 +203,33 @@ class PodwiseTranscriptProvider:
             60, episode.duration_seconds * 0.05
         ):
             return None
+        scale = _timing_scale(segments)
+        if scale is None:
+            return None
+        # Feed duration and ASR audio can differ slightly (e.g. 14 seconds in a
+        # 72-minute live fixture). Keep the original full-coverage requirement;
+        # permit only a small closing overrun, never a materially longer asset.
+        timing_tolerance = max(30, duration * 0.01)
         lines, starts, intervals = [], [], []
         for segment in segments:
             if not isinstance(segment, dict):
                 return None
             content = str(segment.get("content") or "").strip()
-            start, end = _start(segment), _number(segment.get("end"))
-            if not content or start is None or start < 0 or start > duration:
+            start, end = _start(segment, scale), _number(segment.get("end"))
+            if end is not None:
+                end *= scale
+            if (
+                not content
+                or start is None
+                or start < 0
+                or start > duration + timing_tolerance
+            ):
                 return None
             if starts and start < starts[-1]:
                 return None
             starts.append(start)
             if end is not None:
-                if end <= start or end > duration + 5:
+                if end <= start or end > duration + timing_tolerance:
                     return None
                 intervals.append((start, end))
             speaker = str(segment.get("speaker") or "").strip()
