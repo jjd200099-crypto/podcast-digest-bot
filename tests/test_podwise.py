@@ -68,6 +68,15 @@ class PodwiseTests(unittest.TestCase):
             "https://app.podwise.ai/api/open/v1/episodes/123/transcripts",
         )
 
+    def test_search_miss_falls_back_to_dated_podcast_catalog(self):
+        with patch.object(self.provider, "_get", side_effect=[
+            {"result": []}, {"result": [{"seq": 778}]}, {"result": [self.meta]},
+            {"episode": self.meta, "result": self.segments},
+        ]) as get:
+            self.assertTrue(self.provider.fetch(self.episode).verified_complete)
+        self.assertEqual(get.call_args_list[2].args[0], "/podcasts/778/episodes")
+        self.assertEqual(get.call_args_list[2].args[1], {"date": "2026-09-18", "days": 3})
+
     def test_timestamp_only_full_transcript(self):
         segments = [
             {k: v for k, v in s.items() if k not in {"start", "end"}}
@@ -103,6 +112,40 @@ class PodwiseTests(unittest.TestCase):
         segments = copy.deepcopy(self.segments)
         segments[-1]["end"] += 120
         self.assertIsNone(self.fetch(segments=segments))
+
+    def test_rss_audio_beats_transcribed_youtube_fallback(self):
+        audio = "https://publisher.test/episode.mp3"
+        video = "https://www.youtube.com/watch?v=full-episode"
+        self.episode = replace(self.episode, metadata={
+            "audio_url": audio, "youtube_url": video,
+        })
+        meta = {**self.meta, "link": audio}
+        video_meta = {**self.meta, "seq": 456, "link": video}
+        result = self.fetch(meta=meta, rows=[video_meta, meta])
+        self.assertTrue(result.verified_complete)
+        self.assertIn("/123/transcripts", result.source_url)
+        # Two processed records for the *same* asset are still ambiguous.
+        self.assertIsNone(self.fetch(rows=[meta, {**meta, "seq": 789}]))
+
+    def test_small_rendition_overrun_requires_independent_done_status(self):
+        segments = copy.deepcopy(self.segments)
+        segments[-1]["end"] += 45
+        for status, progress, accepted in [("done", 100, True), ("processing", 90, False),
+                                           ("done", 99, False)]:
+            with patch.object(self.provider, "_get", side_effect=[
+                {"result": [self.meta]}, {"episode": self.meta, "result": segments},
+                {"result": {"status": status, "progress": progress}},
+            ]):
+                self.assertEqual(bool(self.provider.fetch(self.episode)), accepted)
+
+    def test_done_status_does_not_excuse_missing_middle(self):
+        segments = copy.deepcopy(self.segments[:5] + self.segments[15:])
+        segments[-1]["end"] += 45
+        with patch.object(self.provider, "_get", side_effect=[
+            {"result": [self.meta]}, {"episode": self.meta, "result": segments},
+            {"result": {"status": "done", "progress": 100}},
+        ]):
+            self.assertIsNone(self.provider.fetch(self.episode))
 
     def test_truncation_gaps_snippets_and_wrong_episode_rejected(self):
         cases = [

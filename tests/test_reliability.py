@@ -322,7 +322,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             item for item in messenger.delivered.values() if item.group_key == "episode:ep-sent"
         ]
         self.assertEqual(
-            [item.msg_type for item in summary_deliveries], ["post", "file"]
+            [item.msg_type for item in summary_deliveries], ["post"]
         )
         self.assertEqual(podcast.calls, 2)
         self.assertIn(

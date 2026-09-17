@@ -204,7 +204,7 @@ def latest_rss_episodes(
     root = ElementTree.fromstring(response.content)
     items = root.findall(".//item")
     episodes: list[Episode] = []
-    for item in items[: max(1, limit)]:
+    for item in (items if limit == 0 else items[: max(1, limit)]):
         title = (item.findtext("title") or "").strip()
         published_at = _parse_date(item.findtext("pubDate") or "")
         link = _safe_https_url(item.findtext("link") or "")

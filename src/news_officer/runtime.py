@@ -482,8 +482,16 @@ class NewsOfficerRuntime:
                         item.episode, "summary_format_error"
                     )
                     continue
-                file_key = self._uploaded_transcript_file(job, item.attachment)
-                if not file_key:
+                with_file = getattr(
+                    getattr(self, "settings", None), "daily_transcript_attachments", False
+                )
+                file_key = (
+                    self._uploaded_transcript_file(job, item.attachment) if with_file else ""
+                )
+                # Text-only delivery still binds the summary to its verified
+                # source revision. Not uploading a file must not bypass integrity.
+                valid = bool(file_key) if with_file else self._daily_summary_is_current(item)
+                if not valid:
                     self._ensure_broadcast(
                         job,
                         f"attachment-unavailable:{item.episode.id}",
@@ -512,6 +520,24 @@ class NewsOfficerRuntime:
             }:
                 self.store.record_episode(item.episode, item.status)
         return items
+
+    def _daily_summary_is_current(self, item: DailyItem) -> bool:
+        descriptor = item.attachment
+        if descriptor is None:
+            return False
+        record = self.store.get_verified_transcript(item.episode.id)
+        revision = self.store.get_transcript_digest_revision(item.episode.id)
+        return bool(
+            record
+            and record.content_sha256 == descriptor.source_sha256
+            and record.record_revision_sha256 == descriptor.record_revision_sha256
+            and revision
+            and revision[0] == descriptor.source_sha256
+            and revision[1] == descriptor.record_revision_sha256
+            and revision[2] == item.message.strip()
+            and hashlib.sha256(item.message.strip().encode()).hexdigest()
+            == descriptor.digest_sha256
+        )
 
     def _finalize_daily_deliveries(self, job: Job, items: list[DailyItem]) -> None:
         for item in items:
