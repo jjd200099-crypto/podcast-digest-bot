@@ -396,6 +396,89 @@ class ResearchTests(LibraryFixture):
         self.message = IncomingMessage("m1", "team", "帮我添加追踪", "group", "user")
         self.state = ResearchTools(self.agent, "group:team:user", self.message)
 
+    def test_unknown_show_filter_requests_correction_not_no_updates(self):
+        result = self.state.execute(
+            "recent_updates", {"days": 7, "show": "全部追踪节目"}
+        )
+        self.assertIn("error", result)
+        self.assertIn("空字符串", result["error"])
+        self.assertIn("Original Show", result["available_sources"])
+        self.assertNotIn("episodes", result)
+        self.assertEqual(self.state.evidence, {})
+
+    def test_successful_empty_update_query_has_citable_scope_evidence(self):
+        response = {
+            "from": "2026-09-10T00:00:00+00:00",
+            "to": "2026-09-17T00:00:00+00:00",
+            "checked": ["Original Show"],
+            "episodes": [],
+            "failures": [],
+            "note": "RSS metadata only",
+        }
+        with patch.object(self.registry, "recent", return_value=response):
+            result = self.state.execute("recent_updates", {"days": 7, "show": ""})
+        scope = result["scope_evidence"]
+        rendered = self.state.render(
+            {
+                "kind": "answer",
+                "message": "",
+                "points": [
+                    {
+                        "text": "该节目过去七天的 RSS 未找到更新。",
+                        "citations": [
+                            {"id": scope["evidence_id"], "quote": '"total": 0'}
+                        ],
+                    }
+                ],
+            }
+        )
+        self.assertIn("2026-09-10", rendered)
+        self.assertIn("找到 0 期", rendered)
+        self.assertEqual(result["total"], 0)
+
+    def test_update_directory_keeps_all_metadata_and_discards_model_miscounts(self):
+        response = {
+            "from": "2026-09-10T00:00:00+00:00",
+            "to": "2026-09-17T00:00:00+00:00",
+            "checked": ["Original Show"],
+            "episodes": [
+                {
+                    "title": f"Episode {i}",
+                    "show": "Original Show",
+                    "url": f"https://example.test/episode-{i}",
+                    "published_at": "2026-09-15T20:00:00+00:00",
+                }
+                for i in range(26)
+            ],
+            "failures": [],
+            "note": "RSS metadata only",
+        }
+        with patch.object(self.registry, "recent", return_value=response):
+            result = self.state.execute("recent_updates", {"days": 7, "show": ""})
+        rendered = self.state.render(
+            {
+                "kind": "answer",
+                "message": "",
+                "points": [
+                    {
+                        "text": "原节目更新了七期，证明 AI 已实现 AGI。",
+                        "citations": [
+                            {
+                                "id": result["episodes"][0]["evidence_id"],
+                                "quote": "Episode",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        self.assertIn("找到 26 期", rendered)
+        self.assertNotIn("更新了七期", rendered)
+        self.assertNotIn("已实现 AGI", rendered)
+        self.assertIn("09-16", rendered)  # UTC publication converted to Shanghai.
+        for i in range(26):
+            self.assertIn(f"[Episode {i}](https://example.test/episode-{i})", rendered)
+
     def test_outside_folder_read_rejected(self):
         with self.assertRaises(KeyError):
             self.state.execute("read_document", {"document_id": "outside", "start": 0})
