@@ -340,6 +340,16 @@ class SourceFailureTests(unittest.TestCase):
         self.assertEqual([item.id for item in candidates], ["rss:full"])
         self.assertEqual(scan.call_args.kwargs["limit"], 30)
 
+        # A fresh unknown-date video must not starve a due full-episode retry.
+        unknown_clip = Episode("unknown", "Unknown age", "https://youtu.be/unknown", "Show")
+        with (
+            patch("news_officer.podcast.latest_videos", return_value=[unknown_clip]),
+            patch("news_officer.podcast.latest_rss_episodes", return_value=[rss]),
+            patch.object(self.store, "episode_review_state", side_effect=lambda episode_id: "retry" if episode_id == "rss:full" else "new"),
+        ):
+            candidates = service.discover_daily_candidates(datetime(2026, 9, 6, tzinfo=UTC))
+        self.assertEqual([item.id for item in candidates], ["rss:full"])
+
     def test_unknown_publication_date_is_never_treated_as_recent(self):
         self.feeds.write_text(
             '{"youtube_channels": ["https://www.youtube.com/@one"]}'

@@ -674,9 +674,13 @@ class PodcastService:
                 "The source scan was unhealthy: "
                 f"{len(failed_sources)} of {len(sources)} source(s) failed"
             )
-        # New releases take precedence over older no-transcript/date retries.
-        # Otherwise a backlog from a temporarily blocked provider can consume
-        # the bounded candidate budget and starve newly published episodes.
+        # Verified-dated RSS episodes (including due retries) must not be
+        # displaced by never-seen, undated videos that may be old clips.
+        # Preserve new-before-retry and tier fairness within each bucket.
+        candidates.sort(key=lambda episode: (
+            not bool(episode.metadata.get("rss_feed_url")),
+            episode.published_at is None,
+        ))
         return candidates[: self.max_daily_candidates]
 
     def build_daily(self, now: datetime | None = None) -> list[DailyItem]:
