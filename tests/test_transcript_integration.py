@@ -1475,6 +1475,43 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
         self.assertEqual(self.store.outbox_items(job.key), [])
         self.assertEqual(messenger.deliveries, [])
 
+    async def test_text_only_daily_preserves_archive_and_skips_upload(self):
+        record = self.archive("ep-text-daily", "Text only", "Full verified evidence.")
+        digest = "推荐理由：用于验证摘要独立发送。\n1. 要点。\n推荐星级：★★★★☆（4/5，编辑推荐）"
+        self.store.save_transcript_digest(record.episode.id, digest,
+                                          record.content_sha256, record.record_revision_sha256)
+        self.store.add_subscription("open_id", "ou")
+        self.store.enqueue("daily:text-only", "daily", {})
+        job = self.store.claim_next("daily")
+        messenger = RuntimeMessenger()
+        instance = self.runtime(messenger)
+        instance.podcast_service.build_daily.return_value = [DailyItem(
+            record.episode, "summarized", digest, self.attachment(record, digest),
+        )]
+        await instance._handle_daily_job(job)
+        self.assertEqual(messenger.uploads, [])
+        self.assertEqual([i.msg_type for i in self.store.outbox_items(job.key)], ["post"])
+        self.assertIsNotNone(self.store.get_verified_transcript(record.episode.id))
+        self.assertTrue(self.store.has_episode(record.episode.id))
+
+    async def test_explicit_daily_file_option_still_delivers_attachment(self):
+        record = self.archive("ep-file-opt-in", "File opt in", "Full verified evidence.")
+        digest = "SUMMARY"
+        self.store.save_transcript_digest(record.episode.id, digest,
+                                          record.content_sha256, record.record_revision_sha256)
+        self.store.add_subscription("open_id", "ou")
+        self.store.enqueue("daily:file-opt-in", "daily", {})
+        job = self.store.claim_next("daily")
+        messenger = RuntimeMessenger()
+        instance = self.runtime(messenger)
+        instance.settings = SimpleNamespace(daily_transcript_attachments=True)
+        instance.podcast_service.build_daily.return_value = [DailyItem(
+            record.episode, "summarized", digest, self.attachment(record, digest),
+        )]
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(messenger.uploads), 1)
+        self.assertEqual([i.msg_type for i in self.store.outbox_items(job.key)], ["post", "file"])
+
     async def test_legacy_daily_item_without_descriptor_fails_closed(self):
         record = self.archive("ep-legacy-daily", "Legacy daily", "Evidence.")
         digest = "### 核心判断\n1. 旧版摘要。"

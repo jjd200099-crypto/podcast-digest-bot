@@ -533,6 +533,48 @@ class SourceFailureTests(unittest.TestCase):
             ["a1", "a2", "a3"],
         )
 
+    def test_zero_summary_limit_processes_every_candidate(self):
+        candidates = [Episode(
+            f"ep-{i}", f"Episode {i}", f"https://publisher.example.com/{i}", "Show",
+            duration_seconds=3600, published_at=datetime(2026, 9, 5, 12, tzinfo=UTC),
+            metadata={"source_priority": "A"},
+        ) for i in range(7)]
+        service = PodcastService(self.store, self.feeds, FakeSummarizer(),
+                                 TranscriptResolver([CompleteProvider()]),
+                                 max_daily_summaries=0)
+        with patch.object(service, "discover_daily_candidates", return_value=candidates):
+            items = service.build_daily(datetime(2026, 9, 6, tzinfo=UTC))
+        self.assertEqual([i.episode.id for i in items], [e.id for e in candidates])
+        self.assertTrue(all(i.status == "summarized" for i in items))
+
+    def test_existing_verified_archive_precedes_all_external_providers(self):
+        episode = Episode("cached", "Cached episode", "https://publisher.test/cached", "Show")
+        transcript = CompleteProvider().fetch(episode)
+        self.store.save_verified_transcript(episode, transcript)
+        service = PodcastService(self.store, self.feeds, FakeSummarizer(),
+                                 podwise_api_token="test-token")
+        self.assertEqual(service.transcript_resolver.providers[0].name,
+                         "previously verified archive")
+        self.assertEqual(service.transcript_resolver.providers[-1].name,
+                         "Podwise verified transcript")
+        with patch.object(service.transcript_resolver.providers[-1], "fetch") as podwise:
+            self.assertEqual(service.transcript_resolver.fetch(episode), transcript)
+            podwise.assert_not_called()
+
+    def test_zero_candidate_limit_does_not_truncate_at_sixteen(self):
+        self.feeds.write_text('{"sources":[{"name":"Show","type":"rss",'
+                              '"rss_url":"https://publisher.example.com/feed"}]}')
+        episodes = [Episode(
+            f"rss:{i}", f"Unique title for episode {i}", f"https://publisher.example.com/{i}",
+            "Show", published_at=datetime(2026, 9, 5, 12, tzinfo=UTC),
+            metadata={"rss_feed_url": "https://publisher.example.com/feed"},
+        ) for i in range(20)]
+        service = PodcastService(self.store, self.feeds, FakeSummarizer())
+        with patch("news_officer.podcast.latest_rss_episodes", return_value=episodes) as fetch:
+            candidates = service.discover_daily_candidates(datetime(2026, 9, 6, tzinfo=UTC))
+        self.assertEqual(len(candidates), 20)
+        self.assertEqual(fetch.call_args.kwargs["limit"], 0)
+
     def test_deferred_digest_save_failure_isolated_and_next_candidate_backfills(self):
         self.feeds.write_text('{"sources": []}')
         candidates = [

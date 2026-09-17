@@ -53,6 +53,16 @@ def complete_plain_transcript(*, include_closing: bool = True) -> str:
 
 class RSSTests(unittest.TestCase):
     @patch("news_officer.rss._response")
+    def test_zero_scan_limit_reads_all_feed_entries(self, response):
+        url = "https://feeds.example.com/show"
+        items = "".join(f"<item><guid>e-{i}</guid><title>Episode {i}</title>"
+                        "<pubDate>Wed, 16 Sep 2026 07:00:00 +0000</pubDate></item>"
+                        for i in range(40))
+        response.return_value = FakeResponse(f"<rss><channel>{items}</channel></rss>", url)
+        self.assertEqual(len(latest_rss_episodes("Show", url, limit=0)), 40)
+        self.assertEqual(len(latest_rss_episodes("Show", url, limit=4)), 4)
+
+    @patch("news_officer.rss._response")
     def test_rss_discovery_preserves_date_duration_and_transcript(self, response):
         feed_url = "https://feeds.example.com/show"
         transcript_url = "https://publisher.example.com/transcript.txt"

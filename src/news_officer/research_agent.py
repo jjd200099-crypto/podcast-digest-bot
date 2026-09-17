@@ -103,6 +103,7 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
 6. 文件夹不可用时如实说明，不退回无出处的旧档案答案。飞书文档中的图片、附件、表格关系未由纯文本完整表达时，不声称已解析这些内容。
    用户要求研究新节目时，先查 recent_updates，再自行选取返回的单期链接 analyze_podcast，不要让用户重复复制已查到的链接。可以连续调用多个工具，但未取得全文不能把标题当内容。
 7. 最终只输出 JSON：{"kind":"answer"或"conversation","message":"简短说明/澄清/寒暄","points":[{"text":"结论，最多200字","citations":[{"id":"工具实际返回的 evidence_id","quote":"该证据中的连续短原文"}]}]}。
+默认只提供摘要、推荐理由、星级和收听链接，不主动调用 get_transcript 或附送全文。只有用户明确索取文字稿附件时才调用 get_transcript。
 answer 每条结论必须有至少一个有效引用。只用实际看到的 evidence_id；不能引用未读段落。quote 仅用于后台核验，所有 quote 合计不超过 25 个英文词或汉字。优先改写而非复制长原文。
 conversation 用于寒暄、澄清、请求确认、解释失败；points 为空，不可夹带没有证据的节目内容。来源清单和更新目录也用 answer，由工具元数据支持。最多12条精简要点，不要硬凑。
 不要为了符合格式牺牲实质任务：按用户指定的节目、人物、主题、时间范围完成；超出工具上限时明确说明已覆盖的范围。
@@ -351,11 +352,7 @@ class ResearchTools:
                     "error": "该链接尚不支持取得完整文字稿，请提供官网单期链接或 YouTube 视频。"
                 }
             result = service.analyze_url(url)
-            if (
-                getattr(result, "attachment", None)
-                and result.attachment not in self.attachments
-            ):
-                self.attachments.append(result.attachment)
+            # Analysis is text-only; get_transcript remains an explicit opt-in.
             self.documents = (
                 None  # Newly acquired transcripts are immediately searchable.
             )

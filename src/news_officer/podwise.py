@@ -6,6 +6,7 @@ import itertools
 import json
 import math
 import re
+from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
 
 import requests
@@ -169,6 +170,25 @@ class PodwiseTranscriptProvider:
         rows = search.get("result", []) if search else []
         if not isinstance(rows, list):
             raise PodwiseAPIError("Podwise invalid search result")
+        if not rows and episode.show and episode.published_at:
+            # A long compound title can miss the search index. Read the show's
+            # dated episode catalog too; final asset matching remains strict.
+            shows = self._get("/podcasts/search", {"q": episode.show, "hitsPerPage": 3})
+            shows = shows.get("result", []) if shows else []
+            if not isinstance(shows, list):
+                raise PodwiseAPIError("Podwise invalid podcast search result")
+            for show in shows[:3]:
+                show_seq = show.get("seq") if isinstance(show, dict) else None
+                if type(show_seq) is not int or show_seq <= 0:
+                    continue
+                catalog = self._get(f"/podcasts/{show_seq}/episodes", {
+                    "date": (episode.published_at + timedelta(days=1)).date().isoformat(),
+                    "days": 3,
+                })
+                entries = catalog.get("result", []) if catalog else []
+                if not isinstance(entries, list):
+                    raise PodwiseAPIError("Podwise invalid episode catalog")
+                rows.extend(entries)
         matches = {
             item["seq"]: item
             for item in rows
@@ -178,6 +198,16 @@ class PodwiseTranscriptProvider:
             and item.get("transcribed") is True
             and _matches(episode, item)
         }
+        # A publisher RSS item and its attached YouTube fallback may both be
+        # transcribed. The enclosure is the authoritative asset for this RSS
+        # episode; do not discard it because a second video version exists.
+        audio_key = _url_key(str(episode.metadata.get("audio_url") or ""))
+        audio_matches = {
+            seq: item for seq, item in matches.items()
+            if audio_key and _url_key(str(item.get("link") or "")) == audio_key
+        }
+        if audio_matches:
+            matches = audio_matches
         if len(matches) != 1:
             return None
         seq, match = next(iter(matches.items()))
@@ -210,6 +240,22 @@ class PodwiseTranscriptProvider:
         # 72-minute live fixture). Keep the original full-coverage requirement;
         # permit only a small closing overrun, never a materially longer asset.
         timing_tolerance = max(30, duration * 0.01)
+        ends = [_number(s.get("end")) for s in segments]
+        if all(end is not None for end in ends):
+            final_end = max(ends) * scale
+            if final_end > duration + timing_tolerance:
+                # Dynamic-ad renditions can outlast RSS metadata. Require the
+                # provider's independent completed-job status, a small <=5%
+                # discrepancy, and full timeline coverage of the *longer* text.
+                # Do not simply clip away the extra tail to pass validation.
+                if final_end > duration * 1.05:
+                    return None
+                status = self._get(f"/episodes/{seq}/status")
+                result = status.get("result", {}) if status else {}
+                if result.get("status") != "done" or result.get("progress") != 100:
+                    return None
+                duration = final_end
+                timing_tolerance = 0
         lines, starts, intervals = [], [], []
         for segment in segments:
             if not isinstance(segment, dict):

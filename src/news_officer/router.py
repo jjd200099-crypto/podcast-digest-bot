@@ -276,9 +276,7 @@ class PodcastPlugin:
         )
         return PluginResponse(
             (result.message,),
-            attachment_episode_ids=(result.episode.id,),
             context_episode_id=result.episode.id,
-            attachments=((result.attachment,) if result.attachment else ()),
         )
 
 

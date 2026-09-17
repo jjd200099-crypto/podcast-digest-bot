@@ -46,6 +46,7 @@ class Settings:
     research_group_chat_ids: tuple[str, ...] = ()
     knowledge_mode: str = "feishu_folder"
     podwise_api_token: str = ""
+    daily_transcript_attachments: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -116,10 +117,10 @@ class Settings:
             user_open_ids=user_ids,
             group_chat_ids=_csv(os.environ.get("FEISHU_GROUP_CHAT_IDS", "")),
             max_daily_summaries=max(
-                1, int(os.environ.get("NEWS_OFFICER_MAX_SUMMARIES", "3"))
+                0, int(os.environ.get("NEWS_OFFICER_MAX_SUMMARIES", "0"))
             ),
             max_daily_candidates=max(
-                1, int(os.environ.get("NEWS_OFFICER_MAX_CANDIDATES", "16"))
+                0, int(os.environ.get("NEWS_OFFICER_MAX_CANDIDATES", "0"))
             ),
             lookback_hours=max(
                 1, int(os.environ.get("NEWS_OFFICER_LOOKBACK_HOURS", "72"))
@@ -140,4 +141,7 @@ class Settings:
             ),
             knowledge_mode=knowledge_mode,
             podwise_api_token=os.environ.get("PODWISE_API_TOKEN", "").strip(),
+            daily_transcript_attachments=os.environ.get(
+                "NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS", "false"
+            ).lower() == "true",
         )

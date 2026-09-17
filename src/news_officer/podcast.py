@@ -306,6 +306,19 @@ def _transcript_preference(episode: Episode, resolver: TranscriptResolver) -> in
     return score
 
 
+class ArchivedTranscriptProvider:
+    name = "previously verified archive"
+
+    def __init__(self, store: Store):
+        self.store = store
+
+    def fetch(self, episode: Episode) -> Transcript | None:
+        record = self.store.get_verified_transcript(episode.id)
+        if record and record.episode.to_persisted_dict() == episode.to_persisted_dict():
+            return record.transcript
+        return None
+
+
 class PodcastService:
     def __init__(
         self,
@@ -314,8 +327,8 @@ class PodcastService:
         summarizer: Summarizer,
         transcript_resolver: TranscriptResolver | None = None,
         lookback_hours: int = 72,
-        max_daily_candidates: int = 16,
-        max_daily_summaries: int = 3,
+        max_daily_candidates: int = 0,
+        max_daily_summaries: int = 0,
         source_registry=None,
         podwise_api_token: str = "",
     ):
@@ -324,14 +337,15 @@ class PodcastService:
         self.summarizer = summarizer
         self.transcript_resolver = transcript_resolver or TranscriptResolver(
             [
+                ArchivedTranscriptProvider(store),
                 RSSDeclaredTranscriptProvider(),
                 SubstackApprovedTranscriptProvider(),
                 DavidSenraOfficialTranscriptProvider(),
                 DwarkeshOfficialTranscriptProvider(),
                 SequoiaOfficialTranscriptProvider(),
                 ColossusOfficialTranscriptProvider(),
-                *([PodwiseTranscriptProvider(podwise_api_token)] if podwise_api_token else []),
                 YouTubeTranscriptProvider(),
+                *([PodwiseTranscriptProvider(podwise_api_token)] if podwise_api_token else []),
             ]
         )
         self.lookback_hours = lookback_hours
@@ -512,7 +526,7 @@ class PodcastService:
                     discovered_rss = latest_rss_episodes(
                         source.name or source.url,
                         source.rss_url,
-                        limit=max(30, source.scan_depth),
+                        limit=0 if not self.max_daily_candidates else max(30, source.scan_depth),
                     )
                     if discovered_rss:
                         channel_with_results += 1
@@ -681,7 +695,7 @@ class PodcastService:
             not bool(episode.metadata.get("rss_feed_url")),
             episode.published_at is None,
         ))
-        return candidates[: self.max_daily_candidates]
+        return candidates[: self.max_daily_candidates] if self.max_daily_candidates else candidates
 
     def build_daily(self, now: datetime | None = None) -> list[DailyItem]:
         now = now or datetime.now(UTC)
@@ -771,7 +785,7 @@ class PodcastService:
                 summary_count += 1
                 if source_priority == "B":
                     priority_b_summaries += 1
-                if summary_count >= self.max_daily_summaries:
+                if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                     break
             except SummaryFormatError as error:
                 logger.warning("Podcast summary format failed for %s: %s", episode.url, error)
@@ -780,7 +794,7 @@ class PodcastService:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
         for episode, transcript, stored in deferred_priority_a:
-            if summary_count >= self.max_daily_summaries:
+            if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                 break
             try:
                 summary_candidate = self.summarizer.summarize(episode, transcript)

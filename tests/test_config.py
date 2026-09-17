@@ -56,6 +56,24 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, {**self.base_environment(), "PODWISE_API_TOKEN": " test-token "}, clear=True):
             self.assertEqual(Settings.from_env().podwise_api_token, "test-token")
 
+    def test_daily_defaults_cover_all_candidates_without_files(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.max_daily_candidates, 0)
+        self.assertEqual(settings.max_daily_summaries, 0)
+        self.assertFalse(settings.daily_transcript_attachments)
+
+    def test_explicit_daily_limits_and_files_remain_supported(self):
+        with patch.dict(os.environ, {
+            **self.base_environment(), "NEWS_OFFICER_MAX_SUMMARIES": "5",
+            "NEWS_OFFICER_MAX_CANDIDATES": "20",
+            "NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS": "true",
+        }, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.max_daily_candidates, 20)
+        self.assertEqual(settings.max_daily_summaries, 5)
+        self.assertTrue(settings.daily_transcript_attachments)
+
 
 if __name__ == "__main__":
     unittest.main()
