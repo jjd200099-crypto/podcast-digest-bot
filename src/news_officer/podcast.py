@@ -312,6 +312,7 @@ class PodcastService:
         lookback_hours: int = 72,
         max_daily_candidates: int = 16,
         max_daily_summaries: int = 3,
+        source_registry=None,
     ):
         self.store = store
         self.feeds_path = feeds_path
@@ -330,6 +331,7 @@ class PodcastService:
         self.lookback_hours = lookback_hours
         self.max_daily_candidates = max_daily_candidates
         self.max_daily_summaries = max_daily_summaries
+        self.source_registry = source_registry
         self._last_failed_feeds: tuple[str, ...] = ()
 
     def supports_url(self, url: str) -> bool:
@@ -472,6 +474,11 @@ class PodcastService:
         groups_by_priority: dict[str, list[list[Episode]]] = {"A": [], "B": []}
         failed_sources: list[str] = []
         sources = load_youtube_sources(self.feeds_path)
+        if self.source_registry is not None:
+            sources.extend(YouTubeFeedSource(
+                url=s.get("url", ""), name=s["name"], rss_url=s.get("rss_url", ""),
+                scan_depth=s.get("scan_depth", 30), priority=s.get("priority", "B"),
+            ) for s in self.source_registry.list() if s.get("origin") == "conversation")
         for source in sources:
             youtube_episodes: list[Episode] = []
             rss_episodes: list[Episode] = []

@@ -36,12 +36,14 @@ class NewsOfficerRuntime:
         messenger: FeishuMessenger,
         router: CommandRouter,
         podcast_service: PodcastService,
+        research_agent=None,
     ):
         self.settings = settings
         self.store = store
         self.messenger = messenger
         self.router = router
         self.podcast_service = podcast_service
+        self.research_agent = research_agent
         self.wake_workers = {
             "message": asyncio.Event(),
             "daily": asyncio.Event(),
@@ -655,9 +657,24 @@ class NewsOfficerRuntime:
                         self._wake_worker("daily")
             await asyncio.sleep(30)
 
+    async def _library_archiver(self) -> None:
+        while True:
+            try:
+                completed = await asyncio.to_thread(self.research_agent.library.archive_pending)
+                if completed:
+                    logger.info("Verified %s Feishu podcast archive(s)", len(completed))
+            except Exception as error:  # noqa: BLE001 - independent worker retries without stopping the bot
+                logger.warning("Library archive pending retry: %s", type(error).__name__)
+            await asyncio.sleep(60)
+
     async def run(self) -> None:
         self._main_loop = asyncio.get_running_loop()
         self.store.initialize()
+        if self.research_agent is not None:
+            self.research_agent.initialize()
+            logger.info("Research execution: OpenAI Agents SDK (model=%s)", self.settings.openai_model)
+        else:
+            logger.warning("Research execution: legacy intent router; Agents SDK mode is disabled")
         seeded = self.store.seed_subscriptions(
             self.settings.user_open_ids, self.settings.group_chat_ids
         )
@@ -672,6 +689,8 @@ class NewsOfficerRuntime:
             asyncio.create_task(self._scheduler(), name="daily-scheduler"),
             asyncio.create_task(self.channel.connect(), name="feishu-channel"),
         ]
+        if self.research_agent is not None and self.research_agent.library.folder:
+            tasks.append(asyncio.create_task(self._library_archiver(), name="library-archiver"))
         try:
             logger.info("情报官 is connecting to Feishu over WebSocket")
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
