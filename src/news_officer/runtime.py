@@ -690,7 +690,7 @@ class NewsOfficerRuntime:
             try:
                 completed = await asyncio.to_thread(self.research_agent.library.archive_pending)
                 if completed:
-                    logger.info("Verified %s Feishu podcast archive(s)", len(completed))
+                    logger.info("Verified %s podcast archive(s)", len(completed))
             except Exception as error:  # noqa: BLE001 - independent worker retries without stopping the bot
                 logger.warning("Library archive pending retry: %s", type(error).__name__)
             await asyncio.sleep(60)
@@ -717,7 +717,10 @@ class NewsOfficerRuntime:
             asyncio.create_task(self._scheduler(), name="daily-scheduler"),
             asyncio.create_task(self.channel.connect(), name="feishu-channel"),
         ]
-        if self.research_agent is not None and self.research_agent.library.folder:
+        if self.research_agent is not None and (
+            self.research_agent.library.folder
+            or getattr(self.research_agent.library, "archive_root", None)
+        ):
             tasks.append(asyncio.create_task(self._library_archiver(), name="library-archiver"))
         try:
             logger.info("情报官 is connecting to Feishu over WebSocket")

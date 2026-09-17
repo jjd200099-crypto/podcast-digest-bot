@@ -10,6 +10,14 @@
 
 代码按 `Feishu adapter → command plugins → podcast service → transcript providers → persistent store/outbox` 分层。新增搜索、公司研究等能力时，实现一个独立 plugin 并在 `CommandRouter` 注册即可；只有新能力确实要访问飞书文档、日历等资源时，才需要增量申请相应飞书权限。
 
+## 云端文件记忆
+
+公开播客档案模式同时保留 SQLite 核验记录与文件库。文件库默认位于数据库旁的 `podcast-memory/`；Railway 上为 `/data/podcast-memory`，可用 `NEWS_OFFICER_MEMORY_PATH` 配置，且必须落在持久卷内。启动时补齐历史全文，每分钟归档新内容；Agent 检索前也同步一次，然后从校验后的文件读取原文。关键词检索覆盖全部已归档节目，不再只限最近 200 期，模型只接收本轮相关片段。
+
+每期包含 `transcript.txt`（核验原文逐字保留）、`metadata.json`（标题、来源、日期、完整性和哈希），以及已有摘要时的 `summary.md`。文件按节目、单期与内容版本组织，根目录 `index.json` 指向当前版本。摘要与原文分开，更新保留旧版。写入采用临时文件与原子替换；已有不可变文件若被改动，不覆盖，也不作为问答证据。
+
+这是原文资料记忆，不是模型自动训练。文件库不包含私聊或群聊历史，不自动收录任意手工放入的文件，也不依赖组织云文档权限。它默认不发送全文附件。文件目录已加入 Git/Docker 忽略规则；协作仓库只放代码和说明，不放全文、数据库或密钥。备份时请同时保留 SQLite 与文件目录；同一持久卷并不等于异地灾备。
+
 ## 文字稿规则
 
 情报官优先通过节目官方 RSS 发现新集，再尝试官网的官方 transcript、RSS 声明的完整文字稿和出版方批准的 Substack 逐字稿，最后回退到公开视频字幕。只有来源明确、文本密度达标且覆盖节目主体时才会调用模型；否则固定回复“未取得完整文字稿，本次不摘要”。当前已接入 Acquired、Dwarkesh、Lenny's Podcast、The Generalist、David Senra、Sequoia、Invest Like the Best/Colossus 等官方来源。YouTube 只作为字幕与元数据补充；全链路不可用时会明确告知用户，不会把简介伪装成摘要。

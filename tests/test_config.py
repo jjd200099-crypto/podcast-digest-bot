@@ -50,6 +50,17 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
         self.assertEqual(settings.db_path, Path(environment["NEWS_OFFICER_DB_PATH"]))
 
+    def test_file_memory_defaults_next_to_database(self):
+        with patch.dict(os.environ, {**self.base_environment(), "NEWS_OFFICER_DB_PATH": "/tmp/test/state.sqlite3"}, clear=True):
+            self.assertEqual(Settings.from_env().podcast_memory_path, Path("/tmp/test/podcast-memory"))
+
+    def test_cloud_file_memory_cannot_use_ephemeral_storage(self):
+        with patch.dict(os.environ, {
+            **self.base_environment(), "RAILWAY_DEPLOYMENT_ID": "deploy",
+            "RAILWAY_VOLUME_MOUNT_PATH": "/data", "NEWS_OFFICER_MEMORY_PATH": "/tmp/memory",
+        }, clear=True), self.assertRaisesRegex(RuntimeError, "MEMORY_PATH"):
+            Settings.from_env()
+
     def test_podwise_is_optional_and_configured_only_by_environment(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
             self.assertEqual(Settings.from_env().podwise_api_token, "")

@@ -47,6 +47,7 @@ class Settings:
     knowledge_mode: str = "feishu_folder"
     podwise_api_token: str = ""
     daily_transcript_attachments: bool = False
+    podcast_memory_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -63,6 +64,9 @@ class Settings:
         db_path = Path(
             os.environ.get("NEWS_OFFICER_DB_PATH", "/data/news-officer.sqlite3")
         )
+        memory_path = Path(os.environ.get(
+            "NEWS_OFFICER_MEMORY_PATH", str(db_path.parent / "podcast-memory")
+        ))
         if os.environ.get("RAILWAY_DEPLOYMENT_ID"):
             mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").rstrip("/")
             if mount_path != "/data":
@@ -75,6 +79,10 @@ class Settings:
                 raise RuntimeError(
                     "NEWS_OFFICER_DB_PATH must live under the Railway /data volume"
                 ) from None
+            try:
+                memory_path.resolve().relative_to(Path("/data").resolve())
+            except ValueError:
+                raise RuntimeError("NEWS_OFFICER_MEMORY_PATH must live under the Railway /data volume") from None
         feeds_path = Path(
             os.environ.get("NEWS_OFFICER_FEEDS_PATH", str(ROOT / "feeds.json"))
         )
@@ -111,6 +119,7 @@ class Settings:
             openai_api_key=os.environ["OPENAI_API_KEY"].strip(),
             openai_model=os.environ.get("OPENAI_MODEL", "gpt-5.6-terra").strip(),
             db_path=db_path,
+            podcast_memory_path=memory_path,
             feeds_path=feeds_path,
             timezone=timezone,
             daily_time=_clock(os.environ.get("NEWS_OFFICER_DAILY_TIME", "08:30")),

@@ -51,7 +51,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
     research = None
     if settings.research_agent_enabled:
         library = (
-            PodcastArchive(store)
+            PodcastArchive(store, settings.podcast_memory_path)
             if settings.knowledge_mode == "podcast_archive"
             else PodcastLibrary(
                 store, FeishuLibraryAPI(messenger), settings.library_folder_token
