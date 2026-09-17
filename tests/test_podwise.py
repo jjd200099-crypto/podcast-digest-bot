@@ -2,6 +2,7 @@ import copy
 import json
 import sys
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -73,6 +74,35 @@ class PodwiseTests(unittest.TestCase):
             for s in self.segments
         ]
         self.assertTrue(self.fetch(segments=segments).verified_complete)
+
+    def test_millisecond_segments_are_validated_against_text_timestamps(self):
+        segments = [
+            {**s, "start": s["start"] * 1000 + 789, "end": s["end"] * 1000}
+            for s in self.segments
+        ]
+        segments[-1]["end"] += 14000
+        result = self.fetch(segments=segments)
+        self.assertTrue(result.verified_complete)
+        self.assertIn("[19:30]", result.text)
+
+    def test_mixed_units_or_wrong_timestamp_are_not_silently_accepted(self):
+        for changes in ({"start": 1000000}, {"time": "00:01:00"}):
+            segments = copy.deepcopy(self.segments)
+            segments[4].update(changes)
+            self.assertIsNone(self.fetch(segments=segments))
+
+    def test_publisher_audio_identity_and_unprocessed_duplicate(self):
+        audio = "https://traffic.megaphone.fm/EXAMPLE123.mp3"
+        self.episode = replace(self.episode, metadata={"audio_url": audio})
+        meta = {**self.meta, "link": audio, "podcastName": "Show with the host"}
+        pending = {**meta, "seq": 456, "transcribed": False}
+        result = self.fetch(meta=meta, rows=[pending, meta])
+        self.assertTrue(result.verified_complete)
+
+    def test_large_timing_overrun_is_rejected(self):
+        segments = copy.deepcopy(self.segments)
+        segments[-1]["end"] += 120
+        self.assertIsNone(self.fetch(segments=segments))
 
     def test_truncation_gaps_snippets_and_wrong_episode_rejected(self):
         cases = [
