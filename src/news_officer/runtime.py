@@ -672,6 +672,9 @@ class NewsOfficerRuntime:
         self.store.initialize()
         if self.research_agent is not None:
             self.research_agent.initialize()
+            logger.info("Research execution: OpenAI Agents SDK (model=%s)", self.settings.openai_model)
+        else:
+            logger.warning("Research execution: legacy intent router; Agents SDK mode is disabled")
         seeded = self.store.seed_subscriptions(
             self.settings.user_open_ids, self.settings.group_chat_ids
         )

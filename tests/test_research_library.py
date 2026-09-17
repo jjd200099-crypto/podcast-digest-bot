@@ -9,6 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import requests
+from agents import Model, ModelResponse, Usage
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -26,6 +32,51 @@ from news_officer.podcast import PodcastService
 from news_officer.research_agent import PodcastResearchAgent, ResearchTools
 from news_officer.source_registry import SourceRegistry
 from news_officer.store import Store
+
+
+class ScriptedModel(Model):
+    """Fake inference only; the real SDK Runner executes every tool and turn."""
+
+    def __init__(self, outputs):
+        self.outputs = iter(outputs)
+        self.inputs = []
+        self.settings = []
+
+    async def get_response(self, **kwargs):
+        self.inputs.append(copy.deepcopy(kwargs["input"]))
+        self.settings.append(kwargs["model_settings"])
+        return ModelResponse(next(self.outputs), Usage(requests=1), None)
+
+    async def stream_response(self, **kwargs):
+        raise NotImplementedError
+        yield
+
+
+def tool_call(name, args=None, call_id="c1"):
+    return [
+        ResponseFunctionToolCall(
+            type="function_call",
+            name=name,
+            arguments=json.dumps(args or {}),
+            call_id=call_id,
+        )
+    ]
+
+
+def final_output(value):
+    return [
+        ResponseOutputMessage(
+            type="message",
+            id="answer",
+            role="assistant",
+            status="completed",
+            content=[
+                ResponseOutputText(
+                    type="output_text", text=json.dumps(value), annotations=[]
+                )
+            ],
+        )
+    ]
 
 
 class FakeAPI:
@@ -590,7 +641,7 @@ class ResearchTests(LibraryFixture):
         self.assertIn("https://feishu.cn/docx/doc1", result)
 
     def test_unauthorized_chat_never_calls_model_or_reads_library(self):
-        with patch.object(self.agent.client.responses, "create") as model:
+        with patch("news_officer.research_agent.run_research") as model:
             result = self.agent.handle(
                 "查库", IncomingMessage("m", "unknown", "查库", "group", "user")
             )
@@ -598,10 +649,7 @@ class ResearchTests(LibraryFixture):
         model.assert_not_called()
 
     def test_real_tool_loop_and_persisted_answer_retry(self):
-        call = SimpleNamespace(
-            type="function_call", name="list_sources", arguments="{}", call_id="c1"
-        )
-        final = json.dumps(
+        final = final_output(
             {
                 "kind": "answer",
                 "message": "",
@@ -613,18 +661,125 @@ class ResearchTests(LibraryFixture):
                 ],
             }
         )
-        responses = [
-            SimpleNamespace(output=[call], output_text=""),
-            SimpleNamespace(output=[], output_text=final),
-        ]
-        with patch.object(
-            self.agent.client.responses, "create", side_effect=responses
-        ) as model:
-            result = self.agent.handle("监听哪些播客", self.message)
-            repeated = self.agent.handle("监听哪些播客", self.message)
-        self.assertEqual(model.call_count, 2)
+        model = self.agent.sdk_model = ScriptedModel([tool_call("list_sources"), final])
+        result = self.agent.handle("监听哪些播客", self.message)
+        repeated = self.agent.handle("监听哪些播客", self.message)
+        self.assertEqual(len(model.inputs), 2)
         self.assertEqual(result, repeated)
         self.assertIn("Original Show", result.messages[0])
+        self.assertFalse(model.settings[0].store)
+        with self.store._connect() as db:
+            steps = list(db.execute("SELECT tool,status FROM research_steps"))
+        self.assertEqual([tuple(r) for r in steps], [("list_sources", "ok")])
+
+    def test_sdk_repairs_invalid_evidence_without_sending_it(self):
+        invalid = {
+            "kind": "answer",
+            "message": "",
+            "points": [
+                {
+                    "text": "Invented fact",
+                    "citations": [{"id": "missing", "quote": "fake"}],
+                }
+            ],
+        }
+        valid = {
+            "kind": "answer",
+            "message": "",
+            "points": [
+                {
+                    "text": "Original Show",
+                    "citations": [{"id": "E0001", "quote": "Original Show"}],
+                }
+            ],
+        }
+        model = self.agent.sdk_model = ScriptedModel(
+            [final_output(invalid), tool_call("list_sources"), final_output(valid)]
+        )
+        reply = self.agent.handle("监听什么", self.message)
+        self.assertNotIn("Invented", reply.messages[0])
+        self.assertIn("Original Show", reply.messages[0])
+        self.assertEqual(len(model.inputs), 3)
+
+    def test_sdk_recovers_tool_failure_and_redacts_exception(self):
+        model = self.agent.sdk_model = ScriptedModel(
+            [
+                tool_call("list_documents", {"offset": 0}),
+                final_output(
+                    {
+                        "kind": "conversation",
+                        "message": "资料库读取失败，请稍后再试。",
+                        "points": [],
+                    }
+                ),
+            ]
+        )
+        with patch.object(
+            self.library, "snapshot", side_effect=RuntimeError("secret=never-output")
+        ):
+            self.agent.handle("看看资料库", self.message)
+        self.assertNotIn("never-output", json.dumps(model.inputs))
+        self.assertIn("工具暂时失败", json.dumps(model.inputs, ensure_ascii=False))
+
+    def test_sdk_history_survives_restart_but_is_isolated_by_user(self):
+        self.agent.sdk_model = ScriptedModel(
+            [
+                final_output(
+                    {
+                        "kind": "conversation",
+                        "message": "可以继续讨论 Bending Spoons。",
+                        "points": [],
+                    }
+                )
+            ]
+        )
+        self.agent.handle("我想看 Bending Spoons", self.message)
+        restarted = PodcastResearchAgent(
+            self.store,
+            self.registry,
+            self.library,
+            "test-key",
+            "test-model",
+            chats=("team",),
+        )
+        restarted.initialize()
+        for user, expected in [("user", True), ("colleague", False)]:
+            model = restarted.sdk_model = ScriptedModel(
+                [
+                    final_output(
+                        {
+                            "kind": "conversation",
+                            "message": "请问具体关注什么？",
+                            "points": [],
+                        }
+                    )
+                ]
+            )
+            restarted.handle(
+                "刚才那个呢",
+                IncomingMessage("m2-" + user, "team", "刚才那个呢", "group", user),
+            )
+            self.assertEqual("Bending Spoons" in json.dumps(model.inputs[0]), expected)
+
+    def test_sdk_loop_budget_is_enforced(self):
+        model = self.agent.sdk_model = ScriptedModel(
+            [tool_call("list_sources", call_id=f"c{i}") for i in range(30)]
+        )
+        reply = self.agent.handle("一直找", self.message)
+        self.assertLessEqual(len(model.inputs), 16)
+        self.assertIn("上限", reply.messages[0])
+
+    def test_discovered_episode_can_be_analyzed_without_requiring_user_copy(self):
+        self.agent.podcast_service = SimpleNamespace(
+            supports_url=lambda _: True,
+            analyze_url=lambda _: SimpleNamespace(message="完整文字稿的摘要"),
+        )
+        url = "https://example.test/new-episode"
+        with self.assertRaises(ValueError):
+            self.state.execute("analyze_podcast", {"url": url})
+        self.state.discovered_episode_urls.add(url)
+        result = self.state.execute("analyze_podcast", {"url": url})
+        self.assertIn("摘要", result["text"])
 
     def test_full_document_read_has_no_silent_truncation(self):
         doc = LibraryDocument(
