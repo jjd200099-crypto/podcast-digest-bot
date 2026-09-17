@@ -45,6 +45,7 @@ class Settings:
     research_user_open_ids: tuple[str, ...] = ()
     research_group_chat_ids: tuple[str, ...] = ()
     knowledge_mode: str = "feishu_folder"
+    podwise_api_token: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -138,4 +139,5 @@ class Settings:
                 os.environ.get("NEWS_OFFICER_RESEARCH_CHATS", "")
             ),
             knowledge_mode=knowledge_mode,
+            podwise_api_token=os.environ.get("PODWISE_API_TOKEN", "").strip(),
         )

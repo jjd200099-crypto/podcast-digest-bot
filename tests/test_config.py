@@ -50,6 +50,12 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
         self.assertEqual(settings.db_path, Path(environment["NEWS_OFFICER_DB_PATH"]))
 
+    def test_podwise_is_optional_and_configured_only_by_environment(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            self.assertEqual(Settings.from_env().podwise_api_token, "")
+        with patch.dict(os.environ, {**self.base_environment(), "PODWISE_API_TOKEN": " test-token "}, clear=True):
+            self.assertEqual(Settings.from_env().podwise_api_token, "test-token")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,12 +18,12 @@ VALID_TAKEAWAY = (
 
 def _summary(overrides=None):
     overrides = overrides or {}
-    lines = ["节目：测试节目", "", "### 核心判断"]
+    lines = ["节目：测试节目", "", "推荐理由：提供一手经营视角与具体论证，适合创业和投资研究。", "", "### 核心判断"]
     for number in range(1, 11):
         if number in {5, 8}:
             lines.extend(["", f"### 主题{number}"])
         lines.append(f"{number}. {overrides.get(number, VALID_TAKEAWAY)}")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n推荐星级：★★★★☆（4/5，编辑推荐）"
 
 
 VALID_SUMMARY = _summary()
@@ -61,8 +61,8 @@ class SummarizerTests(unittest.TestCase):
 
         self.assertEqual(result, VALID_SUMMARY)
         self.assertIn("不受信任", responses.kwargs["instructions"])
-        self.assertIn("恰好精选 10 条", responses.kwargs["instructions"])
-        self.assertIn("70–100 个中文字符", responses.kwargs["instructions"])
+        self.assertIn("上限 10 条", responses.kwargs["instructions"])
+        self.assertIn("40–80 个中文字符", responses.kwargs["instructions"])
         self.assertIn("120 个可见字符", responses.kwargs["instructions"])
         self.assertIn("最多 2 句话", responses.kwargs["instructions"])
         self.assertIn("不铺背景、不堆多个例子", responses.kwargs["instructions"])
@@ -110,11 +110,24 @@ class SummarizerTests(unittest.TestCase):
             True,
         )
 
-        with self.assertRaisesRegex(ValueError, "exactly 10"):
+        with self.assertRaisesRegex(ValueError, "1–10"):
             summarizer.summarize(
                 Episode("id", "Title", "https://example.com", "Show"), transcript
             )
         self.assertEqual(len(responses.calls), 2)
+
+    def test_shorter_summary_is_accepted_without_padding(self):
+        from news_officer.summarizer import _valid_editorial_summary
+        short = _summary()
+        short = "\n".join(line for line in short.splitlines() if not any(line.startswith(f"{n}. ") for n in range(4, 11)))
+        self.assertTrue(_valid_editorial_summary(short))
+
+    def test_missing_or_inconsistent_recommendation_is_rejected(self):
+        from news_officer.summarizer import _valid_editorial_summary
+        for value in (VALID_SUMMARY.replace("（4/5", "（5/5"),
+                      VALID_SUMMARY.split("\n推荐星级：")[0],
+                      VALID_SUMMARY.replace("推荐理由：", "简介：")):
+            self.assertFalse(_valid_editorial_summary(value))
 
     def test_empty_takeaway_is_rejected(self):
         invalid = "1.\n" + "\n".join(

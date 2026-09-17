@@ -23,6 +23,7 @@ from .models import (
     TranscriptAttachment,
 )
 from .official import DwarkeshOfficialTranscriptProvider
+from .podwise import PodwiseTranscriptProvider
 from .rss import (
     RSSDeclaredTranscriptProvider,
     SubstackApprovedTranscriptProvider,
@@ -258,7 +259,10 @@ def _rss_with_unmatched_youtube(
     oldest = datetime.min.replace(tzinfo=UTC)
     return sorted(
         episodes,
-        key=lambda episode: episode.published_at or oldest,
+        key=lambda episode: (
+            bool(episode.metadata.get("rss_feed_url")),
+            episode.published_at or oldest,
+        ),
         reverse=True,
     )
 
@@ -313,6 +317,7 @@ class PodcastService:
         max_daily_candidates: int = 16,
         max_daily_summaries: int = 3,
         source_registry=None,
+        podwise_api_token: str = "",
     ):
         self.store = store
         self.feeds_path = feeds_path
@@ -325,6 +330,7 @@ class PodcastService:
                 DwarkeshOfficialTranscriptProvider(),
                 SequoiaOfficialTranscriptProvider(),
                 ColossusOfficialTranscriptProvider(),
+                *([PodwiseTranscriptProvider(podwise_api_token)] if podwise_api_token else []),
                 YouTubeTranscriptProvider(),
             ]
         )
@@ -447,7 +453,7 @@ class PodcastService:
                 episode=episode,
                 message=(
                     f"节目：{episode.title}\n链接：{episode.url}\n\n"
-                    "本次摘要没有稳定收敛为 10 条精选要点，因此没有发送不合格结果。"
+                    "本次摘要未满足推荐理由、十条以内短要点和星级的格式要求，没有发送不合格结果。"
                     "请稍后重新发送这个链接。"
                 ),
             )
@@ -506,7 +512,7 @@ class PodcastService:
                     discovered_rss = latest_rss_episodes(
                         source.name or source.url,
                         source.rss_url,
-                        limit=source.scan_depth,
+                        limit=max(30, source.scan_depth),
                     )
                     if discovered_rss:
                         channel_with_results += 1
@@ -627,6 +633,7 @@ class PodcastService:
         # tier. This preserves priority without starving all B sources whenever
         # the eight high-frequency A feeds each publish multiple episodes.
         for grouped in (new_groups, retry_groups):
+            batch_start = len(candidates)
             rotated = {
                 priority: _rotate_source_groups(
                     grouped[priority],
@@ -650,6 +657,13 @@ class PodcastService:
                 for priority in ("A", "B")
             }
             candidates.extend(_weighted_priority_merge(rest["A"], rest["B"]))
+            # Publisher RSS episodes precede unmatched channel videos (often
+            # clips). Preserve fairness/tier order within each bucket and keep
+            # new releases ahead of retries.
+            candidates[batch_start:] = sorted(
+                candidates[batch_start:],
+                key=lambda episode: not bool(episode.metadata.get("rss_feed_url")),
+            )
 
         successful_sources = len(sources) - len(failed_sources)
         self._last_failed_feeds = tuple(failed_sources)

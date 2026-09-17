@@ -347,7 +347,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.store.should_review_episode(episode.id, no_transcript_retry_hours=0)
         )
         self.assertIn(
-            "daily:empty", {item.group_key for item in messenger.delivered.values()}
+            "daily:coverage", {item.group_key for item in messenger.delivered.values()}
         )
 
     async def test_daily_source_failure_sends_warning_and_remains_retryable(self):

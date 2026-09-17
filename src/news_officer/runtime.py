@@ -17,6 +17,7 @@ from lark_channel import (
 )
 
 from .config import Settings
+from .daily_report import coverage_report
 from .feishu import FeishuMessenger, delivery_parts, file_delivery_part
 from .models import DailyItem, IncomingMessage, Job, TranscriptAttachment
 from .podcast import PodcastService
@@ -572,14 +573,15 @@ class NewsOfficerRuntime:
             )
 
         if not failures:
-            had_summary = any(item.status == "summarized" for item in persisted)
-            if not had_summary:
+            report = coverage_report(persisted)
+            if report:
+                group = "daily:coverage" if persisted else "daily:empty"
                 await asyncio.to_thread(
                     self._ensure_broadcast,
                     job,
-                    "daily:empty",
-                    "今日无可摘要的关键播客更新。",
-                    f"{job.key}:empty",
+                    group,
+                    report,
+                    f"{job.key}:{group}",
                 )
             # This flag is committed before delivery. A crash can therefore
             # only replay the fixed outbox, never regenerate or emit false empty.

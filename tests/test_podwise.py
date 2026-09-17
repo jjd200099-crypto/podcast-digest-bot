@@ -1,0 +1,144 @@
+import copy
+import json
+import sys
+import unittest
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from news_officer.models import Episode
+from news_officer.podwise import PodwiseAPIError, PodwiseTranscriptProvider
+
+
+class PodwiseTests(unittest.TestCase):
+    def setUp(self):
+        self.provider = PodwiseTranscriptProvider("test-secret-not-real")
+        self.episode = Episode(
+            "rss:1",
+            "A precise episode",
+            "https://example.org/episode",
+            "Show",
+            duration_seconds=1200,
+            published_at=datetime(2026, 9, 17, tzinfo=UTC),
+        )
+        self.meta = {
+            "seq": 123,
+            "title": self.episode.title,
+            "podcastName": "Show",
+            "link": self.episode.url,
+            "duration": 1200,
+            "publishTime": self.episode.published_at.timestamp(),
+            "transcribed": True,
+            "language": "en",
+        }
+        self.segments = [
+            {
+                "time": f"{i // 2:02d}:{(i % 2) * 30:02d}",
+                "start": i * 30,
+                "end": (i + 1) * 30,
+                "content": "We discuss capital investment and model capabilities with concrete customer evidence. "
+                * 5,
+            }
+            for i in range(40)
+        ]
+
+    def fetch(self, meta=None, segments=None, rows=None):
+        with patch.object(
+            self.provider,
+            "_get",
+            side_effect=[
+                {"result": rows if rows is not None else [self.meta]},
+                {
+                    "episode": meta or self.meta,
+                    "result": segments if segments is not None else self.segments,
+                },
+            ],
+        ):
+            return self.provider.fetch(self.episode)
+
+    def test_full_transcript_with_verified_identity(self):
+        result = self.fetch()
+        self.assertTrue(result.verified_complete)
+        self.assertIn("[19:30]", result.text)
+        self.assertEqual(
+            result.source_url,
+            "https://app.podwise.ai/api/open/v1/episodes/123/transcripts",
+        )
+
+    def test_timestamp_only_full_transcript(self):
+        segments = [
+            {k: v for k, v in s.items() if k not in {"start", "end"}}
+            for s in self.segments
+        ]
+        self.assertTrue(self.fetch(segments=segments).verified_complete)
+
+    def test_truncation_gaps_snippets_and_wrong_episode_rejected(self):
+        cases = [
+            self.segments[:20],
+            self.segments[:5] + self.segments[15:],
+            [{**s, "content": "short summary"} for s in self.segments],
+        ]
+        for segments in cases:
+            with self.subTest(length=len(segments)):
+                self.assertIsNone(self.fetch(segments=segments))
+        self.assertIsNone(self.fetch(meta={**self.meta, "seq": 456}))
+        self.assertIsNone(self.fetch(meta={**self.meta, "duration": 2400}))
+
+    def test_ambiguous_or_unprocessed_match_does_not_trigger_processing(self):
+        self.assertIsNone(self.fetch(rows=[self.meta, {**self.meta, "seq": 456}]))
+        self.assertIsNone(self.fetch(rows=[{**self.meta, "transcribed": False}]))
+        self.assertIsNone(
+            self.fetch(
+                rows=[
+                    {
+                        **self.meta,
+                        "link": "https://other.test/clip",
+                        "title": "Similar clip",
+                    }
+                ]
+            )
+        )
+
+    def test_exact_title_show_date_duration_can_match_changed_url(self):
+        meta = {**self.meta, "link": "https://publisher.test/new-page"}
+        self.assertTrue(self.fetch(rows=[meta], meta=meta).verified_complete)
+
+    def test_no_token_no_network(self):
+        with patch("news_officer.podwise.requests.get") as get:
+            self.assertIsNone(PodwiseTranscriptProvider("").fetch(self.episode))
+            get.assert_not_called()
+
+    def test_http_errors_are_sanitized_and_redirects_disabled(self):
+        for status in (301, 401, 402, 429, 500):
+            response = MagicMock(status_code=status)
+            response.__enter__.return_value = response
+            with patch(
+                "news_officer.podwise.requests.get", return_value=response
+            ) as get:
+                with self.assertRaises(PodwiseAPIError) as error:
+                    self.provider._get("/episodes/search")
+                self.assertNotIn("test-secret", str(error.exception))
+                self.assertFalse(get.call_args.kwargs["allow_redirects"])
+
+    def test_response_limit_and_invalid_json(self):
+        response = MagicMock(status_code=200)
+        response.__enter__.return_value = response
+        for body in (
+            b"invalid json",
+            json.dumps({"success": False}).encode(),
+            b"x" * 4_000_001,
+        ):
+            response.iter_content.return_value = [body]
+            with (
+                patch("news_officer.podwise.requests.get", return_value=response),
+                self.assertRaises(PodwiseAPIError),
+            ):
+                self.provider._get("/episodes/search")
+
+    def test_nan_and_reversed_timing_rejected(self):
+        for changes in ({"start": float("nan")}, {"start": 90}, {"end": -1}):
+            segments = copy.deepcopy(self.segments)
+            segments[0].update(changes)
+            self.assertIsNone(self.fetch(segments=segments))

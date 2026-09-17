@@ -45,6 +45,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         max_daily_candidates=settings.max_daily_candidates,
         max_daily_summaries=settings.max_daily_summaries,
         source_registry=registry,
+        podwise_api_token=settings.podwise_api_token,
     )
     plugins = [SubscriptionPlugin(store)]
     research = None
