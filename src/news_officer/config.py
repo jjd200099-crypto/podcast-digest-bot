@@ -40,6 +40,10 @@ class Settings:
     max_daily_candidates: int
     lookback_hours: int
     manual_digest_id: str
+    research_agent_enabled: bool = False
+    library_folder_token: str = ""
+    research_user_open_ids: tuple[str, ...] = ()
+    research_group_chat_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -116,4 +120,8 @@ class Settings:
                 1, int(os.environ.get("NEWS_OFFICER_LOOKBACK_HOURS", "72"))
             ),
             manual_digest_id=manual_digest_id,
+            research_agent_enabled=os.environ.get("NEWS_OFFICER_RESEARCH_AGENT", "").lower() == "true",
+            library_folder_token=os.environ.get("NEWS_OFFICER_LIBRARY_FOLDER", "").strip(),
+            research_user_open_ids=_csv(os.environ.get("NEWS_OFFICER_RESEARCH_USERS", "")),
+            research_group_chat_ids=_csv(os.environ.get("NEWS_OFFICER_RESEARCH_CHATS", "")),
         )

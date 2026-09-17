@@ -583,6 +583,7 @@ class RuntimeSupervisionTests(unittest.IsolatedAsyncioTestCase):
             instance.messenger = FakeMessenger()
             instance.router = FakeRouter(FakePlugin())
             instance.podcast_service = SequencePodcast([])
+            instance.research_agent = None
             instance.wake_workers = {
                 "message": __import__("asyncio").Event(),
                 "daily": __import__("asyncio").Event(),
