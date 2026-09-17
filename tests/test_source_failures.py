@@ -318,8 +318,27 @@ class SourceFailureTests(unittest.TestCase):
 
         self.assertEqual(
             [candidate.id for candidate in candidates],
-            ["youtube-new", "rss:old-title"],
+            ["rss:old-title", "youtube-new"],
         )
+
+    def test_full_rss_episode_beats_newer_clip_under_small_budget(self):
+        self.feeds.write_text(json.dumps({"sources": [{
+            "name": "Show", "type": "youtube", "url": "https://www.youtube.com/@show",
+            "rss_url": "https://example.test/show.rss",
+        }]}))
+        rss = Episode("rss:full", "Long interview", "https://example.test/full", "Show",
+                      published_at=datetime(2026, 9, 5, 10, tzinfo=UTC),
+                      metadata={"rss_feed_url": "https://example.test/show.rss"})
+        clip = Episode("clip", "Short cut", "https://youtu.be/clip", "Show",
+                       published_at=datetime(2026, 9, 5, 12, tzinfo=UTC))
+        service = PodcastService(self.store, self.feeds, FakeSummarizer(), max_daily_candidates=1)
+        with (
+            patch("news_officer.podcast.latest_videos", return_value=[clip]),
+            patch("news_officer.podcast.latest_rss_episodes", return_value=[rss]) as scan,
+        ):
+            candidates = service.discover_daily_candidates(datetime(2026, 9, 6, tzinfo=UTC))
+        self.assertEqual([item.id for item in candidates], ["rss:full"])
+        self.assertEqual(scan.call_args.kwargs["limit"], 30)
 
     def test_unknown_publication_date_is_never_treated_as_recent(self):
         self.feeds.write_text(
