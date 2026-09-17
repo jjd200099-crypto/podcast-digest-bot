@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import requests
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -115,6 +117,55 @@ class LibraryFixture(unittest.TestCase):
 
 
 class LibraryTests(LibraryFixture):
+    def test_one_failed_document_does_not_starve_other_episodes(self):
+        first = self.archive_record("first")
+        second = self.archive_record("second")
+        self.api.fail_after_write = True
+        with self.assertRaises(LibraryError):
+            self.library.archive_pending()
+        with self.store._connect() as db:
+            states = dict(
+                db.execute("SELECT episode_id,status FROM library_publications")
+            )
+        self.assertEqual(states[first.episode.id], "pending")
+        self.assertEqual(states[second.episode.id], "complete")
+        self.assertEqual(self.library.archive_pending(), ["doc1"])
+
+    def test_document_timeout_does_not_hide_other_documents(self):
+        self.archive_record("first")
+        self.archive_record("second")
+        self.library.archive_pending()
+        text = self.api.text
+
+        def read(token):
+            if token == "doc1":
+                raise requests.Timeout("credentials must not be copied to warnings")
+            return text(token)
+
+        with patch.object(self.api, "text", side_effect=read):
+            docs, warnings = self.library.snapshot()
+        self.assertEqual([d.token for d in docs], ["doc2"])
+        self.assertEqual(len(warnings), 1)
+        self.assertNotIn("credentials", warnings[0])
+
+    def test_subfolder_timeout_is_disclosed_without_hiding_root_docs(self):
+        self.archive_record()
+        self.library.archive_pending()
+        self.api.catalog["folder"].append(
+            {"token": "sub", "name": "Sub", "type": "folder"}
+        )
+        listing = self.api.files
+
+        def files(folder):
+            if folder == "sub":
+                raise requests.Timeout()
+            return listing(folder)
+
+        with patch.object(self.api, "files", side_effect=files):
+            docs, warnings = self.library.snapshot()
+        self.assertEqual(len(docs), 1)
+        self.assertIn("子文件夹", warnings[0])
+
     def test_verified_archive_and_idempotent_repeat(self):
         self.archive_record()
         self.assertEqual(self.library.archive_pending(), ["doc1"])

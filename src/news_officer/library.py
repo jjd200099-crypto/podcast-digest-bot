@@ -198,7 +198,7 @@ class PodcastLibrary:
                 status TEXT NOT NULL DEFAULT 'pending')""")
 
     def archive_pending(self):
-        """All archived transcripts, not just the ten most recent. Never overwrite human edits."""
+        """Complete every possible document even when another publication fails."""
         if not self.folder:
             return []
         with self._archive_lock:
@@ -208,93 +208,107 @@ class PodcastLibrary:
                     for r in db.execute("SELECT episode_id FROM episode_transcripts")
                 ]
             documents = self.api.files(self.folder)
-            completed = []
+            completed, failures = [], []
             for episode_id in ids:
-                record = self.store.get_verified_transcript(episode_id)
-                if record is None:
-                    continue
-                digest = self.store.get_transcript_digest(episode_id)
-                _, rendered = render_readable_transcript(record, digest_markdown=digest)
-                identity = hashlib.sha256(
-                    (self.folder + record.record_revision_sha256).encode()
-                ).hexdigest()
-                date = (
-                    record.episode.published_at.date().isoformat()
-                    if record.episode.published_at
-                    else "日期未知"
+                try:
+                    token = self._archive_record(episode_id, documents)
+                    if token:
+                        completed.append(token)
+                except (LibraryError, requests.RequestException, ValueError) as error:
+                    # Keep failed records pending; never let one edited document
+                    # permanently starve later episodes. Do not expose HTTP bodies.
+                    failures.append(
+                        str(error)
+                        if isinstance(error, LibraryError)
+                        else type(error).__name__
+                    )
+            if failures:
+                raise LibraryError(
+                    f"归档部分失败（已完成 {len(completed)} 篇）：{'；'.join(failures[:3])}"
                 )
-                title = (
-                    f"{date}｜{record.episode.show}｜{record.episode.title}"[:730]
-                    + f" [{identity[:12]}]"
-                )
-                with self.store._connect() as db:
-                    db.execute(
-                        "INSERT OR IGNORE INTO library_publications(identity,folder,episode_id,title,blocks_json) VALUES (?,?,?,?,?)",
-                        (
-                            identity,
-                            self.folder,
-                            episode_id,
-                            title,
-                            json.dumps(
-                                markdown_blocks(rendered.decode()), ensure_ascii=False
-                            ),
-                        ),
-                    )
-                    row = dict(
-                        db.execute(
-                            "SELECT * FROM library_publications WHERE identity=?",
-                            (identity,),
-                        ).fetchone()
-                    )
-                if row["status"] == "complete":
-                    # A deliberately moved/deleted document must not be resurrected.
-                    continue
-                blocks = json.loads(row["blocks_json"])
-                token = row["document_id"]
-                if not token:
-                    matches = [
-                        d["token"]
-                        for d in documents
-                        if d["name"] == row["title"] and d["type"] == "docx"
-                    ]
-                    if len(matches) > 1:
-                        raise LibraryError("发现重复归档文档，请先人工确认")
-                    token = (
-                        matches[0]
-                        if matches
-                        else self.api.create(self.folder, row["title"])
-                    )
-                    with self.store._connect() as db:
-                        db.execute(
-                            "UPDATE library_publications SET document_id=? WHERE identity=?",
-                            (token, identity),
-                        )
-                existing = [
-                    b
-                    for b in self.api.blocks(token)
-                    if b.get("parent_id") == token and b["block_type"] != 1
-                ]
-                expected = [block_signature(b) for b in blocks]
-                actual = [block_signature(b) for b in existing]
-                if len(actual) > len(expected) or actual != expected[: len(actual)]:
-                    raise LibraryError("归档中的文档已被修改，已停止写入以保护人工内容")
-                for start in range(len(existing), len(blocks), 50):
-                    self.api.append(token, blocks[start : start + 50], start, identity)
-                # Verify every paragraph before claiming completion or including it in Q&A.
-                actual = [
-                    block_signature(b)
-                    for b in self.api.blocks(token)
-                    if b.get("parent_id") == token and b["block_type"] != 1
-                ]
-                if actual != expected:
-                    raise LibraryError("文档回读与归档内容不一致，未标记完成")
-                with self.store._connect() as db:
-                    db.execute(
-                        "UPDATE library_publications SET status='complete' WHERE identity=?",
-                        (identity,),
-                    )
-                completed.append(token)
             return completed
+
+    def _archive_record(self, episode_id, documents):
+        record = self.store.get_verified_transcript(episode_id)
+        if record is None:
+            return None
+        digest = self.store.get_transcript_digest(episode_id)
+        _, rendered = render_readable_transcript(record, digest_markdown=digest)
+        identity = hashlib.sha256(
+            (self.folder + record.record_revision_sha256).encode()
+        ).hexdigest()
+        date = (
+            record.episode.published_at.date().isoformat()
+            if record.episode.published_at
+            else "日期未知"
+        )
+        title = (
+            f"{date}｜{record.episode.show}｜{record.episode.title}"[:730]
+            + f" [{identity[:12]}]"
+        )
+        with self.store._connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO library_publications(identity,folder,episode_id,title,blocks_json) VALUES (?,?,?,?,?)",
+                (
+                    identity,
+                    self.folder,
+                    episode_id,
+                    title,
+                    json.dumps(markdown_blocks(rendered.decode()), ensure_ascii=False),
+                ),
+            )
+            row = dict(
+                db.execute(
+                    "SELECT * FROM library_publications WHERE identity=?",
+                    (identity,),
+                ).fetchone()
+            )
+        if row["status"] == "complete":
+            # A deliberately moved/deleted document must not be resurrected.
+            return None
+        blocks = json.loads(row["blocks_json"])
+        token = row["document_id"]
+        if not token:
+            matches = [
+                d["token"]
+                for d in documents
+                if d["name"] == row["title"] and d["type"] == "docx"
+            ]
+            if len(matches) > 1:
+                raise LibraryError("发现重复归档文档，请先人工确认")
+            token = (
+                matches[0] if matches else self.api.create(self.folder, row["title"])
+            )
+            with self.store._connect() as db:
+                db.execute(
+                    "UPDATE library_publications SET document_id=? WHERE identity=?",
+                    (token, identity),
+                )
+        existing = [
+            b
+            for b in self.api.blocks(token)
+            if b.get("parent_id") == token and b["block_type"] != 1
+        ]
+        expected = [block_signature(b) for b in blocks]
+        actual = [block_signature(b) for b in existing]
+        if len(actual) > len(expected) or actual != expected[: len(actual)]:
+            raise LibraryError("归档中的文档已被修改，已停止写入以保护人工内容")
+        for start in range(len(existing), len(blocks), 50):
+            self.api.append(token, blocks[start : start + 50], start, identity)
+        # Verify every paragraph before claiming completion or including it in Q&A.
+        actual = [
+            block_signature(b)
+            for b in self.api.blocks(token)
+            if b.get("parent_id") == token and b["block_type"] != 1
+        ]
+        if actual != expected:
+            raise LibraryError("文档回读与归档内容不一致，未标记完成")
+        with self.store._connect() as db:
+            db.execute(
+                "UPDATE library_publications SET status='complete' WHERE identity=?",
+                (identity,),
+            )
+        return token
 
     def snapshot(self):
         """Fetch current folder membership and text; never use removed or stale documents."""
@@ -306,7 +320,18 @@ class PodcastLibrary:
             if folder in visited:
                 continue
             visited.add(folder)
-            for item in self.api.files(folder):
+            try:
+                items = self.api.files(folder)
+            except (LibraryError, requests.RequestException, ValueError) as error:
+                if folder == self.folder:
+                    if isinstance(error, LibraryError):
+                        raise
+                    raise LibraryError(
+                        "资料库文件夹本次无法读取，未使用旧缓存"
+                    ) from None
+                warnings.append("一个子文件夹本次无法读取，不将其中内容视作不存在")
+                continue
+            for item in items:
                 token = item["token"]
                 if item["type"] == "folder":
                     pending.append(token)
@@ -327,7 +352,7 @@ class PodcastLibrary:
                     continue
                 try:
                     text = self.api.text(token)
-                except LibraryError:
+                except (LibraryError, requests.RequestException, ValueError):
                     warnings.append(f"{item['name']}：本次读取失败，不使用旧缓存")
                     continue
                 docs.append(
