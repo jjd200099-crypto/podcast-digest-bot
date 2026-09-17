@@ -429,6 +429,29 @@ class PodcastService:
                 status="unsupported",
                 message="未能读取这个官方播客页面。请检查链接是否公开可访问。",
             )
+        return self.analyze_episode(episode)
+
+    def analyze_discovered_episode(self, episode: Episode) -> AnalysisResult:
+        """Analyze trusted RSS metadata through the same providers as daily jobs."""
+        if not episode.metadata.get("youtube_url"):
+            for source in load_youtube_sources(self.feeds_path):
+                if source.url and source.rss_url == episode.metadata.get("rss_feed_url"):
+                    try:
+                        videos = latest_videos(source.url, playlist_end=source.scan_depth)
+                        episode = attach_youtube_fallbacks([episode], videos)[0]
+                    except Exception:  # noqa: BLE001 - captions must not block other providers
+                        logger.warning("Optional caption matching unavailable for %s", episode.show)
+                    break
+        return self.analyze_episode(episode)
+
+    def analyze_episode(self, episode: Episode) -> AnalysisResult:
+        """Internal entry point: caller supplies a verified-discovery Episode."""
+        record = self.store.get_verified_transcript(episode.id)
+        if record and record.episode.to_persisted_dict() == episode.to_persisted_dict():
+            digest = self.store.get_transcript_digest(episode.id)
+            if digest:
+                return AnalysisResult(status="summarized", episode=episode, message=digest,
+                                      attachment=_readable_attachment(record, digest))
         youtube_url = str(episode.metadata.get("youtube_url") or "")
         if episode.duration_seconds is None and is_youtube_url(youtube_url):
             try:

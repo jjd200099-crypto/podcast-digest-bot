@@ -4,6 +4,8 @@
 
 情报官把飞书限定为交互界面：它接收私聊或群内 @，并把结果发回飞书。播客发现、完整文字稿核验、OpenAI 摘要、定时任务、队列与状态全部运行在一个常驻云容器中，因此电脑关机后仍能工作。
 
+私聊与已授权群聊使用同一个 Agent、同一份正式播客全文库和日报归档。在群里任何成员都可以 @ 机器人提问；私聊访问仍由用户白名单控制。对话历史按会话和发言人隔离，不将私聊或其他同事的历史用作回答依据。`发一下今天的日报` 通过 `get_daily_digest` 读取当日已生成的正式日报，不等同于查询过去 24 小时 RSS 目录；未生成时明确说明。新节目分析保留 RSS 音频与字幕元数据，走与日报相同的全文获取链路。
+
 服务通过飞书官方 WebSocket 长连接收消息，不需要公网回调、Vercel、Verification Token 或逐条触发 GitHub Actions。每个请求先进入 SQLite 持久队列；分析结果和每个收件人的每一段消息再固化到 outbox 后才发送。网络中断、容器重启或单个无效收件人都不会导致重新调用模型、消息混段或阻塞其他群。
 
 代码按 `Feishu adapter → command plugins → podcast service → transcript providers → persistent store/outbox` 分层。新增搜索、公司研究等能力时，实现一个独立 plugin 并在 `CommandRouter` 注册即可；只有新能力确实要访问飞书文档、日历等资源时，才需要增量申请相应飞书权限。
@@ -18,7 +20,7 @@
 
 ### 可选 Podwise 全文来源
 
-配置云端 Secret `PODWISE_API_TOKEN` 后，在官网适配器之后、YouTube 字幕之前尝试 Podwise。需要 Podwise Pro/Enterprise，在 Settings → Developer 生成 token；不要把 token 提交到 Git、粘贴到聊天或日志中。未配置时不访问 Podwise，不能宣称已接通。
+配置云端 Secret `PODWISE_API_TOKEN` 后，在官网适配器与 YouTube 字幕后尝试 Podwise。需要 Podwise Pro/Enterprise，在 Settings → Developer 生成 token；不要把 token 提交到 Git、粘贴到聊天或日志中。未配置时不访问 Podwise，不能宣称已接通。
 
 顺序为已有核验归档 → 官网/RSS 全文 → 公共字幕 → Podwise。仅使用官方 Open API 的读取接口，不调用处理/导入接口，不发起付费转写。按原始链接匹配，或严格匹配标题、节目名、日期和时长；RSS 音频与 YouTube 均有转写时优先精确匹配 RSS enclosure，同一音频多个已处理版本仍拒绝歧义。获取后再次核对身份，检查首尾与中间覆盖、文本密度，搜索片段和 AI 摘要不充当全文。时间轴小幅超出元数据时，只有差异不超过 5%、独立 status 接口确认 done/100、且较长时间轴本身通过全文覆盖校验才接受；缺中段仍拒绝。仅有起点时间戳时采用更保守门槛。当前文本密度规则面向英文播客。
 

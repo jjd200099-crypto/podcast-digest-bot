@@ -148,6 +148,8 @@ class SourceRegistry:
                                 "show": ep.show,
                                 "url": ep.url,
                                 "published_at": ep.published_at.isoformat(),
+                                "_episode": ep.to_persisted_dict(),
+                                "_metadata": ep.metadata,
                             }
                         )
                 if len(episodes) >= 100 and all(

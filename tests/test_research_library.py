@@ -19,6 +19,7 @@ from openai.types.responses import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from news_officer.daily_archive import read_daily_digest
 from news_officer.library import (
     FeishuLibraryAPI,
     LibraryDocument,
@@ -27,8 +28,8 @@ from news_officer.library import (
     block_signature,
     markdown_blocks,
 )
-from news_officer.models import Episode, IncomingMessage, Transcript
-from news_officer.podcast import PodcastService
+from news_officer.models import DailyItem, Episode, IncomingMessage, Transcript
+from news_officer.podcast import PodcastService, _readable_attachment
 from news_officer.podcast_archive import PodcastArchive
 from news_officer.research_agent import PodcastResearchAgent, ResearchTools
 from news_officer.source_registry import SourceRegistry
@@ -433,6 +434,95 @@ class SourceTests(LibraryFixture):
 
 
 class ResearchTests(LibraryFixture):
+    def saved_daily(self):
+        record = self.archive_record()
+        digest = "推荐理由：具体讨论经营方法。\n\n1. 观点来自完整文字稿。\n\n推荐星级：★★★★☆"
+        self.store.save_transcript_digest(record.episode.id, digest,
+                                         record.content_sha256, record.record_revision_sha256)
+        key = "daily:2026-09-17"
+        self.store.enqueue(key, "daily", {"scheduled_for": "2026-09-17T08:30:00+08:00"})
+        item = DailyItem(record.episode, "summarized", digest, _readable_attachment(record, digest))
+        self.store.save_job_result(key, "episode:episode", "daily_item", item.to_persisted_dict())
+        self.store.mark_analysis_complete(key)
+        return record, item
+
+    def test_daily_tool_shared_by_private_and_different_group_members(self):
+        self.saved_daily()
+        replies = []
+        for index, (chat, kind, user) in enumerate([
+            ("private", "p2p", "user"), ("team", "group", "user"),
+            ("team", "group", "colleague"),
+        ]):
+            self.agent.sdk_model = ScriptedModel([
+                tool_call("get_daily_digest", {"date": "2026-09-17"}),
+                final_output({"kind": "conversation", "message": "", "points": []}),
+            ])
+            message = IncomingMessage(f"daily-{index}", chat, "发一下今天的日报", kind, user)
+            reply = self.agent.handle(message.text, message)
+            replies.append(reply.messages)
+            self.assertFalse(reply.attachments)
+            self.assertIn("推荐星级", reply.messages[0])
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual(replies[1], replies[2])
+
+    def test_daily_missing_does_not_claim_no_new_podcasts(self):
+        value = self.state.execute("get_daily_digest", {"date": "2026-09-17"})
+        self.assertEqual(value["status"], "not_generated")
+        reply = self.state.render({"kind": "conversation", "message": "", "points": []})
+        self.assertIn("尚未生成或归档", reply)
+
+    def test_daily_reads_delivery_date_not_episode_publication_date(self):
+        self.saved_daily()
+        self.assertEqual(read_daily_digest(self.store, "2026-09-17")["count"], 1)
+        self.assertEqual(read_daily_digest(self.store, "2026-09-14")["status"], "not_generated")
+        with self.assertRaises(ValueError):
+            read_daily_digest(self.store, "yesterday")
+
+    def test_daily_rejects_stale_transcript_revision(self):
+        record, _ = self.saved_daily()
+        self.store.save_verified_transcript(record.episode, Transcript("changed full text", "official", "https://example.test/transcript", True))
+        report = read_daily_digest(self.store, "2026-09-17")
+        self.assertEqual(report["count"], 0)
+        self.assertIn("版本不一致", report["markdown"])
+
+    def test_daily_retry_does_not_duplicate_summary(self):
+        _, item = self.saved_daily()
+        self.store.enqueue("daily:retry", "daily", {"scheduled_for": "2026-09-17T10:00:00+08:00"})
+        self.store.save_job_result("daily:retry", "episode:episode", "daily_item", item.to_persisted_dict())
+        report = read_daily_digest(self.store, "2026-09-17")
+        self.assertEqual(report["count"], 1)
+        self.assertIn("未完成", report["markdown"])
+
+    def test_recent_metadata_reaches_analysis_without_url_adapter_gate(self):
+        episode = Episode("rss:fixture", "A new podcast", "https://example.test/ep", "Original Show",
+                          published_at=datetime.now(UTC), metadata={"audio_url": "https://example.test/audio.mp3", "rss_feed_url": "https://example.test/rss"})
+        seen = []
+        def analyze(value):
+            seen.append(value)
+            return SimpleNamespace(message="完整文字稿摘要")
+        self.agent.podcast_service = SimpleNamespace(analyze_discovered_episode=analyze)
+        with patch("news_officer.source_registry.latest_rss_episodes", return_value=[episode]):
+            payload = self.state.execute("recent_updates", {"days": 1, "show": ""})
+        self.assertNotIn("audio.mp3", json.dumps(payload))
+        result = self.state.execute("analyze_podcast", {"url": episode.url})
+        self.assertIn("摘要", result["text"])
+        self.assertEqual(seen, [episode])
+
+    def test_same_url_multiple_episodes_is_not_silently_misidentified(self):
+        episodes = [Episode(f"rss:{i}", f"Episode {i}", "https://example.test/feed", "Original Show", published_at=datetime.now(UTC)) for i in range(2)]
+        self.agent.podcast_service = SimpleNamespace()
+        with patch("news_officer.source_registry.latest_rss_episodes", return_value=episodes):
+            self.state.execute("recent_updates", {"days": 1, "show": ""})
+        result = self.state.execute("analyze_podcast", {"url": episodes[0].url})
+        self.assertIn("无法唯一定位", result["error"])
+
+    def test_discovered_rss_reuses_verified_digest_without_new_model_call(self):
+        record, item = self.saved_daily()
+        service = PodcastService(self.store, self.feeds, SimpleNamespace())
+        with patch.object(service.transcript_resolver, "fetch", side_effect=AssertionError):
+            result = service.analyze_discovered_episode(record.episode)
+        self.assertEqual(result.message, item.message)
+
     def setUp(self):
         super().setUp()
         self.agent = PodcastResearchAgent(
