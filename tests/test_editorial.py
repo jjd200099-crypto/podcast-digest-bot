@@ -7,7 +7,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from news_officer.daily_report import coverage_report
-from news_officer.editorial import Assessment, EditorialPolicy, active_companies, decide
+from news_officer.editorial import (
+    Assessment,
+    EditorialPolicy,
+    SourceAssessment,
+    active_companies,
+    decide,
+    resolve_evidence,
+    transcript_blocks,
+)
 from news_officer.models import DailyItem, Episode, Transcript
 from news_officer.podcast import PodcastService
 from news_officer.store import Store
@@ -24,6 +32,13 @@ def assessment(**scores):
            for key in ('ai', 'investment', 'focus', 'novelty', 'evidence')},
         'focus_company': 'ExampleCo', 'reason': '这期具体分析推理成本如何影响企业客户留存，能帮助检验商业模式。',
     })
+
+
+def source_assessment(**scores):
+    value = assessment(**scores).model_dump()
+    for key in ('ai', 'investment', 'focus', 'novelty', 'evidence'):
+        value[key] = {'score': value[key]['score'], 'evidence_id': 1}
+    return SourceAssessment.model_validate(value)
 
 
 class EditorialTests(unittest.TestCase):
@@ -85,12 +100,12 @@ class EditorialTests(unittest.TestCase):
             active_companies(self.root / 'missing.json')
 
     def test_invalid_evidence_has_one_bounded_repair_and_never_gets_cached(self):
-        invalid = assessment()
-        invalid.ai.quote = 'This invented quotation does not exist in the source.'
+        invalid = source_assessment()
+        invalid.ai.evidence_id = 999
         client = Mock()
         client.responses.create.side_effect = [
             SimpleNamespace(output_text=invalid.model_dump_json()),
-            SimpleNamespace(output_text=assessment().model_dump_json()),
+            SimpleNamespace(output_text=source_assessment().model_dump_json()),
         ]
         policy = EditorialPolicy(client, 'repair', self.store)
         self.assertTrue(policy.assess(self.episode, self.transcript)['selected'])
@@ -107,6 +122,18 @@ class EditorialTests(unittest.TestCase):
             policy.assess(self.episode, self.transcript)
         self.assertEqual(client.responses.create.call_count, 4)
 
+    def test_source_blocks_are_lossless_and_quotes_are_extracted_not_generated(self):
+        text = (TEXT + '\n有中文及引号“AI”\t') * 25
+        blocks = transcript_blocks(text)
+        self.assertEqual(''.join(blocks), text)
+        self.assertTrue(all(len(block) <= 450 for block in blocks))
+        result = resolve_evidence(source_assessment(), blocks)
+        self.assertEqual(result.ai.quote, blocks[0])
+        invalid = source_assessment()
+        invalid.ai.evidence_id = 0
+        with self.assertRaises(ValueError):
+            resolve_evidence(invalid, blocks)
+
     def test_score_and_reason_override_freeform_stars_with_valid_format(self):
         decision = decide(assessment(), TEXT, PROFILE)
         summary = EditorialPolicy.apply(SUMMARY, decision)
@@ -116,7 +143,7 @@ class EditorialTests(unittest.TestCase):
 
     def test_audit_cache_changes_when_transcript_or_profile_changes(self):
         client = Mock()
-        client.responses.create.return_value = SimpleNamespace(output_text=assessment().model_dump_json())
+        client.responses.create.return_value = SimpleNamespace(output_text=source_assessment().model_dump_json())
         path = self.root / 'focus.json'
         path.write_text(json.dumps({'companies': PROFILE}))
         policy = EditorialPolicy(client, 'test-model', self.store, path)

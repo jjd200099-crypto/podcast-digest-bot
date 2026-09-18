@@ -13,8 +13,10 @@ summary push. Existing archived digests are not retroactively rescored.
 | Information gain | 20 | Specific new detail, original framework or firsthand information |
 | Evidence quality | 15 | Explicit causal reasoning, traceable data, examples and limitations |
 
-Each dimension is model-assessed from 0–5, with a verbatim transcript excerpt for
-every nonzero score. Code validates excerpts, active company identity and expiry,
+Each dimension is model-assessed from 0–5, with a source block ID for
+every nonzero score. Full transcripts are split losslessly into numbered blocks;
+code resolves IDs to verbatim excerpts rather than asking the model to recopy text.
+Code validates excerpts, active company identity and expiry,
 then calculates points. This is editorial judgment, not objective fact validation;
 information gain is judged within the episode, not against all past podcasts.
 Ads, name-dropping, generic same-sector mentions and celebrity status earn no
