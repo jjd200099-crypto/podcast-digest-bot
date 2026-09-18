@@ -95,6 +95,9 @@ class EditorialTests(unittest.TestCase):
         path.write_text(json.dumps({'companies': PROFILE}))
         policy = EditorialPolicy(client, 'test-model', self.store, path)
         first = policy.assess(self.episode, self.transcript)
+        request = client.responses.create.call_args.kwargs
+        self.assertIn('json', request['input'].lower())
+        self.assertFalse(request['store'])
         self.assertEqual(policy.assess(self.episode, self.transcript), first)
         self.assertEqual(client.responses.create.call_count, 1)
         path.write_text(json.dumps({'companies': []}))
