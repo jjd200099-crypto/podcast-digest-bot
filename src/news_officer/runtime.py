@@ -743,6 +743,17 @@ class NewsOfficerRuntime:
                 logger.warning("Library archive pending retry: %s", type(error).__name__)
             await asyncio.sleep(60)
 
+    async def _channel_loop(self) -> None:
+        # connect() runs the SDK's foreground WS loop: it can remain blocked
+        # before _mark_ready(). Use its public async readiness API instead.
+        await self.channel.connect_until_ready(timeout=60)
+        if not self.channel.connection_snapshot().ready:
+            raise RuntimeError('feishu-channel stopped before readiness')
+        logger.info('Feishu channel is ready')
+        # Reconnect/stall detection is handled by the health watchdog. A ready
+        # connection is long-lived, not a task that should immediately finish.
+        await asyncio.Future()
+
     async def run(self) -> None:
         self._main_loop = asyncio.get_running_loop()
         self.store.initialize()
@@ -764,7 +775,7 @@ class NewsOfficerRuntime:
               for i in range(getattr(self.settings, "message_workers", 4))],
             asyncio.create_task(self._worker("daily"), name="daily-worker"),
             asyncio.create_task(self._scheduler(), name="daily-scheduler"),
-            asyncio.create_task(self.channel.connect(), name="feishu-channel"),
+            asyncio.create_task(self._channel_loop(), name="feishu-channel"),
         ]
         if self.research_agent is not None and (
             self.research_agent.library.folder

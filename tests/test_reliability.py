@@ -570,8 +570,11 @@ class RuntimeSupervisionTests(unittest.IsolatedAsyncioTestCase):
         class StoppedChannel:
             disconnected = False
 
-            async def connect(self):
+            async def connect_until_ready(self, *, timeout):
                 return None
+
+            def connection_snapshot(self):
+                return SimpleNamespace(ready=False)
 
             async def disconnect(self):
                 self.disconnected = True

@@ -9,12 +9,14 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from test_reliability import FakeMessenger, FakePlugin, SequencePodcast, runtime
 
 from news_officer.health import health_snapshot, watch_health
 from news_officer.models import IncomingMessage
 from news_officer.response_quality import completeness_error
+from news_officer.runtime import NewsOfficerRuntime
 from news_officer.store import Store
 
 
@@ -136,6 +138,28 @@ class ConcurrentSessionsTests(unittest.IsolatedAsyncioTestCase):
     async def test_watchdog_fails_process_on_persistent_bad_health(self):
         with self.assertRaisesRegex(RuntimeError, 'health watchdog'):
             await asyncio.wait_for(watch_health(lambda: {'ok': False}, interval=0.001, grace=0.002), 1)
+
+    async def test_actual_sdk_foreground_thread_gets_ready_via_background_api(self):
+        from lark_channel import FeishuChannel
+        channel = FeishuChannel(app_id='fake-app', app_secret='fake-secret')
+        release = threading.Event()
+
+        def blocking_transport():
+            channel._ws_client = SimpleNamespace(_conn=object())
+            release.wait(5)
+
+        instance = object.__new__(NewsOfficerRuntime)
+        instance.channel = channel
+        with patch.object(channel, 'start', blocking_transport):
+            task = asyncio.create_task(instance._channel_loop())
+            try:
+                await channel.wait_ready(timeout=2)
+                self.assertTrue(health_snapshot(channel, {})['ok'])
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
 
 if __name__ == '__main__':
