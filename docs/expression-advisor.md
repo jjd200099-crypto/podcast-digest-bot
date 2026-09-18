@@ -32,6 +32,26 @@ exception class, never raw provider errors, prompts or credentials.
 
 ## Quality acceptance
 
+### Reviewed conversational style reference
+
+On 2026-09-18 the user authorized a one-time review of recent conversations in
+three named Feishu groups through their own account. Recent visible samples were
+read in the signed-in desktop client; this was **not** a complete seven-day export.
+No bot membership or extra bot permissions were needed for that review.
+
+Only manually reviewed, generalized style rules enter `COLLEAGUE_STYLE`, shared
+by the advisor and main Agent: continue the actual context, state a concrete view
+with reasons, disagree constructively, explain specific evidence gaps, and match
+depth to the request rather than the length of the latest message. Illustrative
+scenarios are synthetic, not quotes. Names, group identifiers, business details,
+raw chat logs and personal profiles are not included in the reference or repo.
+No message-fetching tool or personal-account credential is added to the bot.
+This is prompt guidance, **not** model training or ongoing group monitoring.
+The advisor's separate bounded current-conversation payload still applies as
+described above; anonymizing the reference does not anonymize arbitrary live chat.
+
+### Live comparison still required
+
 Contract tests alone do not establish naturalness. After the cloud key is added,
 compare actual main-model replies with the advisor off/on for: a greeting,
 "怎么又没回答", "没看懂，讲人话", a short follow-up, excited feedback, a neutral

@@ -4,7 +4,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from news_officer.tone_advisor import ExpressionAdvice, ToneAdvisor
+from news_officer.tone_advisor import (
+    ADVISOR_PROMPT,
+    COLLEAGUE_STYLE,
+    NATURAL_EXPRESSION,
+    ExpressionAdvice,
+    ToneAdvisor,
+)
 
 PLAN = {'user_signal': 'possibly_frustrated', 'stance': 'calm_accountable',
         'opening': 'acknowledge_specific_problem', 'detail': 'follow_explicit_request',
@@ -65,6 +71,15 @@ class ToneAdvisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args['model'], 'deepseek-flash')
         self.assertEqual(args['extra_body'], {'thinking': {'type': 'disabled'}})
         self.assertNotIn('tools', args)
+        self.assertIn(COLLEAGUE_STYLE, args['messages'][0]['content'])
+        self.assertEqual(set(json.loads(args['messages'][1]['content'])), {'question', 'recent_dialogue'})
+
+    def test_reviewed_style_is_shared_without_changing_advisor_schema(self):
+        self.assertIn(COLLEAGUE_STYLE, NATURAL_EXPRESSION)
+        self.assertIn(COLLEAGUE_STYLE, ADVISOR_PROMPT)
+        self.assertIn('短追问不一定需要短答案', COLLEAGUE_STYLE)
+        self.assertIn('没有做的事情不能说做过', COLLEAGUE_STYLE)
+        self.assertEqual(set(ExpressionAdvice.model_fields), set(PLAN))
 
     async def test_malformed_or_truncated_or_injected_plan_is_ignored(self):
         for content, finish in [('', 'stop'), ('{}', 'stop'), (json.dumps(PLAN), 'length'),
