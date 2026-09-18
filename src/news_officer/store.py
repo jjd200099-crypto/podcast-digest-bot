@@ -9,9 +9,17 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .models import Episode, Job, OutboxItem, StoredTranscript, Transcript
+from .models import (
+    Episode,
+    IncomingMessage,
+    Job,
+    OutboxItem,
+    StoredTranscript,
+    Transcript,
+)
 
 RETRY_DELAYS_SECONDS = (60, 300, 900, 1800)
+MESSAGE_RETRY_DELAYS_SECONDS = (3, 10, 30, 60)
 FAILED_DAILY_REQUEUE_SECONDS = 3600
 MAX_CONVERSATION_TURNS = 4
 MAX_HISTORY_USER_CHARS = 500
@@ -180,6 +188,12 @@ class Store:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN analysis_complete INTEGER NOT NULL DEFAULT 0"
                 )
+            if "session_key" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN session_key TEXT NOT NULL DEFAULT ''")
+                for row in connection.execute("SELECT job_key,payload_json FROM jobs WHERE kind='message'").fetchall():
+                    connection.execute("UPDATE jobs SET session_key=? WHERE job_key=?",
+                                       (self._message_session(json.loads(row['payload_json'])), row['job_key']))
+            connection.execute("CREATE INDEX IF NOT EXISTS jobs_session_idx ON jobs(session_key,status,created_at)")
             outbox_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(outbox)").fetchall()
@@ -361,10 +375,11 @@ class Store:
                 """
                 INSERT OR IGNORE INTO jobs(
                     job_key, kind, payload_json, status, attempts,
-                    available_at, created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                    available_at, created_at, updated_at, session_key
+                ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)
                 """,
-                (key, kind, json.dumps(payload, ensure_ascii=False), now, now, now),
+                (key, kind, json.dumps(payload, ensure_ascii=False), now, now, now,
+                 self._message_session(payload) if kind == "message" else ""),
             )
             if result.rowcount == 1:
                 return True
@@ -384,32 +399,29 @@ class Store:
             )
             return revived.rowcount == 1
 
+    @staticmethod
+    def _message_session(payload: dict) -> str:
+        return IncomingMessage(**{name: str(payload.get(name) or '')
+                                  for name in IncomingMessage.__dataclass_fields__}).conversation_key
+
     def claim_next(self, kind: str | None = None) -> Job | None:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if kind is None:
-                row = connection.execute(
-                    """
-                SELECT job_key, kind, payload_json, attempts
-                FROM jobs
-                WHERE status = 'pending' AND available_at <= ?
-                ORDER BY CASE kind WHEN 'message' THEN 0 ELSE 1 END, created_at
-                LIMIT 1
-                    """,
-                    (now,),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    """
-                    SELECT job_key, kind, payload_json, attempts
-                    FROM jobs
-                    WHERE status = 'pending' AND available_at <= ? AND kind = ?
-                    ORDER BY created_at
-                    LIMIT 1
-                    """,
-                    (now, kind),
-                ).fetchone()
+            # Atomic session FIFO, including older turns waiting for retry.
+            # Independent conversations are free to run concurrently.
+            row = connection.execute("""
+                SELECT j.job_key,j.kind,j.payload_json,j.attempts FROM jobs j
+                WHERE j.status='pending' AND j.available_at<=?
+                  AND (? IS NULL OR j.kind=?)
+                  AND (j.kind!='message' OR NOT EXISTS (
+                    SELECT 1 FROM jobs older WHERE older.kind='message'
+                      AND older.session_key=j.session_key AND older.job_key!=j.job_key
+                      AND (older.status='processing' OR
+                        (older.status='pending' AND (older.created_at<j.created_at OR
+                         (older.created_at=j.created_at AND older.rowid<j.rowid))))))
+                ORDER BY CASE j.kind WHEN 'message' THEN 0 ELSE 1 END,j.created_at,j.rowid
+                LIMIT 1""", (now, kind, kind)).fetchone()
             if row is None:
                 return None
             updated = connection.execute(
@@ -456,8 +468,9 @@ class Store:
         now = datetime.now(UTC)
         if attempts < max_attempts:
             status = "pending"
-            delay_index = min(max(0, attempts - 1), len(RETRY_DELAYS_SECONDS) - 1)
-            available_at = now + timedelta(seconds=RETRY_DELAYS_SECONDS[delay_index])
+            delays = MESSAGE_RETRY_DELAYS_SECONDS if self.job_kind(key) == 'message' else RETRY_DELAYS_SECONDS
+            delay_index = min(max(0, attempts - 1), len(delays) - 1)
+            available_at = now + timedelta(seconds=delays[delay_index])
         else:
             status = "failed"
             available_at = now + timedelta(

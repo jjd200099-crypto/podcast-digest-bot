@@ -436,6 +436,58 @@ class SourceTests(LibraryFixture):
 
 
 class ResearchTests(LibraryFixture):
+    def test_actual_half_sentence_is_repaired_before_commit(self):
+        self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': '主要错误有：', 'points': []}),
+            final_output({'kind': 'conversation', 'message': '刚才只有开头，没有回答你的问题。应当补全具体原因和下一步。', 'points': []}),
+        ])
+        reply = self.agent.handle('你说话没说完', self.message)
+        self.assertIn('补全具体原因', reply.messages[0])
+        with self.store._connect() as db:
+            audit = json.loads(db.execute('SELECT audit_json FROM research_run_state').fetchone()[0])
+            self.assertEqual(db.execute('SELECT answer FROM research_turns').fetchone()[0], reply.messages[0])
+        self.assertEqual(len(audit['validation_errors']), 1)
+
+    def test_answer_preamble_is_not_silently_discarded(self):
+        self.state.evidence_item('Source successfully added', identity='E0001')
+        with self.assertRaisesRegex(ValueError, 'Do not lose answer text'):
+            self.state.render({'kind': 'answer', 'message': '已添加成功。', 'points': [
+                {'text': 'Practical AI', 'citations': [{'id': 'E0001'}]}]})
+
+    def test_general_questions_do_not_require_podcast_citations(self):
+        answer = 'Agent 会选择工具并根据结果继续执行。普通聊天主要生成回答。\n\n例如查播客时，Agent 先定位节目，再读全文。'
+        self.agent.sdk_model = ScriptedModel([final_output({'kind': 'conversation', 'message': answer, 'points': []})])
+        self.assertEqual(self.agent.handle('解释 Agent 和聊天机器人的区别', self.message).messages[0], answer)
+
+    def test_diagnosis_requires_real_session_tool(self):
+        from dataclasses import replace
+        message = replace(self.message, text='为什么你说话会截断')
+        self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': '可能是网络问题。', 'points': []}),
+            tool_call('get_request_status'),
+            final_output({'kind': 'conversation', 'message': '当前会话没有足够历史记录，不能确认截断原因；不能据此断言网络故障。', 'points': []}),
+        ])
+        self.assertIn('不能确认', self.agent.handle(message.text, message).messages[0])
+
+    def test_feature_request_is_durable_idempotent_not_implemented(self):
+        first = self.state.execute('record_feature_request', {'summary': '增加每周播客对比功能'})
+        again = self.state.execute('record_feature_request', {'summary': '重复登记'})
+        self.assertEqual(first, again)
+        self.assertEqual(first['status'], 'recorded')
+        self.assertIn('尚未实现', first['meaning'])
+
+    def test_diagnostics_never_read_other_members(self):
+        from news_officer.request_status import request_status
+        for user in ('user', 'colleague'):
+            message = IncomingMessage('status-' + user, 'team', '检查记录', 'group', user)
+            self.store.enqueue('message:' + message.message_id, 'message', message.__dict__)
+            with self.store._connect() as db:
+                db.execute('INSERT INTO research_turns(session,message_id,question,answer) VALUES (?,?,?,?)',
+                           (message.conversation_key, message.message_id, user + '-question', user + '-answer'))
+        result = request_status(self.store, 'group:team:user')
+        self.assertEqual(len(result['requests']), 1)
+        self.assertNotIn('colleague', json.dumps(result))
+
     def saved_daily(self):
         record = self.archive_record()
         digest = "推荐理由：具体讨论经营方法。\n\n1. 观点来自完整文字稿。\n\n推荐星级：★★★★☆"
@@ -919,16 +971,47 @@ class ResearchTests(LibraryFixture):
             self.assertEqual("Bending Spoons" in json.dumps(model.inputs[0]), expected)
 
     def test_sdk_loop_budget_is_enforced(self):
+        from news_officer.research_checkpoint import ResearchContinuationPending
         model = self.agent.sdk_model = ScriptedModel(
-            [tool_call("list_sources", call_id=f"c{i}") for i in range(30)]
+            [tool_call("list_sources", call_id=f"c{i}") for i in range(60)]
         )
+        for _ in range(2):
+            with self.assertRaises(ResearchContinuationPending):
+                self.agent.handle("一直找", self.message)
         reply = self.agent.handle("一直找", self.message)
-        self.assertLessEqual(len(model.inputs), 16)
+        self.assertLessEqual(len(model.inputs), 48)
         self.assertIn("继续", reply.messages[0])
         self.assertNotIn("订阅变更", reply.messages[0])
         with self.store._connect() as db:
             audit = json.loads(db.execute("SELECT audit_json FROM research_run_state").fetchone()[0])
         self.assertEqual(audit["outcome"], "budget_exhausted")
+
+    def test_provider_failure_resumes_saved_tool_result_not_fresh_research(self):
+        class FlakyModel(ScriptedModel):
+            failed = False
+
+            async def get_response(self, **kwargs):
+                if len(self.inputs) == 1 and not self.failed:
+                    self.failed = True
+                    raise TimeoutError('simulated provider timeout')
+                return await super().get_response(**kwargs)
+
+        model = self.agent.sdk_model = FlakyModel([
+            tool_call('list_sources'),
+            final_output({'kind': 'answer', 'message': '', 'points': [
+                {'text': '追踪 Original Show。', 'citations': [{'id': 'E0001'}]}]}),
+        ])
+        with self.assertRaises(TimeoutError):
+            self.agent.handle('追踪什么', self.message)
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM research_turns').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM research_checkpoints').fetchone()[0], 1)
+        reply = self.agent.handle('追踪什么', self.message)
+        self.assertIn('Original Show', reply.messages[0])
+        self.assertIn('function_call_output', json.dumps(model.inputs[-1]))
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM research_checkpoints').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM research_steps').fetchone()[0], 1)
 
     def test_discovered_episode_can_be_analyzed_without_requiring_user_copy(self):
         self.agent.podcast_service = SimpleNamespace(

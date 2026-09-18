@@ -50,6 +50,8 @@ class Settings:
     podcast_memory_path: Path | None = None
     agent_backend: str = "agents_sdk"
     hermes_python: str = ""
+    message_workers: int = 4
+    health_port: int = 8080
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -122,6 +124,8 @@ class Settings:
         if backend == "hermes" and not Path(hermes_python).is_absolute():
             raise ValueError("Hermes requires an absolute NEWS_OFFICER_HERMES_PYTHON")
         return cls(
+            health_port=int(os.environ.get('PORT', '8080')),
+            message_workers=max(1, min(16, int(os.environ.get("NEWS_OFFICER_MESSAGE_WORKERS", "4")))),
             agent_backend=backend,
             hermes_python=hermes_python,
             feishu_app_id=os.environ["FEISHU_APP_ID"].strip(),

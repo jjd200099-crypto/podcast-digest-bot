@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from collections.abc import Mapping
 from datetime import datetime
 
@@ -19,9 +20,11 @@ from lark_channel import (
 from .config import Settings
 from .daily_report import coverage_report
 from .feishu import FeishuMessenger, delivery_parts, file_delivery_part
+from .health import health_snapshot, serve_health, watch_health
 from .models import DailyItem, IncomingMessage, Job, TranscriptAttachment
 from .podcast import PodcastService
 from .qa import render_transcript_attachment
+from .research_checkpoint import ResearchContinuationPending
 from .router import CommandRouter
 from .store import Store
 from .transcript_view import RENDERER_VERSION
@@ -45,6 +48,7 @@ class NewsOfficerRuntime:
         self.router = router
         self.podcast_service = podcast_service
         self.research_agent = research_agent
+        self.active_jobs = {}
         self.wake_workers = {
             "message": asyncio.Event(),
             "daily": asyncio.Event(),
@@ -339,7 +343,7 @@ class NewsOfficerRuntime:
                 thread_id=str(payload.get("thread_id") or ""),
                 parent_message_id=str(payload.get("parent_message_id") or ""),
             )
-            response = await asyncio.to_thread(plugin.handle, text, incoming)
+            response = await self._invoke_with_progress(job, plugin, text, incoming)
             attachment_descriptors = [
                 descriptor.to_persisted_dict()
                 for descriptor in response.attachments
@@ -620,6 +624,43 @@ class NewsOfficerRuntime:
                 f"{failures} podcast candidates failed and remain retryable"
             )
 
+    async def _invoke_with_progress(self, job, plugin, text, incoming):
+        # Never stream an unvalidated partial answer. Fast replies stay quiet;
+        # slow work gets one durable, idempotent progress notice per event.
+        work = asyncio.create_task(asyncio.to_thread(plugin.handle, text, incoming))
+        try:
+            done, _ = await asyncio.wait({work}, timeout=getattr(getattr(self, 'settings', None), 'progress_delay_seconds', 8))
+            if not done and plugin.acknowledgement(text) is None:
+                try:
+                    await asyncio.to_thread(self._ensure_reply, job, 'message:progress',
+                        '这条请求仍在处理中，完成后会在这里回复；不需要重复发送。',
+                        incoming.message_id, f'{job.key}:progress', bool(incoming.thread_id))
+                    await self._drain_outbox(job)
+                except Exception as error:  # noqa: BLE001 - preserve running analysis and retry delivery
+                    logger.warning('Progress notice deferred: %s', type(error).__name__)
+            return await work
+        finally:
+            # Do not start a second tool loop after a progress-send failure.
+            # Shutdown is handled by the process supervisor and durable jobs.
+            if not work.done():
+                work.cancel()
+
+    async def _failure_notice(self, job, terminal):
+        if job.kind != 'message':
+            return
+        message_id = job.payload.get('message_id')
+        if not message_id:
+            return
+        stage = 'failed' if terminal else 'retry'
+        text = ('这次请求遇到持续故障，自动重试仍未完成。我已保留这条请求，不能把它说成处理成功。你可以问我“检查这次请求的状态”。'
+                if terminal else '处理这条请求时连接或服务暂时出错，我正在自动重试；你不需要重新发送问题。')
+        try:
+            await asyncio.to_thread(self._ensure_reply, job, f'message:{stage}', text,
+                message_id, f'{job.key}:{stage}', bool(job.payload.get('thread_id')))
+            await self._drain_outbox(job)
+        except Exception as error:  # noqa: BLE001 - a notice must not kill the worker
+            logger.warning('Failure notice delivery deferred: %s', type(error).__name__)
+
     async def _worker(self, kind: str) -> None:
         wake_event = self.wake_workers[kind]
         while True:
@@ -634,19 +675,26 @@ class NewsOfficerRuntime:
                     pass
                 continue
             try:
+                if kind == 'message' and hasattr(self, 'active_jobs'):
+                    self.active_jobs[job.key] = time.monotonic()
                 if kind == "message":
                     await self._handle_message_job(job)
                 elif kind == "daily":
                     await self._handle_daily_job(job)
                 else:
                     raise ValueError(f"Unknown job kind: {job.kind}")
-            except Exception as error:
-                logger.exception("Job %s failed", job.key)
+            except Exception as error:  # noqa: BLE001 - durable worker retry boundary
+                logger.error("Job %s failed: %s", job.key, type(error).__name__)
+                if not isinstance(error, ResearchContinuationPending) or job.attempts >= 5:
+                    await self._failure_notice(job, terminal=job.attempts >= 5)
                 await asyncio.to_thread(
-                    self.store.fail, job.key, str(error), job.attempts
+                    self.store.fail, job.key, type(error).__name__, job.attempts
                 )
             else:
                 await asyncio.to_thread(self.store.complete, job.key)
+            finally:
+                if hasattr(self, 'active_jobs'):
+                    self.active_jobs.pop(job.key, None)
 
     async def _scheduler(self) -> None:
         while True:
@@ -700,7 +748,7 @@ class NewsOfficerRuntime:
         self.store.initialize()
         if self.research_agent is not None:
             self.research_agent.initialize()
-            logger.info("Research execution: OpenAI Agents SDK (model=%s)", self.settings.openai_model)
+            logger.info("Research execution: %s (model=%s)", self.research_agent.backend, self.settings.openai_model)
         else:
             logger.warning("Research execution: legacy intent router; Agents SDK mode is disabled")
         seeded = self.store.seed_subscriptions(
@@ -712,7 +760,8 @@ class NewsOfficerRuntime:
         if recovered:
             logger.warning("Recovered %s interrupted jobs", recovered)
         tasks = [
-            asyncio.create_task(self._worker("message"), name="message-worker"),
+            *[asyncio.create_task(self._worker("message"), name=f"message-worker-{i}")
+              for i in range(getattr(self.settings, "message_workers", 4))],
             asyncio.create_task(self._worker("daily"), name="daily-worker"),
             asyncio.create_task(self._scheduler(), name="daily-scheduler"),
             asyncio.create_task(self.channel.connect(), name="feishu-channel"),
@@ -722,6 +771,10 @@ class NewsOfficerRuntime:
             or getattr(self.research_agent.library, "archive_root", None)
         ):
             tasks.append(asyncio.create_task(self._library_archiver(), name="library-archiver"))
+        if getattr(self.settings, 'health_port', 0):
+            snapshot = lambda: health_snapshot(self.channel, self.active_jobs)
+            tasks += [asyncio.create_task(serve_health(self.settings.health_port, snapshot), name='health-http'),
+                      asyncio.create_task(watch_health(snapshot), name='health-watchdog')]
         try:
             logger.info("情报官 is connecting to Feishu over WebSocket")
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

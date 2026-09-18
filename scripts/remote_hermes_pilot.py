@@ -23,10 +23,9 @@ def main():
     buffer = io.BytesIO()
     names = [ROOT / "scripts/install_hermes_pilot.py"]
     if mode == "run":
-        names += [ROOT / "src/news_officer" / name for name in (
-            "hermes_worker.py", "hermes_runtime.py", "research_agent.py",
-            "agent_runtime.py", "config.py", "__main__.py")]
+        names += sorted((ROOT / "src/news_officer").glob('*.py'))
         names += [ROOT / "scripts/smoke_agent_continuity.py"]
+        names += [ROOT / "scripts/smoke_runtime_conversation.py"]
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in names:
             archive.write(path, path.relative_to(ROOT))
@@ -42,14 +41,16 @@ if mode=="prepare":
 else:
  args={sys.argv[2:]!r}
  env=dict(os.environ,NEWS_OFFICER_AGENT_BACKEND=args[1],NEWS_OFFICER_HERMES_PYTHON=args[0],NEWS_OFFICER_FEEDS_PATH=os.environ.get("NEWS_OFFICER_FEEDS_PATH","/app/feeds.json"))
- boot="import news_officer,runpy,sys; news_officer.__path__.insert(0,"+repr(str(root/"src/news_officer"))+"); sys.argv="+repr([str(root/"scripts/smoke_agent_continuity.py")]+args[2:])+"; runpy.run_path(sys.argv[0],run_name='__main__')"
+ script = "smoke_runtime_conversation.py" if "--transport" in args else "smoke_agent_continuity.py"
+ boot="import news_officer,runpy,sys; news_officer.__path__.insert(0,"+repr(str(root/"src/news_officer"))+"); sys.argv="+repr([str(root/"scripts"/script)]+args[2:])+"; runpy.run_path(sys.argv[0],run_name='__main__')"
  subprocess.run([sys.executable,"-c",boot],env=env,check=True)
 '''
     launcher = (
         "import subprocess,tempfile,json,base64,sys; "
         "log=tempfile.NamedTemporaryFile(prefix='hermes-pilot-',suffix='.log',delete=False); "
         "code=base64.b64decode(sys.stdin.read()).decode(); "
-        "p=subprocess.Popen(['python','-u','-c',code],stdout=log,stderr=subprocess.STDOUT,start_new_session=True); "
+        "p=subprocess.Popen(['python','-u','-'],stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,start_new_session=True); "
+        "p.stdin.write(code.encode()); p.stdin.close(); "
         "print(json.dumps({'pid':p.pid,'log':log.name}),flush=True)"
     )
     command = ["npx", "--yes", "@railway/cli@5.49.2", "ssh",

@@ -17,6 +17,7 @@ from news_officer.__main__ import build_runtime
 from news_officer.config import Settings
 from news_officer.models import IncomingMessage
 from news_officer.qa import chunk_transcript
+from news_officer.response_quality import completeness_error
 
 
 def main():
@@ -60,6 +61,25 @@ def main():
             ("guest_followup", "smoke-clarification", "noam brown", ""),
             ("brief_followup", "smoke-clarification", "他对 Agent 群体协作的关键限制是什么？用三句话说清楚。", ""),
         ]
+        conversations = '--conversations' in sys.argv
+        if conversations:
+            cases = [
+                ('greeting', 'smoke-chat', '你好啊', ''),
+                ('capabilities', 'smoke-chat', '你有什么功能？请具体说清楚，不要只给开头。', ''),
+                ('general_question', 'smoke-chat', '用一个例子解释 Agent 和普通聊天机器人的区别。', ''),
+                ('rewrite', 'smoke-chat', '帮我把这句话写通顺：这个东西他的回答不完整然后希望帮我们改进。只给改写结果。', ''),
+                ('long_conversation', 'smoke-chat', '请帮我设计团队使用播客研究机器人的验收方案，按场景、操作、预期结果写，至少八个场景。直接给完整方案，不是播客观点，不需要查文字稿。', ''),
+                ('self_diagnosis', 'smoke-diagnosis', '你也太笨了，自己检查一下错误，为什么你说话会截断？', ''),
+                ('feature_request', 'smoke-features', '我希望新增每周对比不同嘉宾观点的周报功能，请登记这个功能需求，先不要修改任何代码或推送设置。', ''),
+                ('feature_followup', 'smoke-features', '所以这个功能现在已经上线了吗？', ''),
+                ('colleague', 'smoke-colleague', '你好，我是同事，请告诉我可以怎么向你提问。', ''),
+            ]
+            historical = IncomingMessage('smoke-broken-answer', chat, '检查错误', 'group', 'smoke-diagnosis')
+            runtime.store.enqueue('message:' + historical.message_id, 'message', historical.__dict__)
+            with runtime.store._connect() as db:
+                db.execute('INSERT INTO research_turns(session,message_id,question,answer) VALUES (?,?,?,?)',
+                           (historical.conversation_key, historical.message_id, historical.text, '你说得对。回看这段对话，主要错误有：'))
+            runtime.store.complete('message:' + historical.message_id)
         extended = "--extended" in sys.argv
         if extended:
             with runtime.store._connect() as db:
@@ -90,6 +110,19 @@ def main():
             (proof_dir / (label + ".json")).write_text(json.dumps(proof, ensure_ascii=False))
             print(json.dumps({k: v for k, v in proof.items() if k != "answer"}, ensure_ascii=False), flush=True)
             assert not reply.attachments
+            assert completeness_error(answer) is None
+            if conversations:
+                assert audit['outcome'] not in {'budget_exhausted', 'validation_failed'}
+                if label == 'self_diagnosis':
+                    assert any(s['tool'] == 'get_request_status' for s in steps)
+                    assert '主要错误有' in answer or '开头' in answer or '半句' in answer or '冒号' in answer
+                if label == 'feature_request':
+                    assert any(s['tool'] == 'record_feature_request' for s in steps)
+                if label == 'long_conversation':
+                    assert len(answer) > 600
+                if label == 'general_question':
+                    assert len(answer) > 60
+                continue
             if label.startswith("source_"):
                 with runtime.store._connect() as db:
                     proposal = db.execute("SELECT status FROM source_proposals WHERE session=? ORDER BY rowid DESC LIMIT 1", (f"group:{chat}:smoke-source",)).fetchone()

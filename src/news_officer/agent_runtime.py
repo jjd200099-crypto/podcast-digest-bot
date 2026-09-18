@@ -27,9 +27,11 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from .library import LibraryError
+from .research_checkpoint import ResearchContinuationPending, save_checkpoint
 
 LOGGER = logging.getLogger(__name__)
 MAX_MODEL_TURNS = 16
+MAX_TOTAL_MODEL_CALLS = 48
 MAX_HISTORY_TURNS = 20
 MAX_HISTORY_CHARS = 32_000
 
@@ -61,9 +63,12 @@ class TurnBudget(RunHooks):
         self.input_tokens = self.output_tokens = self.cached_input_tokens = 0
 
     async def on_llm_start(self, context, agent, system_prompt, input_items):
-        if self.calls >= MAX_MODEL_TURNS:
+        state = context.context
+        if self.calls >= MAX_MODEL_TURNS or getattr(state, 'total_model_calls', 0) >= MAX_TOTAL_MODEL_CALLS:
             raise BudgetExceeded()
         self.calls += 1
+        state.total_model_calls = getattr(state, 'total_model_calls', 0) + 1
+        await asyncio.to_thread(save_checkpoint, state, input_items)
 
     async def on_llm_end(self, context, agent, response):
         usage = response.usage
@@ -104,7 +109,7 @@ def sdk_tool(definition):
 
     async def invoke(context, arguments):
         state = context.context
-        if len(state.steps) >= 32:
+        if len(state.steps) >= 96:
             raise BudgetExceeded()
         started = time.monotonic()
         status = "ok"
@@ -202,11 +207,20 @@ async def run_research(owner, state, messages, instructions, definitions):
                             ),
                         }
                     )
-        except (MaxTurnsExceeded, BudgetExceeded):
+        except (MaxTurnsExceeded, BudgetExceeded) as error:
+            if getattr(state, 'total_model_calls', 0) < MAX_TOTAL_MODEL_CALLS:
+                # SDK error details contain completed tool results. Resume those
+                # results rather than running all previous tools a second time.
+                if data := getattr(error, 'run_data', None):
+                    resumed = data.input if isinstance(data.input, list) else [{'role': 'user', 'content': data.input}]
+                    resumed = resumed + [item.to_input_item() for item in data.new_items]
+                    await asyncio.to_thread(save_checkpoint, state, resumed)
+                raise ResearchContinuationPending() from None
             state.outcome = "budget_exhausted"
         finally:
             state.model_calls = budget.calls
             state.engine_metrics = {"backend": "agents_sdk",
+                                    "total_model_calls": getattr(state, 'total_model_calls', budget.calls),
                                     "input_tokens": budget.input_tokens,
                                     "output_tokens": budget.output_tokens,
                                     "cached_input_tokens": budget.cached_input_tokens,
