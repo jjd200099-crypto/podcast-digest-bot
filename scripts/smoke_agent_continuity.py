@@ -22,6 +22,8 @@ from news_officer.qa import chunk_transcript
 def main():
     logging.basicConfig(level=logging.WARNING)
     settings = Settings.from_env()
+    proof_dir = Path(tempfile.mkdtemp(prefix="agent-replay-proof-"))
+    print(json.dumps({"proof_dir": str(proof_dir)}), flush=True)
     with tempfile.TemporaryDirectory(prefix="agent-continuity-") as directory:
         root = Path(directory)
         cloned = root / "state.sqlite3"
@@ -67,8 +69,10 @@ def main():
                                  (msg.message_id,)).fetchone()
                 steps = [dict(r) for r in db.execute("SELECT tool,status FROM research_steps WHERE message_id=? ORDER BY step", (msg.message_id,))]
             task, audit = json.loads(row[0]), json.loads(row[1])
-            print(json.dumps({"case": label, "answer": answer, "task": task,
-                              "audit": audit, "steps": steps, "chars": len(answer)}, ensure_ascii=False), flush=True)
+            proof = {"case": label, "answer": answer, "task": task,
+                     "audit": audit, "steps": steps, "chars": len(answer)}
+            (proof_dir / (label + ".json")).write_text(json.dumps(proof, ensure_ascii=False))
+            print(json.dumps({k: v for k, v in proof.items() if k != "answer"}, ensure_ascii=False), flush=True)
             assert not reply.attachments
             assert audit["outcome"] == "completed", audit
             assert "http" in answer

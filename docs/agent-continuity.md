@@ -49,6 +49,9 @@ SQLite retains event deduplication, session isolation and outbox delivery.
 boundaries, per-user task continuity, reading completeness and targeted repair.
 
 `python scripts/run_remote_continuity_smoke.py` is an opt-in real-model replay.
+It launches a background replay, returning a PID and `/tmp/agent-replay-*.log`.
+Read that log to observe completion; the script stores full answer artifacts in
+the printed `/tmp/agent-replay-proof-*` directory. A launch receipt is not a pass.
 It uploads a temporary code overlay to the configured Railway service, clones
 the production database and archive, and replays these public-podcast cases:
 
