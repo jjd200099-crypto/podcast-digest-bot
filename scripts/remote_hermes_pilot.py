@@ -4,6 +4,7 @@ prepare: provision a separate /tmp environment, returning a durable log path.
 run HERMES_PYTHON BACKEND [CASES...]: upload current overlay and run replay.
 """
 import base64
+import hashlib
 import io
 import os
 import re
@@ -11,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import zipfile
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,11 +48,12 @@ else:
  subprocess.run([sys.executable,"-c",boot],env=env,check=True)
 '''
     launcher = (
-        "import subprocess,tempfile,json,base64,sys; "
+        "import subprocess,tempfile,json,base64,sys,zlib,hashlib; "
+        "code=zlib.decompress(base64.b64decode(sys.stdin.read())); "
+        f"assert hashlib.sha256(code).hexdigest()=={hashlib.sha256(code.encode()).hexdigest()!r}, 'incomplete upload'; "
         "log=tempfile.NamedTemporaryFile(prefix='hermes-pilot-',suffix='.log',delete=False); "
-        "code=base64.b64decode(sys.stdin.read()).decode(); "
         "p=subprocess.Popen(['python','-u','-'],stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,start_new_session=True); "
-        "p.stdin.write(code.encode()); p.stdin.close(); "
+        "p.stdin.write(code); p.stdin.close(); "
         "print(json.dumps({'pid':p.pid,'log':log.name}),flush=True)"
     )
     command = ["npx", "--yes", "@railway/cli@5.49.2", "ssh",
@@ -66,7 +69,7 @@ else:
                    shlex.join(["python", "-c", launcher])]
     try:
         result = subprocess.run(command, cwd=ROOT, check=False, timeout=60,
-                                input=base64.b64encode(code.encode()).decode(), text=True)
+                                input=base64.b64encode(zlib.compress(code.encode())).decode(), text=True)
     except subprocess.TimeoutExpired:
         print("SSH launch receipt timed out; inspect pilot logs before retrying.", file=sys.stderr)
         sys.exit(2)
