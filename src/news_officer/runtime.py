@@ -517,6 +517,7 @@ class NewsOfficerRuntime:
                     file_key,
                 )
             elif item.status in {
+                "not_recommended",
                 "no_transcript",
                 "outside_window",
                 "summary_format_error",

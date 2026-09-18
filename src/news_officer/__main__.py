@@ -7,6 +7,7 @@ import threading
 
 from .agent import AgentIntentResolver
 from .config import Settings
+from .editorial import EditorialPolicy
 from .feishu import FeishuMessenger
 from .library import FeishuLibraryAPI, PodcastLibrary
 from .podcast import PodcastService
@@ -49,6 +50,8 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         max_daily_summaries=settings.max_daily_summaries,
         source_registry=registry,
         podwise_api_token=settings.podwise_api_token,
+        editorial_policy=EditorialPolicy(summarizer.client, settings.openai_model, store,
+                                        settings.research_focus_path) if settings.editorial_enabled else None,
     )
     plugins = [SubscriptionPlugin(store)]
     research = None

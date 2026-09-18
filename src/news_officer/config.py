@@ -55,6 +55,8 @@ class Settings:
     tone_advisor_enabled: bool = False
     deepseek_api_key: str = ''
     tone_advisor_model: str = 'deepseek-flash'
+    editorial_enabled: bool = True
+    research_focus_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -127,6 +129,9 @@ class Settings:
         if backend == "hermes" and not Path(hermes_python).is_absolute():
             raise ValueError("Hermes requires an absolute NEWS_OFFICER_HERMES_PYTHON")
         return cls(
+            editorial_enabled=os.environ.get('NEWS_OFFICER_EDITORIAL_FILTER', 'true').lower() == 'true',
+            research_focus_path=Path(os.environ['NEWS_OFFICER_RESEARCH_FOCUS_PATH'])
+                if os.environ.get('NEWS_OFFICER_RESEARCH_FOCUS_PATH') else None,
             tone_advisor_enabled=os.environ.get('NEWS_OFFICER_TONE_ADVISOR', 'false').lower() == 'true',
             deepseek_api_key=os.environ.get('DEEPSEEK_API_KEY', '').strip(),
             tone_advisor_model=os.environ.get('NEWS_OFFICER_TONE_MODEL', 'deepseek-flash').strip(),

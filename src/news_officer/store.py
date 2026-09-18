@@ -83,6 +83,14 @@ class Store:
                     checked_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS editorial_reviews (
+                    episode_id TEXT NOT NULL,
+                    cache_key TEXT NOT NULL,
+                    decision_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(episode_id, cache_key)
+                );
+
                 CREATE TABLE IF NOT EXISTS episode_transcripts (
                     episode_id TEXT PRIMARY KEY,
                     reference TEXT NOT NULL UNIQUE,
@@ -1317,3 +1325,14 @@ class Store:
                 "SELECT status FROM jobs WHERE job_key = ?", (key,)
             ).fetchone()
             return str(row["status"]) if row else None
+
+    def get_editorial_review(self, episode_id: str, cache_key: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute('SELECT decision_json FROM editorial_reviews WHERE episode_id=? AND cache_key=?',
+                             (episode_id, cache_key)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def save_editorial_review(self, episode_id: str, cache_key: str, decision: dict) -> None:
+        with self._connect() as db:
+            db.execute('INSERT OR IGNORE INTO editorial_reviews VALUES (?,?,?,?)',
+                       (episode_id, cache_key, json.dumps(decision, ensure_ascii=False), _now()))

@@ -331,10 +331,12 @@ class PodcastService:
         max_daily_summaries: int = 0,
         source_registry=None,
         podwise_api_token: str = "",
+        editorial_policy=None,
     ):
         self.store = store
         self.feeds_path = feeds_path
         self.summarizer = summarizer
+        self.editorial_policy = editorial_policy
         self.transcript_resolver = transcript_resolver or TranscriptResolver(
             [
                 ArchivedTranscriptProvider(store),
@@ -744,7 +746,7 @@ class PodcastService:
         reserve_b_slot = self.max_daily_summaries >= 2
         priority_a_soft_cap = self.max_daily_summaries - int(reserve_b_slot)
         deferred_priority_a: list[
-            tuple[Episode, Transcript, StoredTranscript]
+            tuple[Episode, Transcript, StoredTranscript, dict | None]
         ] = []
         for discovered in candidates:
             episode = discovered
@@ -777,6 +779,10 @@ class PodcastService:
                     results.append(DailyItem(episode, "no_transcript"))
                     continue
                 stored = self.store.save_verified_transcript(episode, transcript)
+                decision = self.editorial_policy.assess(episode, transcript) if self.editorial_policy else None
+                if decision is not None and not decision['selected']:
+                    results.append(DailyItem(episode, 'not_recommended', decision['assessment']['reason']))
+                    continue
                 source_priority = str(
                     episode.metadata.get("source_priority") or "B"
                 ).upper()
@@ -787,10 +793,12 @@ class PodcastService:
                     and priority_b_summaries == 0
                 ):
                     deferred_priority_a.append(
-                        (episode, transcript, stored)
+                        (episode, transcript, stored, decision)
                     )
                     continue
                 summary_candidate = self.summarizer.summarize(episode, transcript)
+                if decision is not None:
+                    summary_candidate = self.editorial_policy.apply(summary_candidate, decision)
                 summary = self.store.save_transcript_digest(
                     episode.id,
                     summary_candidate,
@@ -816,11 +824,13 @@ class PodcastService:
             except Exception as error:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
-        for episode, transcript, stored in deferred_priority_a:
+        for episode, transcript, stored, decision in deferred_priority_a:
             if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                 break
             try:
                 summary_candidate = self.summarizer.summarize(episode, transcript)
+                if decision is not None:
+                    summary_candidate = self.editorial_policy.apply(summary_candidate, decision)
                 summary = self.store.save_transcript_digest(
                     episode.id,
                     summary_candidate,
