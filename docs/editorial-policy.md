@@ -33,6 +33,8 @@ Changing the source text or active profile invalidates the review cache.
 `not_recommended` is distinct from missing transcripts, no updates and failures.
 Invalid model output or missing configured profile raises an error; it does not
 silently turn a candidate into a low-quality episode.
+Schema or excerpt validation failures get one bounded model correction attempt;
+the second response must pass the same checks or the episode remains failed/retryable.
 
 ## Private research profile
 

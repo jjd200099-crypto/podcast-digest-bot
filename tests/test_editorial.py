@@ -81,6 +81,29 @@ class EditorialTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             active_companies(self.root / 'missing.json')
 
+    def test_invalid_evidence_has_one_bounded_repair_and_never_gets_cached(self):
+        invalid = assessment()
+        invalid.ai.quote = 'This invented quotation does not exist in the source.'
+        client = Mock()
+        client.responses.create.side_effect = [
+            SimpleNamespace(output_text=invalid.model_dump_json()),
+            SimpleNamespace(output_text=assessment().model_dump_json()),
+        ]
+        policy = EditorialPolicy(client, 'repair', self.store)
+        self.assertTrue(policy.assess(self.episode, self.transcript)['selected'])
+        self.assertEqual(client.responses.create.call_count, 2)
+        self.assertIn('validation_feedback', client.responses.create.call_args.kwargs['input'])
+        client.responses.create.side_effect = None
+        client.responses.create.return_value = SimpleNamespace(output_text=invalid.model_dump_json())
+        policy = EditorialPolicy(client, 'always-invalid', self.store)
+        client.responses.create.reset_mock()
+        with self.assertRaisesRegex(ValueError, 'Editorial review failed'):
+            policy.assess(self.episode, self.transcript)
+        self.assertEqual(client.responses.create.call_count, 2)
+        with self.assertRaises(ValueError):
+            policy.assess(self.episode, self.transcript)
+        self.assertEqual(client.responses.create.call_count, 4)
+
     def test_score_and_reason_override_freeform_stars_with_valid_format(self):
         decision = decide(assessment(), TEXT, PROFILE)
         summary = EditorialPolicy.apply(SUMMARY, decision)
