@@ -22,11 +22,12 @@ def main():
         for name in FILES:
             archive.write(ROOT / name, name)
     payload = base64.b64encode(buffer.getvalue()).decode()
-    code = f"""import base64,io,zipfile,tempfile,pathlib,runpy,news_officer
+    code = f"""import base64,io,zipfile,tempfile,pathlib,runpy,sys,news_officer
 with tempfile.TemporaryDirectory(prefix='agent-code-replay-') as d:
  z=zipfile.ZipFile(io.BytesIO(base64.b64decode({payload!r})))
  z.extractall(d)
  news_officer.__path__.insert(0,str(pathlib.Path(d)/'src/news_officer'))
+ sys.argv=['smoke_agent_continuity.py']+{sys.argv[1:]!r}
  runpy.run_path(str(pathlib.Path(d)/'scripts/smoke_agent_continuity.py'),run_name='__main__')
 """
     result = subprocess.run([
