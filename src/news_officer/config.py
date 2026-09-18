@@ -48,6 +48,8 @@ class Settings:
     podwise_api_token: str = ""
     daily_transcript_attachments: bool = False
     podcast_memory_path: Path | None = None
+    agent_backend: str = "agents_sdk"
+    hermes_python: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -113,7 +115,15 @@ class Settings:
         ).strip()
         if knowledge_mode not in {"feishu_folder", "podcast_archive"}:
             raise ValueError("Invalid NEWS_OFFICER_KNOWLEDGE_MODE")
+        backend = os.environ.get("NEWS_OFFICER_AGENT_BACKEND", "agents_sdk").strip()
+        if backend not in {"agents_sdk", "hermes"}:
+            raise ValueError("Invalid NEWS_OFFICER_AGENT_BACKEND")
+        hermes_python = os.environ.get("NEWS_OFFICER_HERMES_PYTHON", "").strip()
+        if backend == "hermes" and not Path(hermes_python).is_absolute():
+            raise ValueError("Hermes requires an absolute NEWS_OFFICER_HERMES_PYTHON")
         return cls(
+            agent_backend=backend,
+            hermes_python=hermes_python,
             feishu_app_id=os.environ["FEISHU_APP_ID"].strip(),
             feishu_app_secret=os.environ["FEISHU_APP_SECRET"].strip(),
             openai_api_key=os.environ["OPENAI_API_KEY"].strip(),

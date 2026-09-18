@@ -144,6 +144,8 @@ class PodcastResearchAgent:
         users=(),
         chats=(),
         podcast_service=None,
+        backend="agents_sdk",
+        hermes_python="",
     ):
         self.store, self.registry, self.library = store, registry, library
         self._api_key = api_key
@@ -151,6 +153,9 @@ class PodcastResearchAgent:
         self.model = model
         self.users, self.chats = set(users), set(chats)
         self.podcast_service = podcast_service
+        if backend not in {"agents_sdk", "hermes"}:
+            raise ValueError("Unsupported research backend")
+        self.backend, self.hermes_python = backend, hermes_python
 
     def initialize(self):
         self.registry.initialize()
@@ -243,7 +248,11 @@ class PodcastResearchAgent:
                 "飞书文件夹", "已核验播客全文档案"
             ).replace("文件夹", "播客档案")
             instructions += "\n当前为公开播客档案模式：资料库只包含机器人取得并核验的完整播客文字稿，不是组织云文档。组织云文档尚未接通；如果用户问组织文档，请直接解释此限制，不声称搜索过组织文档。播客内容问答、跨期比较和 get_transcript 附件不依赖飞书文档权限。用户索取文字稿时须实际调用 get_transcript，附件由后端发送。\n"
-        answer = asyncio.run(run_research(self, state, messages, instructions, TOOLS))
+        if self.backend == "hermes":
+            from .hermes_runtime import run_hermes
+            answer = run_hermes(self, state, messages, instructions, TOOLS)
+        else:
+            answer = asyncio.run(run_research(self, state, messages, instructions, TOOLS))
         with self.store._connect() as db:
             db.execute(
                 "INSERT OR IGNORE INTO research_turns(session,message_id,question,answer) VALUES (?,?,?,?)",
@@ -308,9 +317,12 @@ class ResearchTools:
         self.outcome = "pending"
 
     def audit(self):
-        return {"outcome": self.outcome, "model_calls": self.model_calls,
+        result = {"outcome": self.outcome, "model_calls": self.model_calls,
                 "validation_errors": self.validation_errors,
                 "coverage": {key: len(value) for key, value in self.read_coverage.items()}}
+        if hasattr(self, "engine_metrics"):
+            result["engine"] = self.engine_metrics
+        return result
 
     def incomplete_documents(self):
         if not self.task or self.task["format"] != "detailed":

@@ -58,11 +58,18 @@ class TurnBudget(RunHooks):
 
     def __init__(self):
         self.calls = 0
+        self.input_tokens = self.output_tokens = self.cached_input_tokens = 0
 
     async def on_llm_start(self, context, agent, system_prompt, input_items):
         if self.calls >= MAX_MODEL_TURNS:
             raise BudgetExceeded()
         self.calls += 1
+
+    async def on_llm_end(self, context, agent, response):
+        usage = response.usage
+        self.input_tokens += usage.input_tokens
+        self.output_tokens += usage.output_tokens
+        self.cached_input_tokens += getattr(usage.input_tokens_details, "cached_tokens", 0) or 0
 
 
 def dialogue_input(history, current):
@@ -138,6 +145,7 @@ def sdk_tool(definition):
 
 
 async def run_research(owner, state, messages, instructions, definitions):
+    started = time.monotonic()
     # One client per event loop: synchronous workers call asyncio.run for each
     # Feishu turn. Reusing an AsyncOpenAI across closed loops breaks follow-ups.
     async with AsyncOpenAI(api_key=owner._api_key, timeout=90, max_retries=0) as client:
@@ -198,6 +206,11 @@ async def run_research(owner, state, messages, instructions, definitions):
             state.outcome = "budget_exhausted"
         finally:
             state.model_calls = budget.calls
+            state.engine_metrics = {"backend": "agents_sdk",
+                                    "input_tokens": budget.input_tokens,
+                                    "output_tokens": budget.output_tokens,
+                                    "cached_input_tokens": budget.cached_input_tokens,
+                                    "elapsed_seconds": round(time.monotonic() - started, 3)}
         if state.outcome == "pending":
             state.outcome = "validation_failed"
         if state.task:

@@ -73,6 +73,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_daily_candidates, 0)
         self.assertEqual(settings.max_daily_summaries, 0)
         self.assertFalse(settings.daily_transcript_attachments)
+        self.assertEqual(settings.agent_backend, "agents_sdk")
+
+    def test_hermes_is_explicit_and_requires_absolute_interpreter(self):
+        env = {**self.base_environment(), "NEWS_OFFICER_AGENT_BACKEND": "hermes"}
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+        with patch.dict(os.environ, {**env, "NEWS_OFFICER_HERMES_PYTHON": "/opt/hermes/bin/python"}, clear=True):
+            self.assertEqual(Settings.from_env().agent_backend, "hermes")
+        with patch.dict(os.environ, {**env, "NEWS_OFFICER_AGENT_BACKEND": "typo"}, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
 
     def test_explicit_daily_limits_and_files_remain_supported(self):
         with patch.dict(os.environ, {

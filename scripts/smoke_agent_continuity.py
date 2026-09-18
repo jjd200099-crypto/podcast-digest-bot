@@ -23,7 +23,8 @@ def main():
     logging.basicConfig(level=logging.WARNING)
     settings = Settings.from_env()
     proof_dir = Path(tempfile.mkdtemp(prefix="agent-replay-proof-"))
-    print(json.dumps({"proof_dir": str(proof_dir)}), flush=True)
+    print(json.dumps({"proof_dir": str(proof_dir), "backend": settings.agent_backend,
+                      "model": settings.openai_model}), flush=True)
     with tempfile.TemporaryDirectory(prefix="agent-continuity-") as directory:
         root = Path(directory)
         cloned = root / "state.sqlite3"
@@ -31,9 +32,12 @@ def main():
             src.backup(dst)
         memory = root / "memory"
         shutil.copytree(settings.podcast_memory_path, memory)
-        runtime = build_runtime(replace(settings, db_path=cloned, podcast_memory_path=memory))
+        feeds = root / "feeds.json"
+        shutil.copy2(settings.feeds_path, feeds)
+        runtime = build_runtime(replace(settings, db_path=cloned, podcast_memory_path=memory, feeds_path=feeds))
         runtime.store.initialize()
         agent = runtime.research_agent
+        agent.pilot_progress = lambda event: print(json.dumps({"progress": event}), flush=True)
         agent.initialize()
         chat = settings.research_group_chat_ids[0]
         with runtime.store._connect() as db:
@@ -56,8 +60,20 @@ def main():
             ("guest_followup", "smoke-clarification", "noam brown", ""),
             ("brief_followup", "smoke-clarification", "他对 Agent 群体协作的关键限制是什么？用三句话说清楚。", ""),
         ]
+        extended = "--extended" in sys.argv
+        if extended:
+            with runtime.store._connect() as db:
+                other = db.execute("SELECT reference FROM episode_transcripts WHERE source_url != ? LIMIT 1", (record["source_url"],)).fetchone()
+            assert other, "Need two distinct transcripts for comparison"
+            cases += [
+                ("cross_episode", "smoke-comparison",
+                 f"比较文档 {record['reference']} 与 {other['reference']}：各提一条最核心且有原文依据的观点，再指出两期讨论重点的不同。简短回答。", ""),
+                ("source_proposal", "smoke-source", "请新增追踪 Practical AI 播客，RSS 是 https://changelog.com/practicalai/feed。先给我确认。", ""),
+                ("source_confirmation", "smoke-source", "确认添加", ""),
+            ]
         for label, sender, question, parent in cases:
-            if len(sys.argv) > 1 and label not in sys.argv[1:]:
+            selected = [a for a in sys.argv[1:] if not a.startswith("--")]
+            if selected and label not in selected:
                 continue
             print(json.dumps({"started": label}, ensure_ascii=False), flush=True)
             msg = IncomingMessage("continuity-" + label, chat, question, "group", sender,
@@ -74,10 +90,18 @@ def main():
             (proof_dir / (label + ".json")).write_text(json.dumps(proof, ensure_ascii=False))
             print(json.dumps({k: v for k, v in proof.items() if k != "answer"}, ensure_ascii=False), flush=True)
             assert not reply.attachments
+            if label.startswith("source_"):
+                with runtime.store._connect() as db:
+                    proposal = db.execute("SELECT status FROM source_proposals WHERE session=? ORDER BY rowid DESC LIMIT 1", (f"group:{chat}:smoke-source",)).fetchone()
+                assert proposal, "No source proposal created"
+                assert proposal[0] == ("pending" if label == "source_proposal" else "applied"), proposal[0]
+                continue
             assert audit["outcome"] == "completed", audit
             assert "http" in answer
             assert "已完成的订阅变更" not in answer
-            if label != "brief_followup":
+            if label == "cross_episode":
+                assert len(task["document_ids"]) >= 2, "Comparison did not select both documents"
+            elif label != "brief_followup":
                 assert task["format"] == "detailed"
                 assert task["document_ids"] and set(task["document_ids"]) <= equivalents.keys()
                 assert all(audit["coverage"].get(t) == equivalents[t] for t in task["document_ids"])

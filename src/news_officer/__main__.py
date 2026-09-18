@@ -66,6 +66,8 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
             users=settings.research_user_open_ids,
             chats=settings.research_group_chat_ids,
             podcast_service=podcast,
+            backend=settings.agent_backend,
+            hermes_python=settings.hermes_python,
         )
         plugins.append(research)
     router = CommandRouter(
