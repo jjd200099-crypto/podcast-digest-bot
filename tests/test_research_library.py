@@ -6,7 +6,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import requests
 from agents import Model, ModelResponse, Usage
@@ -436,6 +436,33 @@ class SourceTests(LibraryFixture):
 
 
 class ResearchTests(LibraryFixture):
+    def test_unauthorized_conversation_never_reaches_expression_provider(self):
+        from dataclasses import replace
+        self.agent.tone_advisor = SimpleNamespace(advise=AsyncMock())
+        self.agent.handle('你好', replace(self.message, chat_type='group', chat_id='not-authorized'))
+        self.agent.tone_advisor.advise.assert_not_awaited()
+
+    def test_expression_failure_fallback_still_reaches_main_model(self):
+        self.agent.tone_advisor = SimpleNamespace(advise=AsyncMock(return_value=None))
+        expected = '你好，今天想聊哪期播客？'
+        self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': expected, 'points': []})])
+        self.assertEqual(self.agent.handle('你好', self.message).messages[0], expected)
+
+    def test_expression_advice_reaches_main_model_but_does_not_replace_its_answer(self):
+        from test_tone_advisor import PLAN
+        self.agent.tone_advisor = SimpleNamespace(advise=AsyncMock(return_value=PLAN))
+        expected = '可以。把你想讨论的那期发来，我们就从你最关心的问题聊起。'
+        model = self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': expected, 'points': []})])
+        response = self.agent.handle('你好', self.message)
+        self.assertEqual(response.messages[0], expected)
+        context = json.loads(model.inputs[0][-1]['content'])
+        self.assertEqual(context['expression_advice'], PLAN)
+        # Repeated delivery must reuse the committed answer, not call either model again.
+        self.agent.handle('你好', self.message)
+        self.agent.tone_advisor.advise.assert_awaited_once()
+
     def test_actual_half_sentence_is_repaired_before_commit(self):
         self.agent.sdk_model = ScriptedModel([
             final_output({'kind': 'conversation', 'message': '主要错误有：', 'points': []}),

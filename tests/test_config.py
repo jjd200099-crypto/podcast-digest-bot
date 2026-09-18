@@ -75,6 +75,18 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.daily_transcript_attachments)
         self.assertEqual(settings.agent_backend, "agents_sdk")
 
+    def test_expression_advisor_is_opt_in_with_separate_credentials(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            settings = Settings.from_env()
+        self.assertFalse(settings.tone_advisor_enabled)
+        self.assertEqual(settings.deepseek_api_key, '')
+        with patch.dict(os.environ, {**self.base_environment(), 'DEEPSEEK_API_KEY': ' separate-key ',
+                                    'NEWS_OFFICER_TONE_ADVISOR': 'true'}, clear=True):
+            settings = Settings.from_env()
+        self.assertTrue(settings.tone_advisor_enabled)
+        self.assertEqual(settings.deepseek_api_key, 'separate-key')
+        self.assertEqual(settings.tone_advisor_model, 'deepseek-flash')
+
     def test_hermes_is_explicit_and_requires_absolute_interpreter(self):
         env = {**self.base_environment(), "NEWS_OFFICER_AGENT_BACKEND": "hermes"}
         with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):

@@ -24,6 +24,7 @@ from .research_checkpoint import initialize_checkpoints, restore_checkpoint
 from .research_context import initialize_context, previous_task, quoted_context
 from .response_quality import require_complete
 from .router import PluginResponse, clean_text, conversation_key
+from .tone_advisor import NATURAL_EXPRESSION
 from .transcript_view import RENDERER_VERSION, render_readable_transcript
 
 
@@ -154,6 +155,7 @@ class PodcastResearchAgent:
         podcast_service=None,
         backend="agents_sdk",
         hermes_python="",
+        tone_advisor=None,
     ):
         self.store, self.registry, self.library = store, registry, library
         self._api_key = api_key
@@ -164,6 +166,7 @@ class PodcastResearchAgent:
         if backend not in {"agents_sdk", "hermes"}:
             raise ValueError("Unsupported research backend")
         self.backend, self.hermes_python = backend, hermes_python
+        self.tone_advisor = tone_advisor
 
     def initialize(self):
         self.registry.initialize()
@@ -254,10 +257,13 @@ class PodcastResearchAgent:
             "previous_task": previous_task(self.store, key),
         }
         state = ResearchTools(self, key, message)
-        messages = dialogue_input(history, json.dumps(context, ensure_ascii=False))
-        if self.backend == 'agents_sdk':
-            messages = restore_checkpoint(state) or messages
-        instructions = INSTRUCTIONS
+        resumed = restore_checkpoint(state) if self.backend == 'agents_sdk' else None
+        if not resumed and self.tone_advisor is not None:
+            advice = asyncio.run(self.tone_advisor.advise(text, history))
+            if advice:
+                context['expression_advice'] = advice
+        messages = resumed or dialogue_input(history, json.dumps(context, ensure_ascii=False))
+        instructions = INSTRUCTIONS + NATURAL_EXPRESSION
         if getattr(self.library, "mode", "") == "podcast_archive":
             instructions = instructions.replace(
                 "飞书文件夹", "已核验播客全文档案"

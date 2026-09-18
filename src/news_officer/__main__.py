@@ -24,6 +24,7 @@ from .runtime import NewsOfficerRuntime
 from .source_registry import SourceRegistry
 from .store import Store
 from .summarizer import TranscriptSummarizer
+from .tone_advisor import ToneAdvisor
 
 
 def build_runtime(settings: Settings) -> NewsOfficerRuntime:
@@ -70,6 +71,8 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
             podcast_service=podcast,
             backend=settings.agent_backend,
             hermes_python=settings.hermes_python,
+            tone_advisor=ToneAdvisor(settings.deepseek_api_key,
+                enabled=settings.tone_advisor_enabled, model=settings.tone_advisor_model),
         )
         plugins.append(research)
     router = CommandRouter(

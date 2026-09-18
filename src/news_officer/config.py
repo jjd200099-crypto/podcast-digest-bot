@@ -52,6 +52,9 @@ class Settings:
     hermes_python: str = ""
     message_workers: int = 4
     health_port: int = 8080
+    tone_advisor_enabled: bool = False
+    deepseek_api_key: str = ''
+    tone_advisor_model: str = 'deepseek-flash'
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -124,6 +127,9 @@ class Settings:
         if backend == "hermes" and not Path(hermes_python).is_absolute():
             raise ValueError("Hermes requires an absolute NEWS_OFFICER_HERMES_PYTHON")
         return cls(
+            tone_advisor_enabled=os.environ.get('NEWS_OFFICER_TONE_ADVISOR', 'false').lower() == 'true',
+            deepseek_api_key=os.environ.get('DEEPSEEK_API_KEY', '').strip(),
+            tone_advisor_model=os.environ.get('NEWS_OFFICER_TONE_MODEL', 'deepseek-flash').strip(),
             health_port=int(os.environ.get('PORT', '8080')),
             message_workers=max(1, min(16, int(os.environ.get("NEWS_OFFICER_MESSAGE_WORKERS", "4")))),
             agent_backend=backend,
