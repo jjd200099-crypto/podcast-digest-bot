@@ -13,6 +13,7 @@ import subprocess
 import sys
 import zipfile
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,33 +48,55 @@ else:
  boot="import news_officer,runpy,sys; news_officer.__path__.insert(0,"+repr(str(root/"src/news_officer"))+"); sys.argv="+repr([str(root/"scripts"/script)]+args[2:])+"; runpy.run_path(sys.argv[0],run_name='__main__')"
  subprocess.run([sys.executable,"-c",boot],env=env,check=True)
 '''
-    launcher = (
-        "import subprocess,tempfile,json,base64,sys,zlib,hashlib; "
-        "code=zlib.decompress(base64.b64decode(sys.stdin.read())); "
-        f"assert hashlib.sha256(code).hexdigest()=={hashlib.sha256(code.encode()).hexdigest()!r}, 'incomplete upload'; "
-        "log=tempfile.NamedTemporaryFile(prefix='hermes-pilot-',suffix='.log',delete=False); "
-        "p=subprocess.Popen(['python','-u','-'],stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,start_new_session=True); "
-        "p.stdin.write(code); p.stdin.close(); "
-        "print(json.dumps({'pid':p.pid,'log':log.name}),flush=True)"
-    )
     command = ["npx", "--yes", "@railway/cli@5.49.2", "ssh",
                     "-p", "635628cc-885b-4718-bdb1-ec85799dde0c", "-s", "news-officer", "-e", "production",
-                    "--", "python", "-c", launcher]
+                    "--"]
     # Optional native SSH fallback; obtain the host from `railway ssh config`
     # for THIS service. Never guess a deployment/host or mutate personal config.
     if host := os.environ.get("PODCAST_PILOT_SSH_HOST"):
         if not re.fullmatch(r"[0-9a-f-]{36}@ssh\.railway\.com", host):
             raise ValueError("Expected Railway-generated SSH host")
         command = ["ssh", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15",
-                   "-o", "ServerAliveCountMax=2", "-T", host,
-                   shlex.join(["python", "-c", launcher])]
+                   "-o", "ServerAliveCountMax=2", "-T", host]
+
+    def remote(source):
+        invocation = command + ([shlex.join(["python", "-c", source])] if host else ["python", "-c", source])
+        result = subprocess.run(invocation, cwd=ROOT, check=True, timeout=60,
+                                capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return result.stdout
+
     try:
-        result = subprocess.run(command, cwd=ROOT, check=False, timeout=60,
-                                input=base64.b64encode(zlib.compress(code.encode())).decode(), text=True)
+        # Railway's interactive SSH stdin can truncate large piped payloads or
+        # fail to deliver EOF. Stage small independent chunks, then verify the
+        # complete source digest before executing anything from the upload.
+        receipt = remote("import tempfile,json; print(json.dumps({'upload':tempfile.mkdtemp(prefix='agent-pilot-upload-')}))")
+        import json
+        directory = next(json.loads(line)['upload'] for line in receipt.splitlines() if line.startswith('{'))
+        assert re.fullmatch(r'/tmp/agent-pilot-upload-[a-zA-Z0-9_\-]+', directory)
+        packed = base64.b64encode(zlib.compress(code.encode())).decode()
+        chunks = [packed[i:i + 24000] for i in range(0, len(packed), 24000)]
+
+        def upload(item):
+            index, chunk = item
+            remote(f"import pathlib; pathlib.Path({(directory + '/' + str(index))!r}).write_text({chunk!r})")
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(upload, enumerate(chunks)))
+        launcher = (
+            "import subprocess,tempfile,json,base64,zlib,hashlib,pathlib; "
+            f"root=pathlib.Path({directory!r}); "
+            f"packed=''.join((root/str(i)).read_text() for i in range({len(chunks)})); "
+            "code=zlib.decompress(base64.b64decode(packed,validate=True)); "
+            f"assert hashlib.sha256(code).hexdigest()=={hashlib.sha256(code.encode()).hexdigest()!r}, 'incomplete upload'; "
+            "script=root/'run.py'; script.write_bytes(code); "
+            "log=tempfile.NamedTemporaryFile(prefix='hermes-pilot-',suffix='.log',delete=False); "
+            "p=subprocess.Popen(['python','-u',str(script)],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True); "
+            "print(json.dumps({'pid':p.pid,'log':log.name}),flush=True)"
+        )
+        print(remote(launcher), end='')
     except subprocess.TimeoutExpired:
         print("SSH launch receipt timed out; inspect pilot logs before retrying.", file=sys.stderr)
         sys.exit(2)
-    sys.exit(result.returncode)
 
 
 if __name__ == "__main__":

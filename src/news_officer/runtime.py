@@ -787,6 +787,8 @@ class NewsOfficerRuntime:
             stopped = next(iter(done))
             raise RuntimeError(f"Supervised task stopped unexpectedly: {stopped.get_name()}")
         finally:
+            if begin_shutdown := getattr(self, 'on_shutdown', None):
+                begin_shutdown()
             for task in tasks:
                 task.cancel()
             try:

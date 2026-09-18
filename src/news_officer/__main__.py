@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import threading
 
 from .agent import AgentIntentResolver
 from .config import Settings
@@ -83,12 +85,33 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
     )
 
 
+def run_service(runtime, *, shutdown_grace=30) -> None:
+    # asyncio cancellation cannot stop a blocked synchronous tool thread. Arm
+    # a process-level deadline once shutdown begins, so the cloud supervisor
+    # can restart even if Python waits for an executor or channel indefinitely.
+    deadline = None
+
+    def begin_shutdown():
+        nonlocal deadline
+        if deadline is None:
+            deadline = threading.Timer(shutdown_grace, os._exit, args=(1,))
+            deadline.daemon = True
+            deadline.start()
+
+    runtime.on_shutdown = begin_shutdown
+    try:
+        asyncio.run(runtime.run())
+    finally:
+        if deadline is not None:
+            deadline.cancel()
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    asyncio.run(build_runtime(Settings.from_env()).run())
+    run_service(build_runtime(Settings.from_env()))
 
 
 if __name__ == "__main__":

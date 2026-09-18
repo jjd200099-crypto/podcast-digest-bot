@@ -1,5 +1,8 @@
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -16,6 +19,24 @@ from news_officer.store import Store
 
 
 class ConversationQualityTests(unittest.TestCase):
+    def test_process_exits_even_when_executor_thread_cannot_be_cancelled(self):
+        code = '''
+import asyncio, time
+from news_officer.__main__ import run_service
+class Runtime:
+    async def run(self):
+        asyncio.create_task(asyncio.to_thread(time.sleep, 60))
+        await asyncio.sleep(0.05)
+        print('stuck executor started', flush=True)
+        self.on_shutdown()
+        raise RuntimeError('simulated fatal health failure')
+run_service(Runtime(), shutdown_grace=0.1)
+'''
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, timeout=8,
+            check=False, env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src')})
+        self.assertIn(b'stuck executor started', result.stdout)
+        self.assertEqual(result.returncode, 1)
+
     def test_truncated_outputs_rejected(self):
         for text in ('主要错误有：', '我可以帮你追踪和研究已订阅播客：', '## 结论', '1.', '```python\nprint(1)', '好的，我会检查一下。'):
             with self.subTest(text=text):

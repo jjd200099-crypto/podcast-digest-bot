@@ -32,7 +32,10 @@ truthfully; never suppress safety rules or fabricate completion to avoid a refus
   event. The bound prevents runaway bills; exhaustion is not successful research.
 - `/healthz` reports only connection readiness and stalled-request counts. A
   watchdog exits on prolonged disconnection or a stuck interactive worker, so
-  Railway can restart and recover durable jobs. No user content or credentials
+  Railway can restart and recover durable jobs. Shutdown has a 30-second
+  process deadline because cancelling asyncio does not stop synchronous tool
+  threads; a subprocess regression verifies exit with a deliberately stuck
+  executor. No user content or credentials
   are exposed in health responses. Model API availability is not inferred from
   WebSocket health. `scripts/configure_cloud_health.py` previews only the existing
   service's healthcheck, ALWAYS restart, one replica and no-sleep settings; apply
