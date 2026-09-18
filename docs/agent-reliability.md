@@ -59,7 +59,32 @@ production subscriptions. The first conversation replay covered nine scenarios:
 greeting, capabilities, general explanation, rewriting, a long deliverable,
 self-diagnosis, feature registration, its follow-up, and another group member.
 
-Still separate acceptance gates: final-code replay, cloud deployment identity,
-real Feishu ingress and visible complete replies, restart/reconnect integration,
-and sustained cloud health. Do not mark the full product complete based only on
-the local suite or the synthetic conversation replays.
+## Observed acceptance status — 2026-09-18
+
+Production application release: `0fcb9db`, running on Railway with Agents SDK,
+four interactive workers, one replica, no sleep, ALWAYS restart and `/healthz`.
+The deployed runtime SHA-256 matched the release checkout. The daily schedule
+remains 08:30 Asia/Shanghai, a 24-hour window, with one active group recipient
+and no active private daily recipients.
+
+| Gate | Observed evidence | Boundary |
+| --- | --- | --- |
+| Ordinary conversations | Nine real-model cloud replays passed; actual answers reviewed | Isolated state, no Feishu sends |
+| Podcast research and follow-ups | Six extended replays passed; Noam Brown detailed answer read all 40 source chunks; final detailed/source cases rerun after output-schema fix | Not a live colleague conversation |
+| Runtime concurrency and delivery retry | Fast sender finished in about 3 seconds while another request ran; same-sender follow-up stayed ordered; simulated lost send receipt reused delivery UUID and committed only one answer | Fake outbound transport, not Feishu's service |
+| Cloud deployment | Railway SUCCESS; live `/healthz` reported connected, zero active/stalled requests; database integrity OK | A healthy snapshot does not prove future uptime |
+| Controlled cloud restart | No unfinished jobs before restart; platform restart accepted; PID 1 start time changed; health returned OK; 20 stored research turns and the sole subscription persisted | Idle restart, not an in-flight real user request |
+| SDK ingress contract | Real SDK normalization/policy admitted two different colleagues' mentions and DM without mention; preserved quoted-message/thread IDs; deduplicated repeats and blocked unrelated mentions/bot loops | Synthetic wire events; cannot prove tenant scopes or Feishu event delivery |
+| Real group/private acceptance | Pending authorization or user/colleague test | Do not report this as passed |
+
+Deployment acceptance caught a real lifecycle incompatibility: the SDK's
+foreground `connect()` can stay blocked before readiness is marked. The first
+health-checked deployment did not pass. Release `0fcb9db` uses the public
+`connect_until_ready()` lifecycle and passed the live health check; an actual
+SDK/background-thread regression covers the readiness transition.
+
+Remaining gates are real Feishu ingress and visible complete replies from both
+the user and a colleague, plus ongoing operational observation. Do not mark the
+full product complete based only on local checks or synthetic replays. No finite
+test suite can guarantee zero future outages, semantic errors, or legitimate
+permission/safety constraints.
