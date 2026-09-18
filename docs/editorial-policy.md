@@ -7,10 +7,10 @@ summary push. Existing archived digests are not retroactively rescored.
 
 | Dimension | Weight | Substantive relevance / strong evidence |
 |---|---:|---|
-| AI | 25 | Models, AI applications, infrastructure or AI science discussed in depth |
-| Investment usefulness | 25 | Customers, economics, competition, capital allocation or moat analysis |
-| Current company research | 20 | An active private watchlist company is discussed substantively |
-| Information gain | 15 | Specific new detail, original framework or firsthand information |
+| AI | 40 | Models, AI applications, infrastructure or AI science discussed in depth |
+| Investment usefulness | 20 | Customers, economics, competition, capital allocation or moat analysis |
+| Current company research | 5 | An active private watchlist company is discussed substantively |
+| Information gain | 20 | Specific new detail, original framework or firsthand information |
 | Evidence quality | 15 | Explicit causal reasoning, traceable data, examples and limitations |
 
 Each dimension is model-assessed from 0–5, with a verbatim transcript excerpt for
@@ -20,10 +20,10 @@ information gain is judged within the episode, not against all past podcasts.
 Ads, name-dropping, generic same-sector mentions and celebrity status earn no
 company bonus. No company match is required for a useful general AI episode.
 
-Daily eligibility requires AI >= 3, investment >= 3, information gain >= 2,
+Daily eligibility requires AI >= 4 (a core topic, not an aside), investment >= 3, information gain >= 2,
 evidence >= 2, and total >= 55. Stars: >=85 is 5; >=70 is 4; >=55 is 3;
 >=40 is 2; otherwise 1. Five stars additionally requires information gain and
-evidence >= 4. Without a company match the maximum total is 80. Low relevance
+evidence >= 4. Without a company match the maximum total is 95, so excellent AI episodes can still earn five stars. Low relevance
 cannot be rescued by a high total. Scores are not investment-return forecasts.
 
 The recommendation line shows the five weighted subtotals. Ratings override the

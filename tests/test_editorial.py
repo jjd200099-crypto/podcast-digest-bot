@@ -41,12 +41,15 @@ class EditorialTests(unittest.TestCase):
         for weak in ('ai', 'investment'):
             decision = decide(assessment(**{weak: 2, 'novelty': 5, 'evidence': 5}), TEXT, PROFILE)
             self.assertFalse(decision['selected'])
+        self.assertFalse(decide(assessment(ai=3, investment=5, focus=5, novelty=5, evidence=5), TEXT, PROFILE)['selected'])
 
     def test_weights_thresholds_and_five_star_quality_cap(self):
         decision = decide(assessment(), TEXT, PROFILE)
         self.assertEqual((decision['total'], decision['stars'], decision['selected']), (80, 4, True))
         decision = decide(assessment(ai=5, investment=5, focus=5, novelty=5, evidence=5), TEXT, PROFILE)
         self.assertEqual((decision['total'], decision['stars']), (100, 5))
+        unfocused = decide(assessment(ai=5, investment=5, focus=5, novelty=5, evidence=5), TEXT, [])
+        self.assertEqual((unfocused['total'], unfocused['stars'], unfocused['selected']), (95, 5, True))
         decision = decide(assessment(ai=5, investment=5, focus=5, novelty=5, evidence=3), TEXT, PROFILE)
         self.assertEqual(decision['total'], 94)
         self.assertEqual(decision['stars'], 4)
@@ -108,7 +111,7 @@ class EditorialTests(unittest.TestCase):
         decision = decide(assessment(), TEXT, PROFILE)
         summary = EditorialPolicy.apply(SUMMARY, decision)
         self.assertTrue(_valid_editorial_summary(summary))
-        self.assertIn('AI 20/25', summary)
+        self.assertIn('AI 32/40', summary)
         self.assertIn('★★★★☆（4/5', summary)
 
     def test_audit_cache_changes_when_transcript_or_profile_changes(self):
