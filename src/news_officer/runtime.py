@@ -437,8 +437,9 @@ class NewsOfficerRuntime:
         await self._drain_outbox(job)
 
     def _persisted_daily_items(self, job: Job) -> list[DailyItem]:
+        from .daily_report import ranked_daily_items
         values = self.store.list_job_results(job.key, "daily_item")
-        return [DailyItem.from_persisted_dict(value) for value in values]
+        return ranked_daily_items([DailyItem.from_persisted_dict(value) for value in values])
 
     def _persist_daily_items(self, job: Job, results: list[DailyItem]) -> None:
         for item in results:
@@ -550,6 +551,7 @@ class NewsOfficerRuntime:
                 job.key, f"episode:{item.episode.id}"
             ):
                 self.store.record_episode(item.episode, "sent")
+                self.store.complete_daily_transcript(item.episode.id)
 
     async def _handle_daily_job(self, job: Job) -> None:
         targets = await asyncio.to_thread(self._daily_targets, job)
@@ -569,7 +571,9 @@ class NewsOfficerRuntime:
             return
 
         try:
-            results = await asyncio.to_thread(self.podcast_service.build_daily)
+            build = (self.podcast_service.build_pending if job.payload.get('transcript_catchup')
+                     else self.podcast_service.build_daily)
+            results = await asyncio.to_thread(build)
         except Exception:
             # A broken source scan is not an empty digest. Persist and deliver a
             # single idempotent warning while leaving the job retryable.
@@ -605,7 +609,7 @@ class NewsOfficerRuntime:
 
         if not failures:
             report = coverage_report(persisted)
-            if report:
+            if report and not job.payload.get('transcript_catchup'):
                 group = "daily:coverage" if persisted else "daily:empty"
                 await asyncio.to_thread(
                     self._ensure_broadcast,
@@ -732,6 +736,13 @@ class NewsOfficerRuntime:
                     if inserted:
                         logger.info("Queued daily digest %s", key)
                         self._wake_worker("daily")
+            if has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1):
+                slot = int(local_now.timestamp()) // 1800
+                inserted = await asyncio.to_thread(self.store.enqueue,
+                    f'daily:transcript-catchup:{slot}', 'daily',
+                    {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
+                if inserted:
+                    self._wake_worker('daily')
             await asyncio.sleep(30)
 
     async def _library_archiver(self) -> None:

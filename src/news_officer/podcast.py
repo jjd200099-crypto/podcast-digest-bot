@@ -333,6 +333,7 @@ class PodcastService:
         podwise_api_token: str = "",
         editorial_policy=None,
         daily_rss_only: bool = False,
+        podwise_auto_process: bool = False,
     ):
         self.store = store
         self.feeds_path = feeds_path
@@ -359,6 +360,14 @@ class PodcastService:
                                 if not isinstance(p, YouTubeTranscriptProvider)])
             if daily_rss_only else self.transcript_resolver
         )
+        # Keep billable processing out of general chat/link lookups. Only the
+        # configured daily pipeline receives the explicit processing opt-in.
+        if podwise_auto_process:
+            self.daily_transcript_resolver = TranscriptResolver([
+                PodwiseTranscriptProvider(podwise_api_token, processing_store=store, auto_process=True)
+                if isinstance(p, PodwiseTranscriptProvider) else p
+                for p in self.daily_transcript_resolver.providers
+            ])
         self.lookback_hours = lookback_hours
         self.max_daily_candidates = max_daily_candidates
         self.max_daily_summaries = max_daily_summaries
@@ -636,7 +645,7 @@ class PodcastService:
                     if (
                         published_at is not None
                         and published_at.tzinfo is not None
-                        and published_at.astimezone(UTC) < cutoff
+                        and (published_at.astimezone(UTC) < cutoff or published_at > now)
                     ):
                         continue
                     identity_keys = _episode_dedupe_keys(episode)
@@ -738,12 +747,23 @@ class PodcastService:
         ))
         return candidates[: self.max_daily_candidates] if self.max_daily_candidates else candidates
 
-    def build_daily(self, now: datetime | None = None) -> list[DailyItem]:
+    def build_pending(self) -> list[DailyItem]:
+        pending = []
+        for episode in self.store.due_daily_transcripts():
+            if self.store.episode_is_delivered(episode):
+                self.store.complete_daily_transcript(episode.id)
+            else:
+                pending.append(episode)
+        return self.build_daily(pending=pending)
+
+    def build_daily(self, now: datetime | None = None, *, pending: list[Episode] | None = None) -> list[DailyItem]:
+        from .daily_report import ranked_daily_items
+
         now = now or datetime.now(UTC)
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
         cutoff = now.astimezone(UTC) - timedelta(hours=self.lookback_hours)
-        candidates = self.discover_daily_candidates(now)
+        candidates = self.discover_daily_candidates(now) if pending is None else pending
         results: list[DailyItem] = [
             DailyItem(
                 Episode(
@@ -755,7 +775,7 @@ class PodcastService:
                 "failed",
                 "feed discovery failed",
             )
-            for source_url in self._last_failed_feeds
+            for source_url in (self._last_failed_feeds if pending is None else ())
         ]
         summary_count = 0
         priority_b_summaries = 0
@@ -788,18 +808,21 @@ class PodcastService:
                 if episode.published_at is None:
                     results.append(DailyItem(episode, "unverified_date"))
                     continue
-                if episode.published_at.astimezone(UTC) < cutoff:
+                if pending is None and episode.published_at.astimezone(UTC) < cutoff:
                     results.append(DailyItem(episode, "outside_window"))
                     continue
                 transcript = self.daily_transcript_resolver.fetch(episode)
                 if transcript is None:
-                    results.append(DailyItem(episode, "no_transcript"))
+                    providers = getattr(self.daily_transcript_resolver, 'providers', ())
+                    providers = providers if isinstance(providers, (list, tuple)) else ()
+                    reason = next((p.diagnostics[episode.id] for p in providers
+                        if isinstance(p, PodwiseTranscriptProvider) and episode.id in p.diagnostics),
+                        '尚未找到通过完整性校验的全文，已保留待办继续复查。')
+                    self.store.defer_daily_transcript(episode, reason)
+                    results.append(DailyItem(episode, "no_transcript", reason))
                     continue
                 stored = self.store.save_verified_transcript(episode, transcript)
                 decision = self.editorial_policy.assess(episode, transcript) if self.editorial_policy else None
-                if decision is not None and not decision['selected']:
-                    results.append(DailyItem(episode, 'not_recommended', decision['assessment']['reason']))
-                    continue
                 source_priority = str(
                     episode.metadata.get("source_priority") or "B"
                 ).upper()
@@ -838,9 +861,11 @@ class PodcastService:
             except SummaryFormatError as error:
                 logger.warning("Podcast summary format failed for %s: %s", episode.url, error)
                 results.append(DailyItem(episode, "summary_format_error", str(error)))
+                self.store.defer_daily_transcript(episode, '摘要格式待重试')
             except Exception as error:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
+                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
         for episode, transcript, stored, decision in deferred_priority_a:
             if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                 break
@@ -875,4 +900,4 @@ class PodcastService:
                 )
             )
             summary_count += 1
-        return results
+        return ranked_daily_items(results)

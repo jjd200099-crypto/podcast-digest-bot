@@ -138,8 +138,9 @@ class EditorialTests(unittest.TestCase):
         decision = decide(assessment(), TEXT, PROFILE)
         summary = EditorialPolicy.apply(SUMMARY, decision)
         self.assertTrue(_valid_editorial_summary(summary))
-        self.assertIn('AI 32/40', summary)
-        self.assertIn('★★★★☆（4/5', summary)
+        self.assertNotIn('/40', summary)
+        self.assertNotIn('研究关联', summary)
+        self.assertTrue(summary.endswith('推荐星级：★★★★☆'))
 
     def test_audit_cache_changes_when_transcript_or_profile_changes(self):
         client = Mock()
@@ -160,7 +161,7 @@ class EditorialTests(unittest.TestCase):
         policy.assess(self.episode, changed)
         self.assertEqual(client.responses.create.call_count, 3)
 
-    def test_daily_filter_skips_summary_but_preserves_fulltext_and_continues(self):
+    def test_daily_retains_low_rating_and_sorts_high_rating_first(self):
         policy = Mock()
         rejected = decide(assessment(ai=1), TEXT, PROFILE)
         accepted = decide(assessment(), TEXT, PROFILE)
@@ -171,16 +172,17 @@ class EditorialTests(unittest.TestCase):
         resolver = Mock()
         resolver.fetch.return_value = self.transcript
         service = PodcastService(self.store, self.root / 'feeds.json', summarizer,
-                                 resolver, editorial_policy=policy, max_daily_summaries=1)
+                                 resolver, editorial_policy=policy, max_daily_summaries=0)
         second = Episode('second', 'Accepted', 'https://example.org/2', 'Show',
                          published_at=datetime.now(UTC), duration_seconds=300)
         service.discover_daily_candidates = Mock(return_value=[self.episode, second])
         items = service.build_daily()
-        self.assertEqual([item.status for item in items], ['not_recommended', 'summarized'])
-        self.assertEqual(summarizer.summarize.call_count, 1)
+        self.assertEqual([item.status for item in items], ['summarized', 'summarized'])
+        self.assertEqual([item.episode.id for item in items], ['second', 'e'])
+        self.assertEqual(summarizer.summarize.call_count, 2)
         self.assertIsNotNone(self.store.get_verified_transcript('e'))
-        self.assertIn('★★★★☆', items[1].message)
-        self.assertIn('未达到', coverage_report(items))
+        self.assertIn('★★★★☆', items[0].message)
+        self.assertIsNone(coverage_report(items))
 
     def test_filtered_report_is_not_no_updates_or_missing_transcript(self):
         report = coverage_report([DailyItem(self.episode, 'not_recommended')])

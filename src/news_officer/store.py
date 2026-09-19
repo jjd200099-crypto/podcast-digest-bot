@@ -73,6 +73,21 @@ class Store:
                 CREATE INDEX IF NOT EXISTS jobs_ready_idx
                     ON jobs(status, available_at, created_at);
 
+                CREATE TABLE IF NOT EXISTS podwise_process_requests (
+                    seq INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS daily_transcript_backlog (
+                    episode_id TEXT PRIMARY KEY,
+                    episode_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    next_check_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS episodes (
                     episode_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -1246,6 +1261,60 @@ class Store:
                 is not None
             )
 
+    def reserve_podwise_processing(self, seq: int) -> bool:
+        """At most one billable POST per asset, even after a crash/timeout."""
+        if type(seq) is not int or seq <= 0:
+            raise ValueError('Invalid Podwise asset')
+        with self._connect() as connection:
+            return connection.execute(
+                'INSERT OR IGNORE INTO podwise_process_requests VALUES (?, ?, ?, ?)',
+                (seq, 'requesting', _now(), _now()),
+            ).rowcount == 1
+
+    def set_podwise_processing_state(self, seq: int, state: str) -> None:
+        with self._connect() as connection:
+            connection.execute('UPDATE podwise_process_requests SET state=?, updated_at=? WHERE seq=?',
+                               (state, _now(), seq))
+
+    def defer_daily_transcript(self, episode: Episode, state: str) -> None:
+        """Keep original publisher identity after the daily 24h window closes."""
+        value = episode.to_persisted_dict()
+        value['metadata'] = episode.metadata
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            prior = connection.execute('SELECT attempts FROM daily_transcript_backlog WHERE episode_id=?',
+                                       (episode.id,)).fetchone()
+            # Pending transcription is checked promptly, persistently unavailable
+            # material backs off after a day instead of hammering paid APIs forever.
+            delay = timedelta(hours=6) if prior and prior['attempts'] >= 48 else timedelta(minutes=30)
+            connection.execute(
+                'INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, 1) '
+                'ON CONFLICT(episode_id) DO UPDATE SET state=excluded.state, '
+                'next_check_at=excluded.next_check_at, attempts=attempts+1',
+                (episode.id, json.dumps(value, ensure_ascii=False), state, now.isoformat(),
+                 (now + delay).isoformat()),
+            )
+
+    def due_daily_transcripts(self, limit: int = 50) -> list[Episode]:
+        from dataclasses import replace
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT episode_json FROM daily_transcript_backlog "
+                "WHERE state != 'delivered' AND next_check_at<=? ORDER BY created_at LIMIT ?",
+                (_now(), limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = json.loads(row['episode_json'])
+            result.append(replace(Episode.from_persisted_dict(value), metadata=value.get('metadata', {})))
+        return result
+
+    def complete_daily_transcript(self, episode_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE daily_transcript_backlog SET state='delivered' WHERE episode_id=?",
+                               (episode_id,))
+
     def publisher_episode_aliases(self, episode: Episode) -> set[str]:
         """Find historical merged IDs by exact publisher metadata, not fuzzy titles."""
         if not episode.published_at or not episode.metadata.get('rss_feed_url'):
@@ -1256,6 +1325,13 @@ class Store:
                 (episode.title, episode.show, episode.published_at.isoformat()),
             ).fetchall()
         return {str(row['episode_id']) for row in rows}
+
+    def episode_is_delivered(self, episode: Episode) -> bool:
+        aliases = self.publisher_episode_aliases(episode) | {episode.id}
+        with self._connect() as connection:
+            return any(connection.execute(
+                "SELECT 1 FROM episodes WHERE episode_id=? AND result IN ('sent', 'summarized')", (alias,)
+            ).fetchone() is not None for alias in aliases)
 
     def should_review_episode(
         self, episode_id: str, no_transcript_retry_hours: int = 6
@@ -1285,6 +1361,10 @@ class Store:
             ).fetchone()
         if row is None:
             return "new"
+        if row['result'] == 'not_recommended':
+            # Policy v2 ranks low-star episodes instead of permanently excluding
+            # them. Discovery still enforces the publisher's daily date window.
+            return 'retry'
         if row["result"] not in {
             "no_transcript",
             "summary_format_error",

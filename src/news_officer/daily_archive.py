@@ -6,7 +6,7 @@ import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from .daily_report import coverage_report
+from .daily_report import coverage_report, ranked_daily_items
 from .models import DailyItem
 
 
@@ -38,7 +38,7 @@ def read_daily_digest(store, day: str) -> dict:
         return {"status": "not_generated", "date": day, "count": 0,
                 "message": f"{day} 的日报尚未生成或归档；这不代表没有播客更新。"}
     summaries, valid, stale = [], [], 0
-    for item in items.values():
+    for item in ranked_daily_items(list(items.values())):
         if item.status != "summarized":
             valid.append(item)
             continue

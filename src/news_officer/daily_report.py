@@ -1,8 +1,17 @@
 """Explain an incomplete digest without pretending there were no releases."""
 
+import re
 from collections import Counter
 
 from .models import DailyItem
+
+
+def ranked_daily_items(items: list[DailyItem]) -> list[DailyItem]:
+    """Stable high-to-low star order, also after persistence/restart."""
+    def key(item):
+        rating = re.search(r'(?m)^推荐星级：([★☆]{5})', item.message)
+        return (item.status != 'summarized', -rating.group(1).count('★') if rating else 0)
+    return sorted(items, key=key)
 
 
 def coverage_report(items: list[DailyItem]) -> str | None:
@@ -46,13 +55,15 @@ def coverage_report(items: list[DailyItem]) -> str | None:
             .replace("[", "（")
             .replace("]", "）")[:180]
         )
-        lines.append(f"- {item.episode.show}｜{title}\n  {item.episode.url}")
+        detail = item.message if item.status == 'no_transcript' else ''
+        lines.append(f"- {item.episode.show}｜{title}\n  {item.episode.url}" +
+                     (f"\n  {detail}" if detail else ''))
     if len(pending) > 6:
         lines.append(f"- 另有 {len(pending) - 6} 期待处理。")
     lines.extend(
         [
             "",
-            "以上为本次实际处理的候选，不是全部更新清单。缺全文的节目将在追踪窗口内按重试策略复查。",
+            "以上为本次实际处理的候选。缺全文的节目保留待办，转写完成后补充摘要；不会仅因超出原24小时窗口而丢失。",
         ]
     )
     return "\n".join(lines)

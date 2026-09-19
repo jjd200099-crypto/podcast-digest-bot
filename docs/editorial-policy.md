@@ -1,9 +1,9 @@
-# Daily editorial policy: ai-investment-v1
+# Daily editorial policy: ai-investment-ranked-v2
 
 All configured sources are still scanned inside the existing lookback window.
-Selection happens only after a complete transcript has been obtained and archived.
-Rejected episodes remain available for explicit user queries, but receive no daily
-summary push. Existing archived digests are not retroactively rescored.
+Rating happens only after a complete transcript has been obtained and archived.
+Every verified episode gets a daily summary, including low-star episodes. Delivery
+and archived-day retrieval sort by stars descending. Already delivered messages are not rewritten.
 
 | Dimension | Weight | Substantive relevance / strong evidence |
 |---|---:|---|
@@ -22,17 +22,18 @@ information gain is judged within the episode, not against all past podcasts.
 Ads, name-dropping, generic same-sector mentions and celebrity status earn no
 company bonus. No company match is required for a useful general AI episode.
 
-Daily eligibility requires AI >= 4 (a core topic, not an aside), investment >= 3, information gain >= 2,
-evidence >= 2, and total >= 55. Stars: >=85 is 5; >=70 is 4; >=55 is 3;
+There is no relevance-based daily exclusion. The legacy `selected` audit field is
+retained for compatibility but must not gate summarization. Stars: >=85 is 5; >=70 is 4; >=55 is 3;
 >=40 is 2; otherwise 1. Five stars additionally requires information gain and
 evidence >= 4. Without a company match the maximum total is 95, so excellent AI episodes can still earn five stars. Low relevance
-cannot be rescued by a high total. Scores are not investment-return forecasts.
+should be described honestly in the rationale. Scores are not investment-return forecasts.
 
-The recommendation line shows the five weighted subtotals. Ratings override the
+The recommendation line contains only a short rationale, not numeric subtotals.
+The final rating contains only five star glyphs. Ratings override the
 summary model's freely generated star count. Reviews are cached privately in
 SQLite by episode, transcript hash, active-profile hash, model and policy version.
 Changing the source text or active profile invalidates the review cache.
-`not_recommended` is distinct from missing transcripts, no updates and failures.
+Legacy `not_recommended` records within the discovery window can be reviewed again.
 Invalid model output or missing configured profile raises an error; it does not
 silently turn a candidate into a low-quality episode.
 Schema or excerpt validation failures get one bounded model correction attempt;
@@ -56,7 +57,7 @@ Company names in the active profile are supplied to the main model for selection
 they are not sent to the tone advisor. Only a public-discussion-based rationale,
 not the internal watchlist itself, belongs in the outward recommendation.
 
-`NEWS_OFFICER_EDITORIAL_FILTER=false` restores the old daily path. This rollout
-does not alter explicit link analysis, historical-digest resend, subscriptions or
-the 24-hour production discovery window. Changing focus does not resend already
-processed episodes; a deliberate backfill is separate.
+`NEWS_OFFICER_EDITORIAL_FILTER=false` disables the evidence-grounded rating pass,
+not transcript validation. Normal discovery still uses the 24-hour production
+window; unfinished transcript work is durably retained for later catch-up. Changing
+focus does not resend already delivered episodes; a deliberate backfill is separate.

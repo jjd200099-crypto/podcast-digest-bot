@@ -133,6 +133,47 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    async def test_catchup_does_not_send_repeated_empty_or_pending_notices(self):
+        messenger = FakeMessenger()
+        podcast = MagicMock()
+        podcast.build_pending.return_value = [DailyItem(Episode('later', 'Pending', 'https://example.org', 'Show'),
+                                                      'no_transcript', '正在转写')]
+        instance = runtime(self.store, messenger, podcast)
+        self.store.enqueue('daily:catchup:test', 'daily', {'transcript_catchup': True})
+        job = self.store.claim_next('daily')
+        await instance._handle_daily_job(job)
+        podcast.build_pending.assert_called_once()
+        podcast.build_daily.assert_not_called()
+        self.assertEqual(messenger.attempts, [])
+        self.assertTrue(self.store.analysis_complete(job.key))
+
+    async def test_persisted_rating_order_and_catchup_delivery_remain_idempotent(self):
+        from datetime import datetime, timedelta
+
+        items = []
+        for identity, stars in [('low', '★☆☆☆☆'), ('high', '★★★★★')]:
+            episode = Episode(identity, identity, 'https://example.org/'+identity, 'Show',
+                              published_at=datetime.now(UTC)-timedelta(days=2))
+            record = self.store.save_verified_transcript(episode, Transcript('full '+identity, 'official', 'https://example.org/t', True))
+            summary = f'推荐理由：这是可核验的节目内容。\n\n1. 来自完整文字稿的要点。\n\n推荐星级：{stars}'
+            self.store.save_transcript_digest(identity, summary, record.content_sha256, record.record_revision_sha256)
+            items.append(DailyItem(episode, 'summarized', summary, attachment_for(record, summary)))
+            self.store.defer_daily_transcript(episode, 'waiting')
+        podcast = MagicMock()
+        podcast.build_pending.return_value = items
+        messenger = FakeMessenger()
+        instance = runtime(self.store, messenger, podcast)
+        self.store.enqueue('daily:catchup:ordered', 'daily', {'transcript_catchup': True})
+        job = self.store.claim_next('daily')
+        await instance._handle_daily_job(job)
+        self.assertEqual([i.group_key for i in messenger.attempts], ['episode:high', 'episode:low'])
+        self.assertTrue(all(i.target_type == 'open_id' and i.target_id == 'ou_test' for i in messenger.attempts))
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(messenger.attempts), 2)
+        self.assertTrue(all(self.store.episode_is_delivered(i.episode) for i in items))
+        with self.store._connect() as db:
+            self.assertEqual({r[0] for r in db.execute('SELECT state FROM daily_transcript_backlog')}, {'delivered'})
+
     async def test_long_takeaways_are_split_between_complete_numbered_lines(self):
         takeaways = [
             f"{number}. 洞察 {number}：" + ("高密度内容" * 40)

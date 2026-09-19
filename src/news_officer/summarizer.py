@@ -69,13 +69,14 @@ def _valid_editorial_summary(markdown: str) -> bool:
     ):
         return False
     reason = re.search(r"(?m)^推荐理由：([^\r\n]{8,160})$", markdown)
-    rating = re.search(r"\n推荐星级：([★☆]{5})（([1-5])/5，编辑推荐）[ \t]*$", markdown)
+    rating = re.search(r"\n推荐星级：([★☆]{5})(?:（([1-5])/5，编辑推荐）)?[ \t]*$", markdown)
     if not reason or not rating or not _has_exact_takeaways(markdown):
         return False
     first = NUMBERED_TAKEAWAY_RE.search(markdown)
-    score = int(rating.group(2))
+    score = int(rating.group(2)) if rating.group(2) else rating.group(1).count('★')
     return bool(
-        first
+        1 <= score <= 5
+        and first
         and reason.end() < first.start()
         and rating.group(1) == "★" * score + "☆" * (5 - score)
     )
@@ -112,7 +113,7 @@ class TranscriptSummarizer:
 8. 对预测、公司自述或未经审计的数据，明确标为“嘉宾观点”“公司主张”或“模型估算”。
 9. 不得补充文字稿外的事实，不得把主持人的提问改写成嘉宾结论。
 10. 输出中文，必要的英文产品名和术语保留原文；每条洞察须自包含、可直接用于投资判断。
-11. 全文最后独占一行“推荐星级：★★★★☆（4/5，编辑推荐）”，星级只能1–5且实心星数须与分数一致，总共5颗星。评价信息增量、论证具体程度与创业/AI/投资相关性：5星=强原创且有一手数据或机制推理，4星=观点清楚且有实际参考价值，3星=主要是背景补充，1–2星=信息有限或重复度高。不要一律给高分，不把预测当确定事实。星级是编辑主观推荐，不代表投资收益预测。具体评分依据融入前面的推荐理由，不在最后另写段落。
+11. 全文最后独占一行“推荐星级：★★★★☆”，总共5颗星、实心星1–5颗。不展示数字分数、维度分解或评分公式。评价信息增量、论证具体程度与创业/AI/投资相关性：5星=强原创且有一手数据或机制推理，4星=观点清楚且有实际参考价值，3星=主要是背景补充，1–2星=信息有限或与AI投资关联较弱。低星节目仍然认真摘要，不强行包装为AI节目。不要一律给高分，不把预测当确定事实。星级是编辑主观推荐，不代表投资收益预测。
 """
         prompt = f"""节目：{episode.title}
 频道/主播：{episode.show}
