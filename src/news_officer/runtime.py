@@ -510,10 +510,19 @@ class NewsOfficerRuntime:
                         item.episode, "summary_format_error"
                     )
                     continue
+                # A cached v1 digest can contain numeric scores. Normalize the
+                # new delivery only, preserving its archived revision and any
+                # already-frozen outbox parts from an interrupted older release.
+                from .daily_report import render_daily_summary
+
+                if any(part.group_key == f'episode:{item.episode.id}'
+                       for part in self.store.outbox_items(job.key)):
+                    continue
                 self._ensure_broadcast(
                     job,
                     f"episode:{item.episode.id}",
-                    item.message,
+                    ('全文已补齐｜补充摘要\n\n' if job.payload.get('transcript_catchup') else '')
+                    + render_daily_summary(item.message),
                     f"daily:{item.episode.id}",
                     file_key,
                 )

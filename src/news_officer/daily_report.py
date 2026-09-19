@@ -6,6 +6,14 @@ from collections import Counter
 from .models import DailyItem
 
 
+def render_daily_summary(markdown: str) -> str:
+    """Presentation migration only; never rewrite an immutable archived digest."""
+    markdown = re.sub(
+        r'(?m)(^推荐理由：[^\r\n]*?)（AI \d+/40，投资 \d+/20，研究关联 \d+/5，增量 \d+/20，论据 \d+/15）[ \t]*$',
+        r'\1', markdown)
+    return re.sub(r'(?m)^(推荐星级：[★☆]{5})（[1-5]/5，编辑推荐）[ \t]*$', r'\1', markdown)
+
+
 def ranked_daily_items(items: list[DailyItem]) -> list[DailyItem]:
     """Stable high-to-low star order, also after persistence/restart."""
     def key(item):

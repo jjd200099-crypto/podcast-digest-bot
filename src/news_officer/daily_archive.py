@@ -6,7 +6,7 @@ import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from .daily_report import coverage_report, ranked_daily_items
+from .daily_report import coverage_report, ranked_daily_items, render_daily_summary
 from .models import DailyItem
 
 
@@ -54,7 +54,7 @@ def read_daily_digest(store, day: str) -> dict:
             continue
         valid.append(item)
         # The raw source stays in the archive, not as an inaccessible API link.
-        summaries.append(re.sub(r"^\*{0,2}文字稿来源：.*\n?", "", item.message, flags=re.MULTILINE))
+        summaries.append(render_daily_summary(re.sub(r"^\*{0,2}文字稿来源：.*\n?", "", item.message, flags=re.MULTILINE)))
     blocks = [f"# 情报官日报｜{day}",
               f"已归档 {len(summaries)} 期摘要。以下与每日推送共用正式资料库；不附全文。",
               *summaries]

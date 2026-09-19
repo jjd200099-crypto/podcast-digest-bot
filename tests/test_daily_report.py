@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from news_officer.daily_report import coverage_report
+from news_officer.daily_report import coverage_report, render_daily_summary
 from news_officer.models import DailyItem, Episode
 
 
@@ -40,3 +40,13 @@ class DailyReportTests(unittest.TestCase):
 
     def test_empty_does_not_claim_no_source_updates(self):
         self.assertIn("不代表订阅源没有更新", coverage_report([]))
+
+    def test_old_cached_scoring_is_hidden_without_changing_content(self):
+        original = ('推荐理由：讨论推理成本下降（AI 40/40，投资 16/20，研究关联 0/5，增量 16/20，论据 9/15）\n'
+                    '1. 成本下降75%是嘉宾观点。\n推荐星级：★★★★☆（4/5，编辑推荐）')
+        rendered = render_daily_summary(original)
+        self.assertNotIn('/40', rendered)
+        self.assertNotIn('/5', rendered)
+        self.assertIn('下降75%', rendered)
+        self.assertTrue(rendered.endswith('推荐星级：★★★★☆'))
+        self.assertEqual(render_daily_summary(rendered), rendered)
