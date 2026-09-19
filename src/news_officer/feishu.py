@@ -166,6 +166,11 @@ def delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[str, str, 
     ]
 
 
+def encoded_message_payload(payload: dict) -> bytes:
+    """UTF-8 on the wire avoids inflating Chinese text into ASCII escapes."""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def combined_delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[str, str, str]]:
     """Prefer one post; measure the serialized request, not visible characters.
 
@@ -180,7 +185,7 @@ def combined_delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[s
     def fits(kind, content, limit):
         envelope = {"receive_id": "x" * 128, "msg_type": kind, "content": content,
                     "uuid": "x" * 36, "reply_in_thread": False}
-        return len(json.dumps(envelope).encode("utf-8")) <= limit
+        return len(encoded_message_payload(envelope)) <= limit
 
     post = _post_content(body, BRAND_HEADER)
     if fits("post", post, 29_000):
@@ -387,7 +392,8 @@ class FeishuMessenger:
                 url,
                 params=params,
                 headers=headers,
-                json=payload,
+                **({"data": encoded_message_payload(payload)}
+                   if item.group_key.startswith("daily:bundle:") else {"json": payload}),
                 timeout=30,
             )
             if response.status_code == 401 and not refreshed:

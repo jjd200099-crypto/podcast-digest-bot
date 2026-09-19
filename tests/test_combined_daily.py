@@ -8,10 +8,27 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from test_reliability import FakeMessenger, SequencePodcast, attachment_for, runtime
+from test_reliability import (
+    FakeMessenger,
+    FakeResponse,
+    SequencePodcast,
+    attachment_for,
+    runtime,
+)
 
-from news_officer.feishu import combined_delivery_parts, delivery_parts
-from news_officer.models import DailyItem, Episode, IncomingMessage, Transcript
+from news_officer.feishu import (
+    FeishuMessenger,
+    combined_delivery_parts,
+    delivery_parts,
+    encoded_message_payload,
+)
+from news_officer.models import (
+    DailyItem,
+    Episode,
+    IncomingMessage,
+    OutboxItem,
+    Transcript,
+)
 from news_officer.research_context import quoted_context
 from news_officer.store import Store
 
@@ -51,6 +68,23 @@ class CombinedPayloadTests(unittest.TestCase):
         for kind, content, uid in parts:
             request = {"receive_id": "x" * 128, "msg_type": kind, "content": content, "uuid": uid}
             self.assertLess(len(json.dumps(request).encode()), 150_000)
+
+    def test_bundle_wire_encoding_matches_capacity_check(self):
+        text = "观点和依据" * 1400
+        kind, content, uid = combined_delivery_parts(text, "utf8")[0]
+        self.assertEqual(kind, "post")
+        item = OutboxItem(0, "daily:test", "daily:bundle:wire", "wire", "send", "ou_test", "open_id",
+                          False, 1, 1, kind, content, uid)
+        messenger = FeishuMessenger("app", "secret")
+        with (patch.object(messenger, "token", return_value="test-token"),
+              patch("news_officer.feishu.requests.post", return_value=FakeResponse(body={
+                  "code": 0, "data": {"message_id": "receipt"}})) as post):
+            self.assertEqual(messenger.deliver(item), "receipt")
+        wire = post.call_args.kwargs["data"]
+        self.assertIsInstance(wire, bytes)
+        self.assertLess(len(wire), 30_000)
+        self.assertEqual(wire, encoded_message_payload(json.loads(wire)))
+        self.assertEqual(json.loads(wire)["content"], content)
 
 
 class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
