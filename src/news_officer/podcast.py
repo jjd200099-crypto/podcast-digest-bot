@@ -332,11 +332,15 @@ class PodcastService:
         source_registry=None,
         podwise_api_token: str = "",
         editorial_policy=None,
+        daily_rss_only: bool = False,
     ):
         self.store = store
         self.feeds_path = feeds_path
         self.summarizer = summarizer
         self.editorial_policy = editorial_policy
+        # The production Settings default is RSS-only. Retain the legacy library
+        # constructor default for existing standalone callers and explicit opt-in.
+        self.daily_rss_only = daily_rss_only
         self.transcript_resolver = transcript_resolver or TranscriptResolver(
             [
                 ArchivedTranscriptProvider(store),
@@ -346,9 +350,14 @@ class PodcastService:
                 DwarkeshOfficialTranscriptProvider(),
                 SequoiaOfficialTranscriptProvider(),
                 ColossusOfficialTranscriptProvider(),
-                YouTubeTranscriptProvider(),
                 *([PodwiseTranscriptProvider(podwise_api_token)] if podwise_api_token else []),
+                YouTubeTranscriptProvider(),
             ]
+        )
+        self.daily_transcript_resolver = (
+            TranscriptResolver([p for p in self.transcript_resolver.providers
+                                if not isinstance(p, YouTubeTranscriptProvider)])
+            if daily_rss_only else self.transcript_resolver
         )
         self.lookback_hours = lookback_hours
         self.max_daily_candidates = max_daily_candidates
@@ -528,7 +537,7 @@ class PodcastService:
             youtube_episodes: list[Episode] = []
             rss_episodes: list[Episode] = []
             channel_with_results = 0
-            if source.url:
+            if source.url and not self.daily_rss_only:
                 try:
                     discovered_youtube = latest_videos(
                         source.url, playlist_end=source.scan_depth
@@ -566,7 +575,9 @@ class PodcastService:
                         source.name or source.rss_url,
                         error,
                     )
-            if rss_episodes:
+            if self.daily_rss_only:
+                source_episodes = rss_episodes
+            elif rss_episodes:
                 source_episodes = _rss_with_unmatched_youtube(
                     rss_episodes, youtube_episodes
                 )
@@ -641,6 +652,11 @@ class PodcastService:
                         for identity in identity_keys
                         for member in identity_members.get(identity, ())
                     }
+                    if self.daily_rss_only:
+                        # Older daily scans stored merged RSS episodes under
+                        # YouTube IDs. Consult existing publisher identities
+                        # without contacting YouTube or replaying sent items.
+                        aliases.update(self.store.publisher_episode_aliases(episode))
                     alias_states = {
                         alias: self.store.episode_review_state(alias)
                         for alias in aliases
@@ -759,7 +775,8 @@ class PodcastService:
                     else str(episode.metadata.get("youtube_url") or "")
                 )
                 if (
-                    is_youtube_url(youtube_url)
+                    not self.daily_rss_only
+                    and is_youtube_url(youtube_url)
                     and (
                         episode.published_at is None
                         or episode.duration_seconds is None
@@ -774,7 +791,7 @@ class PodcastService:
                 if episode.published_at.astimezone(UTC) < cutoff:
                     results.append(DailyItem(episode, "outside_window"))
                     continue
-                transcript = self.transcript_resolver.fetch(episode)
+                transcript = self.daily_transcript_resolver.fetch(episode)
                 if transcript is None:
                     results.append(DailyItem(episode, "no_transcript"))
                     continue

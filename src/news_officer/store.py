@@ -1246,6 +1246,17 @@ class Store:
                 is not None
             )
 
+    def publisher_episode_aliases(self, episode: Episode) -> set[str]:
+        """Find historical merged IDs by exact publisher metadata, not fuzzy titles."""
+        if not episode.published_at or not episode.metadata.get('rss_feed_url'):
+            return set()
+        with self._connect() as connection:
+            rows = connection.execute(
+                'SELECT episode_id FROM episodes WHERE title=? AND show_name=? AND published_at=?',
+                (episode.title, episode.show, episode.published_at.isoformat()),
+            ).fetchall()
+        return {str(row['episode_id']) for row in rows}
+
     def should_review_episode(
         self, episode_id: str, no_transcript_retry_hours: int = 6
     ) -> bool:

@@ -68,6 +68,14 @@ class PodwiseTests(unittest.TestCase):
             "https://app.podwise.ai/api/open/v1/episodes/123/transcripts",
         )
 
+    def test_missing_provider_duration_uses_independent_rss_duration_only(self):
+        meta = {**self.meta, 'duration': None}
+        self.assertIsNone(self.fetch(meta=meta))
+        self.episode = replace(self.episode, metadata={'rss_feed_url': 'https://example.org/rss'})
+        self.assertTrue(self.fetch(meta=meta).verified_complete)
+        self.assertIsNone(self.fetch(meta=meta, segments=self.segments[:20]))
+        self.assertIsNone(self.fetch(meta={**meta, 'link': 'https://other.example/episode', 'title': 'Wrong'}))
+
     def test_search_miss_falls_back_to_dated_podcast_catalog(self):
         with patch.object(self.provider, "_get", side_effect=[
             {"result": []}, {"result": [{"seq": 778}]}, {"result": [self.meta]},

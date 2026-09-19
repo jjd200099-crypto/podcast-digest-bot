@@ -73,6 +73,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_daily_candidates, 0)
         self.assertEqual(settings.max_daily_summaries, 0)
         self.assertFalse(settings.daily_transcript_attachments)
+        self.assertTrue(settings.daily_rss_only)
         self.assertEqual(settings.agent_backend, "agents_sdk")
 
     def test_expression_advisor_is_opt_in_with_separate_credentials(self):

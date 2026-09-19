@@ -227,6 +227,11 @@ class PodwiseTranscriptProvider:
         ):
             return None
         duration = _number(meta.get("duration"))
+        if not duration and episode.metadata.get('rss_feed_url'):
+            # Identity was already independently verified above. A publisher
+            # duration can validate full coverage when Podwise omits this field;
+            # never derive expected duration from the transcript's own last cue.
+            duration = _number(episode.duration_seconds)
         if not duration or duration <= 0:
             return None
         if episode.duration_seconds and abs(duration - episode.duration_seconds) > max(

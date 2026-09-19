@@ -50,6 +50,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         max_daily_summaries=settings.max_daily_summaries,
         source_registry=registry,
         podwise_api_token=settings.podwise_api_token,
+        daily_rss_only=settings.daily_rss_only,
         editorial_policy=EditorialPolicy(summarizer.client, settings.openai_model, store,
                                         settings.research_focus_path) if settings.editorial_enabled else None,
     )
