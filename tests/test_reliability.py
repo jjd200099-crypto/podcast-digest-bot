@@ -119,6 +119,8 @@ def runtime(store, messenger, podcast, plugin=None):
     instance.settings = SimpleNamespace(
         user_open_ids=("ou_test",),
         group_chat_ids=(),
+        # Existing tests exercise the backwards-compatible legacy outbox path.
+        daily_combined_message=False,
     )
     return instance
 

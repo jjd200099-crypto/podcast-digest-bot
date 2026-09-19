@@ -49,6 +49,20 @@ def quoted_context(store, message):
         if not allowed:
             return None
         context = {"message_id": message.parent_message_id}
+        if row["group_key"].startswith("daily:bundle:"):
+            bundle = store.get_job_result(row["job_key"], row["group_key"])
+            if bundle:
+                episodes = []
+                for episode_id in bundle["episode_ids"]:
+                    record = store.get_verified_transcript(episode_id)
+                    if record:
+                        episodes.append({"document_id": record.reference,
+                                         "title": record.episode.title,
+                                         "url": record.episode.url, "show": record.episode.show})
+                context["episodes"] = episodes
+                if len(episodes) == 1:
+                    context["episode"] = episodes[0]
+            return context
         if row["group_key"].startswith("episode:"):
             episode_id = row["group_key"][len("episode:"):]
             record = store.get_verified_transcript(episode_id)

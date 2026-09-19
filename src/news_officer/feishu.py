@@ -166,6 +166,39 @@ def delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[str, str, 
     ]
 
 
+def combined_delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[str, str, str]]:
+    """Prefer one post; measure the serialized request, not visible characters.
+
+    Feishu permits 30 KB for posts and 150 KB for text. A long digest falls
+    back to a single text message before resorting to lossless overflow parts.
+    Keep legacy delivery_parts unchanged for already-frozen/ordinary replies.
+    """
+    body = markdown.strip()
+    if body.startswith(BRAND_HEADER):
+        body = body[len(BRAND_HEADER):].lstrip()
+
+    def fits(kind, content, limit):
+        envelope = {"receive_id": "x" * 128, "msg_type": kind, "content": content,
+                    "uuid": "x" * 36, "reply_in_thread": False}
+        return len(json.dumps(envelope).encode("utf-8")) <= limit
+
+    post = _post_content(body, BRAND_HEADER)
+    if fits("post", post, 29_000):
+        return [("post", post, idempotency_uuid(idempotency_key, 1))]
+    text = json.dumps({"text": brand_message(body)}, ensure_ascii=False)
+    if fits("text", text, 145_000):
+        return [("text", text, idempotency_uuid(idempotency_key, 1))]
+    # Exceptional overflow: preserve every paragraph rather than truncate it.
+    chunks = split_message(body, max_bytes=20_000)
+    parts = []
+    for index, chunk in enumerate(chunks, 1):
+        content = json.dumps({"text": f"{BRAND_HEADER}（第 {index}/{len(chunks)} 段）\n\n{chunk}"}, ensure_ascii=False)
+        if not fits("text", content, 145_000):
+            raise ValueError("Daily message exceeds safe Feishu payload size")
+        parts.append(("text", content, idempotency_uuid(idempotency_key, index)))
+    return parts
+
+
 def _retry_delay(response: requests.Response, attempt: int) -> float:
     value = str(response.headers.get("Retry-After", "") or "").strip()
     if value:

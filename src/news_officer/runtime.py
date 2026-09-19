@@ -5,7 +5,8 @@ import hashlib
 import logging
 import time
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from lark_channel import (
     ChatQueueConfig,
@@ -19,7 +20,12 @@ from lark_channel import (
 
 from .config import Settings
 from .daily_report import coverage_report
-from .feishu import FeishuMessenger, delivery_parts, file_delivery_part
+from .feishu import (
+    FeishuMessenger,
+    combined_delivery_parts,
+    delivery_parts,
+    file_delivery_part,
+)
 from .health import health_snapshot, serve_health, watch_health
 from .models import DailyItem, IncomingMessage, Job, TranscriptAttachment
 from .podcast import PodcastService
@@ -469,7 +475,93 @@ class NewsOfficerRuntime:
             # cause a different payload to be delivered under the same UUID.
             DailyItem.from_persisted_dict(canonical)
 
-    def _prepare_daily_outbox_and_terminal_states(self, job: Job) -> list[DailyItem]:
+    def _combined_daily(self, job: Job) -> bool:
+        if self.store.list_job_results(job.key, "daily_bundle"):
+            return True
+        settings = getattr(self, "settings", None)
+        # Resume old jobs in their original format; never mutate frozen UUIDs.
+        return (getattr(settings, "daily_combined_message", True)
+                and not getattr(settings, "daily_transcript_attachments", False)
+                and not any(p.group_key.startswith(("episode:", "attachment-unavailable:"))
+                            for p in self.store.outbox_items(job.key)))
+
+    def _restore_daily_bundle(self, job, bundle):
+        for delivery in bundle["deliveries"]:
+            self.store.ensure_outbox(
+                job_key=job.key, group_key=bundle["group_key"],
+                delivery_key=delivery["key"], operation="send",
+                target_id=delivery["target_id"], target_type=delivery["target_type"],
+                reply_in_thread=False, parts=[tuple(p) for p in delivery["parts"]],
+            )
+
+    def _prepare_combined_daily(self, job, *, finalize=False):
+        from .daily_report import render_daily_summary
+
+        items = self._persisted_daily_items(job)
+        bundles = self.store.list_job_results(job.key, "daily_bundle")
+        covered = set()
+        for bundle in bundles:
+            self._restore_daily_bundle(job, bundle)
+            covered.update(bundle["episode_ids"])
+        summaries, report_items, notices = [], [], []
+        for item in items:
+            if item.status == "summarized":
+                if item.episode.id in covered:
+                    report_items.append(item)
+                elif self._daily_summary_is_current(item):
+                    summaries.append(item)
+                    report_items.append(item)
+                else:
+                    self.store.record_episode(item.episode, "summary_format_error")
+                    report_items.append(DailyItem(item.episode, "summary_format_error"))
+                    reason = "版本信息已过期" if item.attachment is None else "原稿或摘要版本在发送前发生变化"
+                    notices.append(f"《{item.episode.title}》的{reason}，本次不发送，待重新核验。")
+            elif item.status in {"not_recommended", "no_transcript", "outside_window",
+                                 "summary_format_error", "unverified_date"}:
+                self.store.record_episode(item.episode, item.status)
+                report_items.append(item)
+        catchup = bool(job.payload.get("transcript_catchup"))
+        # A catch-up with nothing ready stays quiet. On retry, previously sent
+        # episodes are represented by their frozen bundle, never re-rendered.
+        if not summaries and (catchup or bundles or not finalize):
+            return items
+        settings = getattr(self, "settings", None)
+        zone = getattr(settings, "timezone", ZoneInfo("Asia/Shanghai"))
+        when = datetime.fromisoformat(job.payload["scheduled_for"]) if job.payload.get("scheduled_for") else datetime.now(zone)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=zone)
+        when = when.astimezone(zone)
+        start = when - timedelta(hours=getattr(settings, "lookback_hours", 24))
+        title = "全文已补齐｜补充摘要" if catchup or bundles else "情报官日报"
+        blocks = [f"{title}｜{when:%Y-%m-%d}｜{len(summaries)} 期"]
+        if not catchup and not bundles:
+            blocks.append(f"统计窗口：{start:%m-%d %H:%M} 至 {when:%m-%d %H:%M}（{zone}）。")
+        if summaries:
+            blocks.append("以下按星级从高到低排列，均基于已核验全文。节目中的数字与预测为嘉宾或公司表述，未经独立审计。")
+        blocks.extend(render_daily_summary(item.message) for item in summaries)
+        blocks.extend(notices)
+        report = coverage_report(report_items)
+        if report and not catchup:
+            blocks.append(report)
+        markdown = "\n\n---\n\n".join(blocks)
+        group = "daily:bundle:" + hashlib.sha256(markdown.encode()).hexdigest()[:20]
+        deliveries = []
+        for target_type, target_id in self._daily_targets(job):
+            key = f"{job.key}:{group}:{target_type}:{target_id}"
+            deliveries.append({"key": key, "target_type": target_type, "target_id": target_id,
+                               "parts": combined_delivery_parts(markdown, key)})
+        if not deliveries:
+            raise RuntimeError("A daily delivery has no active subscribers")
+        bundle = self.store.save_job_result(job.key, group, "daily_bundle", {
+            "group_key": group, "episode_ids": [i.episode.id for i in summaries],
+            "deliveries": deliveries,
+        })
+        self._restore_daily_bundle(job, bundle)
+        return items
+
+    def _prepare_daily_outbox_and_terminal_states(self, job: Job, *, finalize=False) -> list[DailyItem]:
+        if self._combined_daily(job):
+            return self._prepare_combined_daily(job, finalize=finalize)
         items = self._persisted_daily_items(job)
         for item in items:
             if item.status == "summarized":
@@ -555,10 +647,14 @@ class NewsOfficerRuntime:
         )
 
     def _finalize_daily_deliveries(self, job: Job, items: list[DailyItem]) -> None:
+        bundled_sent = set()
+        for bundle in self.store.list_job_results(job.key, "daily_bundle"):
+            if self.store.outbox_group_sent(job.key, bundle["group_key"]):
+                bundled_sent.update(bundle["episode_ids"])
         for item in items:
-            if item.status == "summarized" and self.store.outbox_group_sent(
+            if item.status == "summarized" and (item.episode.id in bundled_sent or self.store.outbox_group_sent(
                 job.key, f"episode:{item.episode.id}"
-            ):
+            )):
                 self.store.record_episode(item.episode, "sent")
                 self.store.complete_daily_transcript(item.episode.id)
 
@@ -601,7 +697,7 @@ class NewsOfficerRuntime:
         failures = sum(item.status == "failed" for item in results)
         await asyncio.to_thread(self._persist_daily_items, job, results)
         persisted = await asyncio.to_thread(
-            self._prepare_daily_outbox_and_terminal_states, job
+            self._prepare_daily_outbox_and_terminal_states, job, finalize=not failures
         )
 
         if failures:
@@ -618,7 +714,7 @@ class NewsOfficerRuntime:
 
         if not failures:
             report = coverage_report(persisted)
-            if report and not job.payload.get('transcript_catchup'):
+            if report and not job.payload.get('transcript_catchup') and not self._combined_daily(job):
                 group = "daily:coverage" if persisted else "daily:empty"
                 await asyncio.to_thread(
                     self._ensure_broadcast,
