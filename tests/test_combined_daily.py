@@ -67,7 +67,7 @@ class CombinedPayloadTests(unittest.TestCase):
             self.assertEqual(rendered.splitlines().count(line), 1)
         for kind, content, uid in parts:
             request = {"receive_id": "x" * 128, "msg_type": kind, "content": content, "uuid": uid}
-            self.assertLess(len(json.dumps(request).encode()), 150_000)
+            self.assertLess(len(encoded_message_payload(request)), 150_000)
 
     def test_bundle_wire_encoding_matches_capacity_check(self):
         text = "观点和依据" * 1400

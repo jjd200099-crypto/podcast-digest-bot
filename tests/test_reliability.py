@@ -586,7 +586,7 @@ class FeishuDeliveryTests(unittest.TestCase):
         self.assertEqual(
             message_calls[1].kwargs["headers"]["Authorization"], "Bearer fresh"
         )
-        payload = message_calls[1].kwargs["json"]
+        payload = json.loads(message_calls[1].kwargs["data"])
         self.assertEqual(payload["msg_type"], "post")
         self.assertTrue(payload["reply_in_thread"])
         self.assertIn("zh_cn", json.loads(payload["content"]))

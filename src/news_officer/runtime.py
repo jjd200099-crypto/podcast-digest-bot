@@ -155,11 +155,18 @@ class NewsOfficerRuntime:
         reply_in_thread: bool,
         file_keys: tuple[str, ...] = (),
     ) -> None:
-        parts = delivery_parts(markdown, idempotency_key)
-        for file_key in file_keys:
-            parts.append(
-                file_delivery_part(file_key, idempotency_key, len(parts) + 1)
-            )
+        existing = [p for p in self.store.outbox_items(job.key)
+                    if p.delivery_key == idempotency_key]
+        if existing:
+            # Upgrade/retry must finish exactly the previously frozen payload,
+            # including any legacy parts or explicitly requested attachments.
+            parts = [(p.msg_type, p.content, p.uuid) for p in existing]
+        else:
+            parts = combined_delivery_parts(markdown, idempotency_key)
+            for file_key in file_keys:
+                parts.append(
+                    file_delivery_part(file_key, idempotency_key, len(parts) + 1)
+                )
         self.store.ensure_outbox(
             job_key=job.key,
             group_key=group_key,
@@ -422,6 +429,16 @@ class NewsOfficerRuntime:
                 replies = (unavailable,)
         if not replies and file_keys:
             replies = ("精编可读版文字稿见附件；原始核验全文已保留用于问答。",)
+        layout = await asyncio.to_thread(self.store.get_job_result, job.key, "message:delivery-layout")
+        if layout is None:
+            previous_parts = await asyncio.to_thread(self.store.outbox_items, job.key)
+            legacy = any(p.delivery_key.startswith(f"{job.key}:result:") for p in previous_parts)
+            if len(replies) > 1 and not legacy:
+                replies = ("\n\n".join(replies),)
+            layout = await asyncio.to_thread(self.store.save_job_result, job.key,
+                                            "message:delivery-layout", "message_delivery_layout",
+                                            {"messages": list(replies)})
+        replies = tuple(layout["messages"])
         context_episode_id = str(persisted.get("context_episode_id") or "")
         for index, reply in enumerate(replies, start=1):
             group_key = (

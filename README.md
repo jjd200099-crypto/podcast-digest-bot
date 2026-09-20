@@ -8,6 +8,8 @@
 
 服务通过飞书官方 WebSocket 长连接收消息，不需要公网回调、Vercel、Verification Token 或逐条触发 GitHub Actions。每个请求先进入 SQLite 持久队列；分析结果和每个收件人的每一段消息再固化到 outbox 后才发送。网络中断、容器重启或单个无效收件人都不会导致重新调用模型、消息混段或阻塞其他群。
 
+群聊和私聊的最终回答也默认合成一条消息，不再按 3,500 字节拆开；保留内部段落和引用。富文本超限时先用单条纯文本，只有连纯文本也超过平台容量才按实际 UTF-8 请求大小拆分，绝不截断正文。单次请求中的多段结果先合并，再持久化排版；重试仍使用相同 UUID 和内容。升级前已准备的旧消息保持原样完成。明确索取的附件、耗时任务的处理中提示和故障通知仍是独立消息。
+
 代码按 `Feishu adapter → command plugins → podcast service → transcript providers → persistent store/outbox` 分层。新增搜索、公司研究等能力时，实现一个独立 plugin 并在 `CommandRouter` 注册即可；只有新能力确实要访问飞书文档、日历等资源时，才需要增量申请相应飞书权限。
 
 ## 云端文件记忆

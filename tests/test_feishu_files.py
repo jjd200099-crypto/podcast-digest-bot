@@ -179,7 +179,7 @@ class FeishuFileTests(unittest.TestCase):
         message_id = self.messenger_with_token().deliver(item)
 
         self.assertEqual(message_id, "om_remote")
-        payload = post.call_args.kwargs["json"]
+        payload = json.loads(post.call_args.kwargs["data"])
         self.assertEqual(payload["msg_type"], "file")
         self.assertEqual(json.loads(payload["content"]), {"file_key": "file_123"})
         self.assertEqual(payload["uuid"], item_uuid)
