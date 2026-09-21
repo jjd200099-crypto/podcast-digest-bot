@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -177,6 +180,75 @@ class SourceRegistry:
             "failures": failures,
             "note": "更新目录来自 RSS 元数据，不是内容摘要或完整文字稿证明。",
         }
+
+    def search_episodes(self, query: str, days: int = 90, show: str = "") -> dict:
+        """Find episodes, not shows, without changing subscriptions or the daily window.
+
+        Match publisher metadata before truncating results. A low-frequency guest
+        must not disappear behind the newest 60 episodes across all feeds.
+        """
+        if not isinstance(query, str) or not 1 <= len(query.strip()) <= 150:
+            raise ValueError("Use a short company, guest or topic query")
+        if type(days) is not int or not 1 <= days <= 365:
+            raise ValueError("Search window must be 1–365 days")
+
+        def normalize(value):
+            return ''.join(c for c in unicodedata.normalize('NFKD', value.casefold())
+                           if not unicodedata.combining(c))
+
+        words = list(dict.fromkeys(re.findall(r'[a-z0-9]+|[\u3400-\u9fff]+', normalize(query))))
+        if not words:
+            raise ValueError("Query needs searchable terms")
+        patterns = [re.compile(r'(?<![a-z0-9])' + re.escape(w) + r'(?![a-z0-9])') for w in words]
+        sources = [s for s in self.list() if not show or show.casefold() in s['name'].casefold()]
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(days=days)
+
+        def scan(source):
+            if not source.get('rss_url'):
+                return [], {'source': source['name'], 'reason': '未配置 RSS，未检查'}, False
+            try:
+                episodes = latest_rss_episodes(source['name'], source['rss_url'], limit=100)
+            except Exception:  # noqa: BLE001 - never confuse provider failure with no match
+                return [], {'source': source['name'], 'reason': 'RSS 获取失败，不能视作没有匹配节目'}, False
+            matches = []
+            for ep in episodes:
+                if ep.published_at and not cutoff <= ep.published_at <= now:
+                    continue
+                title = normalize(ep.title)
+                description = normalize(str(ep.metadata.get('description', '')))
+                title_hits = sum(bool(p.search(title)) for p in patterns)
+                hits = sum(bool(p.search(title + ' ' + description)) for p in patterns)
+                if hits != len(patterns):
+                    continue
+                matches.append({
+                    'title': ep.title, 'show': ep.show, 'url': ep.url,
+                    'published_at': ep.published_at.isoformat() if ep.published_at else None,
+                    'duration_seconds': ep.duration_seconds,
+                    'description': str(ep.metadata.get('description', ''))[:1600],
+                    'match_basis': 'publisher_title' if title_hits == hits else 'publisher_description',
+                    '_score': title_hits * 4 + hits,
+                    '_episode': ep.to_persisted_dict(), '_metadata': ep.metadata,
+                })
+            return matches, None, len(episodes) >= 100
+
+        entries, failures, capped = [], [], []
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for source, (matches, failure, limited) in zip(sources, pool.map(scan, sources)):
+                entries.extend(matches)
+                if failure:
+                    failures.append(failure)
+                if limited:
+                    capped.append(source['name'])
+        entries.sort(key=lambda x: (x['_score'], x['published_at'] or ''), reverse=True)
+        unique = {entry['_episode']['id']: entry for entry in entries}
+        selected = list(unique.values())[:12]
+        for entry in selected:
+            entry.pop('_score', None)
+        return {'query': query, 'days': days, 'checked': [s['name'] for s in sources],
+                'episodes': selected, 'total_matches': len(unique), 'failures': failures,
+                'scan_limit_sources': capped,
+                'note': '仅检索已追踪 RSS，每源至多100期。元数据用于定位，不是全文；未命中不代表全网不存在。'}
 
 
 def valid_feed_url(url: str) -> bool:

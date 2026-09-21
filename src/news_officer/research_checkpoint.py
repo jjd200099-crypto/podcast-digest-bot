@@ -38,6 +38,7 @@ def save_checkpoint(state, messages):
     values['discovered_episodes'] = {k: {'episode': v.to_persisted_dict(), 'metadata': v.metadata}
                                      for k, v in state.discovered_episodes.items()}
     values['diagnosed'] = getattr(state, 'diagnosed', False)
+    values['episode_search_attempted'] = getattr(state, 'episode_search_attempted', False)
     payload = {'version': 1, 'messages': messages, 'state': values,
                'total_calls': getattr(state, 'total_model_calls', 0)}
     encoded = json.dumps(payload, ensure_ascii=False)
@@ -66,5 +67,6 @@ def restore_checkpoint(state):
     state.discovered_episodes = {k: replace(Episode.from_persisted_dict(v['episode']), metadata=v['metadata'])
                                  for k, v in values['discovered_episodes'].items()}
     state.diagnosed = values['diagnosed']
+    state.episode_search_attempted = values.get('episode_search_attempted', False)
     state.total_model_calls = payload['total_calls']
     return payload['messages']
