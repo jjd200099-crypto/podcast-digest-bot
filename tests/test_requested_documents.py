@@ -14,6 +14,7 @@ from news_officer.research_checkpoint import (
     restore_checkpoint,
     save_checkpoint,
 )
+from news_officer.research_context import quoted_context
 from news_officer.shownotes import (
     chapter_outline,
     note_identity,
@@ -107,6 +108,19 @@ class RequestedDocuments(unittest.TestCase):
         self.f.store.fail(job.key, 'network', 5, failed_daily_requeue_seconds=0)
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
         self.assertEqual(self.f.store.claim_next('document').key, job.key)
+
+    def test_quoted_document_link_resolves_for_another_colleague_only_in_same_chat(self):
+        job = self.request()
+        result = self.compiler.publish(job)
+        self.f.store.ensure_outbox(job_key=job.key, group_key='document:link', delivery_key='link',
+                                 operation='reply', target_id='msg1', target_type='', reply_in_thread=True,
+                                 parts=[('text', result['documents'][0]['url'], 'uuid')])
+        row = self.f.store.outbox_items(job.key)[0]
+        self.f.store.mark_outbox_sent(row.id, 'published-link')
+        reply = replace(self.message, message_id='follow-up', sender_open_id='other-colleague',
+                        parent_message_id='published-link', text='这篇继续讲讲')
+        self.assertEqual(quoted_context(self.f.store, reply)['episode']['document_id'], self.f.record.reference)
+        self.assertIsNone(quoted_context(self.f.store, replace(reply, chat_id='foreign')))
 
     def test_publisher_metadata_survives_archive_and_anchors_are_exact(self):
         ep = replace(self.f.record.episode, duration_seconds=1432,

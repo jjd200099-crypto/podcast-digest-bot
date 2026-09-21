@@ -49,6 +49,26 @@ def quoted_context(store, message):
         if not allowed:
             return None
         context = {"message_id": message.parent_message_id}
+        if row['group_key'] == 'document:link':
+            # A colleague may reply to another colleague's generated document.
+            # Recover only episodes actually linked in this visible delivery.
+            bundle = store.get_job_result(row['job_key'], 'episodes:content') or {}
+            episodes = []
+            for document in bundle.get('documents', []):
+                key = document.get('key', '')
+                if not key.startswith('episode:'):
+                    continue
+                published = db.execute('SELECT document_id FROM daily_documents WHERE day=?', (key,)).fetchone()
+                if not published or published[0] not in row['content']:
+                    continue
+                record = store.get_verified_transcript(key[len('episode:'):])
+                if record:
+                    episodes.append({'document_id': record.reference, 'title': record.episode.title,
+                                     'url': record.episode.url, 'show': record.episode.show})
+            context['episodes'] = episodes
+            if len(episodes) == 1:
+                context['episode'] = episodes[0]
+            return context
         if row["group_key"].startswith("daily:bundle:"):
             bundle = store.get_job_result(row["job_key"], row["group_key"])
             if bundle:
