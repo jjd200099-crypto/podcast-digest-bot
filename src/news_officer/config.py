@@ -60,6 +60,9 @@ class Settings:
     research_focus_path: Path | None = None
     daily_rss_only: bool = True
     podwise_auto_process: bool = False
+    daily_document_enabled: bool = False
+    daily_document_start_date: str = ''
+    daily_document_folder: str = ''
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -184,4 +187,7 @@ class Settings:
             daily_transcript_attachments=os.environ.get(
                 "NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS", "false"
             ).lower() == "true",
+            daily_document_enabled=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT', 'false').lower() == 'true',
+            daily_document_start_date=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_START_DATE', ''),
+            daily_document_folder=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FOLDER', ''),
         )

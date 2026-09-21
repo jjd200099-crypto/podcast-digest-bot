@@ -58,7 +58,9 @@ class NewsOfficerRuntime:
         self.wake_workers = {
             "message": asyncio.Event(),
             "daily": asyncio.Event(),
+            "document": asyncio.Event(),
         }
+        self.document_compiler = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self.channel = FeishuChannel(
             app_id=settings.feishu_app_id,
@@ -773,6 +775,22 @@ class NewsOfficerRuntime:
                 work.cancel()
 
     async def _failure_notice(self, job, terminal):
+        if job.kind == 'document' and terminal:
+            try:
+                active = set(self.store.list_subscriptions())
+                content = (f"{job.payload['day']} 的播客精读文档暂未编译完成，云端会继续重试。"
+                           "短版日报与聊天问答不受影响；尚未完成的文档不会作为成品推送。")
+                for kind, target in job.payload['targets']:
+                    if (kind, target) not in active:
+                        continue
+                    key = f"{job.key}:document-delayed:{kind}:{target}"
+                    self.store.ensure_outbox(job_key=job.key, group_key='document:delayed',
+                        delivery_key=key, operation='send', target_id=target, target_type=kind,
+                        reply_in_thread=False, parts=combined_delivery_parts(content, key))
+                await self._drain_outbox(job)
+            except Exception as error:  # noqa: BLE001 - durable retry boundary
+                logger.warning('Document failure notice deferred: %s', type(error).__name__)
+            return
         if job.kind != 'message':
             return
         message_id = job.payload.get('message_id')
@@ -808,6 +826,8 @@ class NewsOfficerRuntime:
                     await self._handle_message_job(job)
                 elif kind == "daily":
                     await self._handle_daily_job(job)
+                elif kind == "document":
+                    await self._handle_document_job(job)
                 else:
                     raise ValueError(f"Unknown job kind: {job.kind}")
             except Exception as error:  # noqa: BLE001 - durable worker retry boundary
@@ -865,7 +885,23 @@ class NewsOfficerRuntime:
                     {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
                 if inserted:
                     self._wake_worker('daily')
+            if (has_subscribers and getattr(self, 'document_compiler', None)
+                    and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat())):
+                self._wake_worker('document')
             await asyncio.sleep(30)
+
+    async def _handle_document_job(self, job):
+        result = await asyncio.to_thread(self.document_compiler.publish, job)
+        if result and result['notify']:
+            content = (f"{result['title']}已整理完成，共 {result['count']} 期。"
+                       "\n\n文档内含带时间戳的核心论点与分章节精读，不附整期实录。"
+                       f"\n\n[打开今日播客精读]({result['url']})")
+            for kind, target in result['targets']:
+                key = f"{job.key}:document-link:{kind}:{target}"
+                self.store.ensure_outbox(job_key=job.key, group_key='document:link',
+                    delivery_key=key, operation='send', target_id=target, target_type=kind,
+                    reply_in_thread=False, parts=combined_delivery_parts(content, key))
+        await self._drain_outbox(job)
 
     async def _library_archiver(self) -> None:
         while True:
@@ -891,6 +927,8 @@ class NewsOfficerRuntime:
     async def run(self) -> None:
         self._main_loop = asyncio.get_running_loop()
         self.store.initialize()
+        if getattr(self, 'document_compiler', None) is not None:
+            self.document_compiler.initialize()
         if self.research_agent is not None:
             self.research_agent.initialize()
             logger.info("Research execution: %s (model=%s)", self.research_agent.backend, self.settings.openai_model)
@@ -911,6 +949,8 @@ class NewsOfficerRuntime:
             asyncio.create_task(self._scheduler(), name="daily-scheduler"),
             asyncio.create_task(self._channel_loop(), name="feishu-channel"),
         ]
+        if getattr(self, 'document_compiler', None) is not None:
+            tasks.append(asyncio.create_task(self._worker('document'), name='document-worker'))
         if self.research_agent is not None and (
             self.research_agent.library.folder
             or getattr(self.research_agent.library, "archive_root", None)

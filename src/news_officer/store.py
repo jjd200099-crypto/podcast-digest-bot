@@ -409,13 +409,13 @@ class Store:
             # A daily job that exhausted its immediate retries may be revived
             # later the same day by the scheduler. Its immutable results and
             # outbox are deliberately retained and resumed.
-            if kind != "daily":
+            if kind not in {"daily", "document"}:
                 return False
             revived = connection.execute(
                 """
                 UPDATE jobs
                 SET status = 'pending', attempts = 0, updated_at = ?
-                WHERE job_key = ? AND kind = 'daily' AND status = 'failed'
+                WHERE job_key = ? AND kind IN ('daily','document') AND status = 'failed'
                     AND available_at <= ?
                 """,
                 (now, key, now),
@@ -498,7 +498,7 @@ class Store:
             status = "failed"
             available_at = now + timedelta(
                 seconds=max(0, failed_daily_requeue_seconds)
-                if self.job_kind(key) == "daily"
+                if self.job_kind(key) in {"daily", "document"}
                 else 0
             )
         with self._connect() as connection:
