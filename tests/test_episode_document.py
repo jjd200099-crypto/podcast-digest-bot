@@ -20,6 +20,11 @@ class SelectedDocuments(unittest.TestCase):
         self.compiler = SelectedEpisodeCompiler(f.store, f.api, f.writer, start_date='2026-09-21')
         self.compiler.initialize()
         self.rate('one', 4)
+        f.store.ensure_outbox(job_key=f.base, group_key='daily:bundle:test', delivery_key='daily-test',
+                             operation='send', target_id='oc_test', target_type='chat_id',
+                             reply_in_thread=False, parts=[('text', 'daily', 'daily-uuid')])
+        f.store.mark_outbox_sent(f.store.outbox_items(f.base)[0].id)
+        f.store.complete(f.base)
 
     def rate(self, identity, rating):
         store = self.fixture.store
@@ -38,7 +43,7 @@ class SelectedDocuments(unittest.TestCase):
         f.add_episode('two')
         f.add_episode('low')
         self.rate('two', 5)
-        self.rate('low', 3)
+        self.rate('low', 2)
         before = f.store.list_job_results(f.base, 'daily_item')
         job = self.job()
         result = self.compiler.publish(job)
@@ -55,10 +60,26 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(f.api.creates, 2)
 
     def test_no_high_rating_means_no_extra_message_or_document(self):
-        self.rate('one', 3)
+        self.rate('one', 2)
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
         self.assertEqual(self.fixture.api.creates, 0)
         self.assertEqual(stars('没有评级'), 0)
+
+    def test_three_stars_is_included(self):
+        self.rate('one', 3)
+        self.assertEqual(self.compiler.publish(self.job())['count'], 1)
+
+    def test_daily_must_finish_delivery_before_document_enqueue(self):
+        f = self.fixture
+        with f.store._connect() as db:
+            db.execute("UPDATE jobs SET status='pending' WHERE job_key=?", (f.base,))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        with f.store._connect() as db:
+            db.execute("UPDATE jobs SET status='completed' WHERE job_key=?", (f.base,))
+            db.execute("UPDATE outbox SET status='pending' WHERE job_key=?", (f.base,))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        f.store.mark_outbox_sent(f.store.outbox_items(f.base)[0].id)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
 
     def test_legacy_combined_job_is_retired_without_writing(self):
         self.assertIsNone(self.compiler.publish(self.fixture.job()))

@@ -203,6 +203,9 @@ class Store:
                 """
             )
             # Forward-compatible migration for databases created by 0.1.x.
+            transcript_columns = {str(row['name']) for row in connection.execute('PRAGMA table_info(episode_transcripts)')}
+            if 'episode_metadata_json' not in transcript_columns:
+                connection.execute("ALTER TABLE episode_transcripts ADD COLUMN episode_metadata_json TEXT NOT NULL DEFAULT '{}'")
             columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
@@ -782,6 +785,7 @@ class Store:
                 title=str(row["title"]),
                 url=str(row["episode_url"]),
                 show=str(row["show_name"]),
+                metadata=json.loads(row['episode_metadata_json'] or '{}'),
                 duration_seconds=(
                     float(row["duration_seconds"])
                     if row["duration_seconds"] is not None
@@ -867,6 +871,11 @@ class Store:
                 ),
             )
             # Read back through the same write transaction. A second worker
+            metadata = {k: episode.metadata[k] for k in ('description', 'chapters', 'rss_feed_url', 'audio_url', 'youtube_url')
+                        if k in episode.metadata}
+            if metadata:
+                connection.execute('UPDATE episode_transcripts SET episode_metadata_json=? WHERE episode_id=?',
+                                   (json.dumps(metadata, ensure_ascii=False), episode.id))
             # cannot replace this episode between the upsert and snapshot;
             # callers therefore summarize exactly the revision they saved.
             row = connection.execute(

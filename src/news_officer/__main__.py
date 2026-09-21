@@ -98,7 +98,10 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
             store, FeishuLibraryAPI(messenger), ShownotesWriter(summarizer.client, settings.openai_model),
             folder=settings.daily_document_folder, start_date=settings.daily_document_start_date,
             min_stars=settings.daily_document_min_stars,
+            request_authorizer=research.allowed if research else None,
         )
+        if research:
+            research.document_compiler = runtime.document_compiler
     return runtime
 
 

@@ -777,6 +777,14 @@ class NewsOfficerRuntime:
     async def _failure_notice(self, job, terminal):
         if job.kind == 'document' and terminal:
             try:
+                if job.payload.get('mode') == 'requested_episode':
+                    if self.document_compiler.request_allowed(job.payload):
+                        await asyncio.to_thread(self._ensure_reply, job, 'document:delayed',
+                            '这期文档还未编译完成，云端会继续重试；完成后会在这里回复链接，不需要重复发送。',
+                            job.payload['message_id'], f'{job.key}:document-delayed',
+                            job.payload.get('reply_in_thread', False))
+                        await self._drain_outbox(job)
+                    return
                 active = set(self.store.list_subscriptions())
                 content = (f"{job.payload['day']} 的播客精读文档暂未编译完成，云端会继续重试。"
                            "短版日报与聊天问答不受影响；尚未完成的文档不会作为成品推送。")
@@ -885,7 +893,7 @@ class NewsOfficerRuntime:
                     {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
                 if inserted:
                     self._wake_worker('daily')
-            if (has_subscribers and getattr(self, 'document_compiler', None)
+            if (getattr(self, 'document_compiler', None)
                     and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat())):
                 self._wake_worker('document')
             await asyncio.sleep(30)
@@ -894,17 +902,22 @@ class NewsOfficerRuntime:
         result = await asyncio.to_thread(self.document_compiler.publish, job)
         if result and result['notify']:
             if 'documents' in result:
-                lines = [result['title'], '以下重点节目已分别编译成独立文档，早间文字日报保持不变。']
+                lines = [result['title']]
+                if not result.get('reply_to'):
+                    lines.append('以下重点节目已分别编译成独立文档，早间文字日报保持不变。')
                 for document in result['documents']:
                     title = document['title'].replace('[', '（').replace(']', '）')
-                    rating = '★' * document['stars'] + '☆' * (5 - document['stars'])
+                    rating = ('★' * document['stars'] + '☆' * (5 - document['stars'])) if document['stars'] else ''
                     lines.append(f"{rating} [{title}]({document['url']})")
                 content = '\n\n'.join(lines)
             else:
                 content = (f"{result['title']}已整理完成，共 {result['count']} 期。"
                            "\n\n文档内含带时间戳的核心论点与分章节精读，不附整期实录。"
                            f"\n\n[打开今日播客精读]({result['url']})")
-            for kind, target in result['targets']:
+            if result.get('reply_to'):
+                await asyncio.to_thread(self._ensure_reply, job, 'document:link', content,
+                    result['reply_to'], f'{job.key}:document-link', result.get('reply_in_thread', False))
+            for kind, target in (() if result.get('reply_to') else result['targets']):
                 key = f"{job.key}:document-link:{kind}:{target}"
                 self.store.ensure_outbox(job_key=job.key, group_key='document:link',
                     delivery_key=key, operation='send', target_id=target, target_type=kind,
