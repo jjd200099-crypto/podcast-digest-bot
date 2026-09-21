@@ -63,6 +63,7 @@ class Settings:
     daily_document_enabled: bool = False
     daily_document_start_date: str = ''
     daily_document_folder: str = ''
+    daily_document_min_stars: int = 4
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -190,4 +191,5 @@ class Settings:
             daily_document_enabled=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT', 'false').lower() == 'true',
             daily_document_start_date=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_START_DATE', ''),
             daily_document_folder=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FOLDER', ''),
+            daily_document_min_stars=int(os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS', '4')),
         )

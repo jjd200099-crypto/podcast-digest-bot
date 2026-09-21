@@ -893,9 +893,17 @@ class NewsOfficerRuntime:
     async def _handle_document_job(self, job):
         result = await asyncio.to_thread(self.document_compiler.publish, job)
         if result and result['notify']:
-            content = (f"{result['title']}已整理完成，共 {result['count']} 期。"
-                       "\n\n文档内含带时间戳的核心论点与分章节精读，不附整期实录。"
-                       f"\n\n[打开今日播客精读]({result['url']})")
+            if 'documents' in result:
+                lines = [result['title'], '以下重点节目已分别编译成独立文档，早间文字日报保持不变。']
+                for document in result['documents']:
+                    title = document['title'].replace('[', '（').replace(']', '）')
+                    rating = '★' * document['stars'] + '☆' * (5 - document['stars'])
+                    lines.append(f"{rating} [{title}]({document['url']})")
+                content = '\n\n'.join(lines)
+            else:
+                content = (f"{result['title']}已整理完成，共 {result['count']} 期。"
+                           "\n\n文档内含带时间戳的核心论点与分章节精读，不附整期实录。"
+                           f"\n\n[打开今日播客精读]({result['url']})")
             for kind, target in result['targets']:
                 key = f"{job.key}:document-link:{kind}:{target}"
                 self.store.ensure_outbox(job_key=job.key, group_key='document:link',

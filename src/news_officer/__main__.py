@@ -92,11 +92,12 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         settings, store, messenger, router, podcast, research_agent=research
     )
     if settings.daily_document_enabled:
-        from .daily_document import DailyDocumentCompiler
+        from .episode_document import SelectedEpisodeCompiler
         from .shownotes import ShownotesWriter
-        runtime.document_compiler = DailyDocumentCompiler(
+        runtime.document_compiler = SelectedEpisodeCompiler(
             store, FeishuLibraryAPI(messenger), ShownotesWriter(summarizer.client, settings.openai_model),
             folder=settings.daily_document_folder, start_date=settings.daily_document_start_date,
+            min_stars=settings.daily_document_min_stars,
         )
     return runtime
 
