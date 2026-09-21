@@ -37,6 +37,9 @@ SQLite retains event deduplication, session isolation and outbox delivery.
    redundant transcription step fixes this failure without admitting invented
    IDs or unread evidence. Legacy direct callers supplying a quotation still
    have it checked. Visible text must remain original summary, not copying.
+   Both brief and detailed replies collect cited URLs into one deduplicated
+   source footer, in first-use order. The body no longer repeats the same
+   episode link after every point; every point still passes evidence checks.
 5. Validation failures supply specific correction feedback and are stored in
    `research_run_state.audit_json`. Audit includes model calls, outcome and reading
    coverage, not raw tool outputs, secrets or private model reasoning. Exhaustion

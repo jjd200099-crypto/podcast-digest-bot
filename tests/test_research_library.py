@@ -1134,6 +1134,34 @@ class ResearchTests(LibraryFixture):
             answer["points"][0]["citations"] = [{"id": "d:C0001"}]
             self.assertIn("https://example.test/noam", self.state.render(answer))
 
+    def test_brief_citations_are_deduplicated_in_one_footer(self):
+        doc = LibraryDocument("d", "Town CEO", "https://example.test/town", "Verified transcript body")
+        with patch.object(self.library, "snapshot", return_value=([doc], [])):
+            self.state.execute("set_research_task", {"goal": "重点总结", "document_ids": ["d"], "format": "brief"})
+            self.state.execute("read_document", {"document_id": "d", "start": 0})
+            points = [{"text": f"{i}. 原文支持的第{i}条要点。", "citations": [{"id": "d:C0001"}]}
+                      for i in range(1, 9)]
+            value = {"kind": "answer", "message": "", "points": points}
+            rendered = self.state.render(value)
+            self.assertEqual(rendered.count(doc.url), 1)
+            self.assertEqual(rendered.split('\n\n来源：')[0], '\n\n'.join(p['text'] for p in points))
+            self.assertTrue(rendered.endswith(f"来源：[{doc.title}]({doc.url})"))
+            # Deduplicating presentation must not skip validation of later points.
+            points[-1]['citations'] = [{'id': 'invented'}]
+            with self.assertRaises(ValueError):
+                self.state.render(value)
+
+    def test_comparison_keeps_each_distinct_source_once_in_first_use_order(self):
+        first = self.state.evidence_item('first source', 'https://example.test/first', 'First')
+        second = self.state.evidence_item('second source', 'https://example.test/second', 'Second')
+        rendered = self.state.render({'kind': 'answer', 'message': '', 'points': [
+            {'text': '比较两个来源。', 'citations': [{'id': first['evidence_id']}, {'id': second['evidence_id']}]},
+            {'text': '继续解释两个来源。', 'citations': [{'id': second['evidence_id']}, {'id': first['evidence_id']}]},
+        ]})
+        self.assertEqual(rendered.count(first['url']), 1)
+        self.assertEqual(rendered.count(second['url']), 1)
+        self.assertTrue(rendered.endswith('来源：[First](https://example.test/first)；[Second](https://example.test/second)'))
+
     def test_quoted_episode_is_in_real_sdk_input(self):
         record = self.archive_record()
         self.publish_quote("episode:" + record.episode.id)

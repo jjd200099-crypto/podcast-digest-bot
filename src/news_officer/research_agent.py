@@ -143,6 +143,7 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
 7. 最终只输出 JSON：{"kind":"answer"或"conversation","message":"简短说明/澄清/寒暄","points":[{"text":"中文正文段落，可含 Markdown 主题标题和子话题","citations":[{"id":"工具实际返回的 evidence_id"}]}]}。
 默认只提供摘要、推荐理由、星级和收听链接，不主动调用 get_transcript 或附送全文。只有用户明确索取文字稿附件时才调用 get_transcript。
 answer 时 message 必须为空，所有可见正文（包括“已添加成功”等操作结果）放进 points，每段必须有至少一个有效引用。只用本轮实际看到的 evidence_id；不能引用未读段落。引用是已核验原文的段落编号，不需要抄写原句。正文用自己的话归纳，避免长篇复述或大段引用。引用对应的正文必须真正支持本段观点，不能只靠标题或人名。
+points.text 不要手写来源链接；每段仍填写 citations 供内部核验，后端会将所有来源去重后统一放在回复末尾。同一期的链接不要反复展示。
 conversation 用于一般问题、改写、寒暄、诊断、真正缺少信息时的澄清、请求确认和解释限制；完整回答都放 message，points 为空，不可夹带没有证据的节目内容。来源清单用 answer，由工具元数据支持。
 输出深度服从当前研究任务，不把日报模板套进交互问答。brief 最多12段，每段400字以内。detailed 为结构化详细纪要：先逐页读取目标文档直至覆盖全部 chunks，再按主题写6–24个正文段落，每段可到1000字，通常总计1800–3500中文字；保留重要论据、数字、推理链、反共识判断和嘉宾观点的条件，不凑字数。不要逐字翻译，不遗漏主要主题；去掉广告、寒暄、重复与个人敏感信息。公开嘉宾可使用姓名，不能猜测说话人。每个主题使用 Markdown 标题，引用自动汇总到文末。不要再问“要不要详细版”，应直接交付详细内容。
 不要为了符合格式牺牲实质任务：按用户指定的节目、人物、主题、时间范围完成；超出工具上限时明确说明已覆盖的范围。
@@ -809,7 +810,6 @@ class ResearchTools:
                 # The authoritative directory already presents these facts. Do not
                 # repeat model-generated counts, dates, or content inferred from titles.
                 continue
-            links = []
             for citation in point["citations"]:
                 if set(citation) not in ({"id"}, {"id", "quote"}):
                     raise ValueError("Invalid citation")
@@ -833,15 +833,9 @@ class ResearchTools:
                         .replace("]", "］")
                         .replace("\n", " ")
                     )
-                    if detailed:
-                        sources[evidence["url"]] = label
-                    else:
-                        links.append(f"[{label}]({evidence['url']})")
-            lines.append(
-                point["text"]
-                + ("（" + "；".join(dict.fromkeys(links)) + "）" if links else "")
-            )
-        if detailed and sources:
+                    sources.setdefault(evidence["url"], label)
+            lines.append(point["text"])
+        if sources:
             lines.append("来源：" + "；".join(f"[{label}]({url})" for url, label in sources.items()))
         if self.warnings or self.tool_warnings:
             lines.append(
