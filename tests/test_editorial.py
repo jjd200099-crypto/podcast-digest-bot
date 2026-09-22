@@ -40,6 +40,7 @@ def source_assessment(**scores):
     value = assessment(**scores).model_dump()
     for key in ('relevance', 'density'):
         value[key] = {'score': value[key]['score'], 'evidence_ids': [1]}
+    value['relevance']['priority'] = 'none'
     return SourceAssessment.model_validate(value)
 
 
@@ -75,6 +76,40 @@ class EditorialTests(unittest.TestCase):
         value['focus'] = {'score': 5, 'quotes': [TEXT]}
         with self.assertRaises(ValueError):
             Assessment.model_validate(value)
+
+    def test_priority_topics_have_full_read_floor_without_inflating_density(self):
+        for topic in ('model_lab', 'ai_unicorn_founder'):
+            for density in range(6):
+                value = assessment(relevance=5, density=density)
+                value.relevance.priority = topic
+                decision = decide(value, FULL_TEXT)
+                self.assertTrue(decision['selected'])
+                self.assertEqual(decision['stars'], 5 if density == 5 else 4)
+                self.assertEqual(decision['assessment']['density']['score'], density)
+
+    def test_priority_requires_valid_relevance_evidence(self):
+        value = assessment(relevance=1, density=4)
+        value.relevance.priority = 'model_lab'
+        with self.assertRaises(ValueError):
+            decide(value, FULL_TEXT)
+        value.relevance.score = 5
+        value.relevance.quotes = ['OpenAI source evidence invented outside the transcript']
+        with self.assertRaises(ValueError):
+            decide(value, FULL_TEXT)
+
+    def test_source_priority_is_preserved_and_required(self):
+        value = source_assessment(relevance=5, density=2)
+        value.relevance.priority = 'model_lab'
+        resolved = resolve_evidence(value, [TEXT])
+        self.assertEqual(resolved.relevance.priority, 'model_lab')
+        self.assertEqual(decide(resolved, TEXT)['stars'], 4)
+        raw = value.model_dump()
+        raw['relevance'].pop('priority')
+        with self.assertRaises(ValueError):
+            SourceAssessment.model_validate(raw)
+        raw['relevance']['priority'] = 'celebrity'
+        with self.assertRaises(ValueError):
+            SourceAssessment.model_validate(raw)
 
     def test_density_five_needs_two_distinct_source_excerpts(self):
         value = assessment(density=5)
