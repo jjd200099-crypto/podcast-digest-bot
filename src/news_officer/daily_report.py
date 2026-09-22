@@ -13,7 +13,10 @@ def render_daily_summary(markdown: str) -> str:
     markdown = re.sub(
         r'(?m)(^推荐理由：[^\r\n]*?)（AI \d+/40，投资 \d+/20，研究关联 \d+/5，增量 \d+/20，论据 \d+/15）[ \t]*$',
         r'\1', markdown)
-    return re.sub(r'(?m)^(推荐星级：[★☆]{5})（[1-5]/5，编辑推荐）[ \t]*$', r'\1', markdown)
+    markdown = re.sub(r'(?m)^(推荐星级：[★☆]{5})（[1-5]/5，编辑推荐）[ \t]*$', r'\1', markdown)
+    advice = {5: '值得编译', 4: '值得看全文', 3: '看摘要即可', 2: '可跳过', 1: '可跳过'}
+    return re.sub(r'(?m)^(推荐星级：([★☆]{5}))[ \t]*$',
+                  lambda m: m[1] + '｜' + advice.get(m[2].count('★'), '未评级'), markdown)
 
 
 def ranked_daily_items(items: list[DailyItem]) -> list[DailyItem]:

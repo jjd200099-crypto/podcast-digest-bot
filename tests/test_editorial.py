@@ -22,22 +22,24 @@ from news_officer.store import Store
 from news_officer.summarizer import _valid_editorial_summary
 
 TEXT = 'ExampleCo describes model inference costs and enterprise customer retention with concrete figures.'
+DETAIL = 'The research team explains its experiment design and the failure cases behind its revised training method.'
+FULL_TEXT = TEXT + ' ' + DETAIL
 PROFILE = [{'name': 'ExampleCo', 'aliases': ['Example Company'], 'expires_on': '2026-12-31'}]
 SUMMARY = '推荐理由：这期讨论推理成本与企业客户留存。\n\n1. 推理成本影响企业客户的单位经济模型。\n\n推荐星级：★★★★★（5/5，编辑推荐）'
 
 
 def assessment(**scores):
     return Assessment.model_validate({
-        **{key: {'score': scores.get(key, 4), 'quote': TEXT}
-           for key in ('ai', 'investment', 'focus', 'novelty', 'evidence')},
-        'focus_company': 'ExampleCo', 'reason': '这期具体分析推理成本如何影响企业客户留存，能帮助检验商业模式。',
+        **{key: {'score': scores.get(key, 4), 'quotes': [TEXT, DETAIL]}
+           for key in ('relevance', 'density')},
+        'reason': '这期具体分析推理成本如何影响企业客户留存，能帮助检验商业模式。',
     })
 
 
 def source_assessment(**scores):
     value = assessment(**scores).model_dump()
-    for key in ('ai', 'investment', 'focus', 'novelty', 'evidence'):
-        value[key] = {'score': value[key]['score'], 'evidence_id': 1}
+    for key in ('relevance', 'density'):
+        value[key] = {'score': value[key]['score'], 'evidence_ids': [1]}
     return SourceAssessment.model_validate(value)
 
 
@@ -52,39 +54,40 @@ class EditorialTests(unittest.TestCase):
                                published_at=datetime.now(UTC), duration_seconds=300)
         self.transcript = Transcript(TEXT, 'official', 'https://example.org/transcript', True)
 
-    def test_high_quality_without_ai_or_investment_is_not_selected(self):
-        for weak in ('ai', 'investment'):
-            decision = decide(assessment(**{weak: 2, 'novelty': 5, 'evidence': 5}), TEXT, PROFILE)
+    def test_either_low_dimension_prevents_selection(self):
+        for weak in ('relevance', 'density'):
+            decision = decide(assessment(**{weak: 2}), FULL_TEXT)
             self.assertFalse(decision['selected'])
-        self.assertFalse(decide(assessment(ai=3, investment=5, focus=5, novelty=5, evidence=5), TEXT, PROFILE)['selected'])
 
-    def test_weights_thresholds_and_five_star_quality_cap(self):
-        decision = decide(assessment(), TEXT, PROFILE)
-        self.assertEqual((decision['total'], decision['stars'], decision['selected']), (80, 4, True))
-        decision = decide(assessment(ai=5, investment=5, focus=5, novelty=5, evidence=5), TEXT, PROFILE)
-        self.assertEqual((decision['total'], decision['stars']), (100, 5))
-        unfocused = decide(assessment(ai=5, investment=5, focus=5, novelty=5, evidence=5), TEXT, [])
-        self.assertEqual((unfocused['total'], unfocused['stars'], unfocused['selected']), (95, 5, True))
-        decision = decide(assessment(ai=5, investment=5, focus=5, novelty=5, evidence=3), TEXT, PROFILE)
-        self.assertEqual(decision['total'], 94)
-        self.assertEqual(decision['stars'], 4)
+    def test_two_dimensions_and_exceptional_double_five_gate(self):
+        for relevance, density, stars in [(5, 5, 5), (5, 4, 4), (4, 5, 4),
+                                           (4, 4, 4), (3, 5, 4), (5, 3, 3),
+                                           (3, 3, 3), (5, 2, 2), (2, 5, 2), (1, 5, 1)]:
+            with self.subTest(relevance=relevance, density=density):
+                decision = decide(assessment(relevance=relevance, density=density), FULL_TEXT)
+                self.assertEqual(decision['stars'], stars)
+                self.assertEqual(decision['total'], (relevance + density) * 10)
+                self.assertEqual(decision['selected'], stars >= 3)
 
-    def test_incidental_unknown_and_substring_company_get_no_bonus(self):
-        for value, profile in [(assessment(focus=1), PROFILE), (assessment(), []),
-                               (assessment(), [{'name': 'ExampleCo', 'aliases': ['AI']}])]:
-            text = TEXT if profile != [{'name': 'ExampleCo', 'aliases': ['AI']}] else TEXT.replace('ExampleCo', 'NotExampleCoXYZ')
-            if text != TEXT:
-                value.focus.quote = text
-                for key in ('ai', 'investment', 'novelty', 'evidence'):
-                    getattr(value, key).quote = text
-            decision = decide(value, text, profile)
-            self.assertEqual(decision['assessment']['focus']['score'], 0)
+    def test_private_company_profile_cannot_add_a_third_score(self):
+        self.assertEqual(decide(assessment(), FULL_TEXT, PROFILE), decide(assessment(), FULL_TEXT, []))
+        value = assessment().model_dump()
+        value['focus'] = {'score': 5, 'quotes': [TEXT]}
+        with self.assertRaises(ValueError):
+            Assessment.model_validate(value)
+
+    def test_density_five_needs_two_distinct_source_excerpts(self):
+        value = assessment(density=5)
+        for quotes in ([TEXT], [TEXT, TEXT]):
+            value.density.quotes = quotes
+            with self.assertRaises(ValueError):
+                decide(value, FULL_TEXT)
 
     def test_invented_evidence_and_unverified_transcript_rejected(self):
         value = assessment()
-        value.ai.quote = 'This evidence does not exist in the transcript.'
+        value.relevance.quotes = ['This evidence does not exist in the transcript.']
         with self.assertRaises(ValueError):
-            decide(value, TEXT, PROFILE)
+            decide(value, FULL_TEXT)
         client = Mock()
         policy = EditorialPolicy(client, 'test', self.store)
         with self.assertRaises(ValueError):
@@ -101,7 +104,7 @@ class EditorialTests(unittest.TestCase):
 
     def test_invalid_evidence_has_one_bounded_repair_and_never_gets_cached(self):
         invalid = source_assessment()
-        invalid.ai.evidence_id = 999
+        invalid.relevance.evidence_ids = [999]
         client = Mock()
         client.responses.create.side_effect = [
             SimpleNamespace(output_text=invalid.model_dump_json()),
@@ -128,21 +131,27 @@ class EditorialTests(unittest.TestCase):
         self.assertEqual(''.join(blocks), text)
         self.assertTrue(all(len(block) <= 450 for block in blocks))
         result = resolve_evidence(source_assessment(), blocks)
-        self.assertEqual(result.ai.quote, blocks[0])
+        self.assertEqual(result.relevance.quotes, [blocks[0]])
         invalid = source_assessment()
-        invalid.ai.evidence_id = 0
-        with self.assertRaises(ValueError):
-            resolve_evidence(invalid, blocks)
+        for ids in ([0], [1, 1], [len(blocks) + 1], []):
+            invalid.relevance.evidence_ids = ids
+            with self.assertRaises(ValueError):
+                resolve_evidence(invalid, blocks)
+        for ids in ([True], ['1'], [0]):
+            value = source_assessment().model_dump()
+            value['relevance']['evidence_ids'] = ids
+            with self.assertRaises(ValueError):
+                SourceAssessment.model_validate(value)
 
     def test_score_and_reason_override_freeform_stars_with_valid_format(self):
-        decision = decide(assessment(), TEXT, PROFILE)
+        decision = decide(assessment(), FULL_TEXT)
         summary = EditorialPolicy.apply(SUMMARY, decision)
         self.assertTrue(_valid_editorial_summary(summary))
         self.assertNotIn('/40', summary)
         self.assertNotIn('研究关联', summary)
         self.assertTrue(summary.endswith('推荐星级：★★★★☆'))
 
-    def test_audit_cache_changes_when_transcript_or_profile_changes(self):
+    def test_audit_cache_tracks_transcript_not_private_company_profile(self):
         client = Mock()
         client.responses.create.return_value = SimpleNamespace(output_text=source_assessment().model_dump_json())
         path = self.root / 'focus.json'
@@ -152,19 +161,20 @@ class EditorialTests(unittest.TestCase):
         request = client.responses.create.call_args.kwargs
         self.assertIn('json', request['input'].lower())
         self.assertFalse(request['store'])
+        self.assertNotIn('active_focus_companies', request['input'])
         self.assertEqual(policy.assess(self.episode, self.transcript), first)
         self.assertEqual(client.responses.create.call_count, 1)
         path.write_text(json.dumps({'companies': []}))
-        self.assertEqual(policy.assess(self.episode, self.transcript)['assessment']['focus']['score'], 0)
-        self.assertEqual(client.responses.create.call_count, 2)
+        self.assertEqual(policy.assess(self.episode, self.transcript), first)
+        self.assertEqual(client.responses.create.call_count, 1)
         changed = Transcript(TEXT + ' More material.', 'official', self.transcript.source_url, True)
         policy.assess(self.episode, changed)
-        self.assertEqual(client.responses.create.call_count, 3)
+        self.assertEqual(client.responses.create.call_count, 2)
 
     def test_daily_retains_low_rating_and_sorts_high_rating_first(self):
         policy = Mock()
-        rejected = decide(assessment(ai=1), TEXT, PROFILE)
-        accepted = decide(assessment(), TEXT, PROFILE)
+        rejected = decide(assessment(relevance=1), FULL_TEXT)
+        accepted = decide(assessment(), FULL_TEXT)
         policy.assess.side_effect = [rejected, accepted]
         policy.apply.side_effect = EditorialPolicy.apply
         summarizer = Mock()

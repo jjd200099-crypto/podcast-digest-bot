@@ -48,5 +48,13 @@ class DailyReportTests(unittest.TestCase):
         self.assertNotIn('/40', rendered)
         self.assertNotIn('/5', rendered)
         self.assertIn('下降75%', rendered)
-        self.assertTrue(rendered.endswith('推荐星级：★★★★☆'))
+        self.assertTrue(rendered.endswith('推荐星级：★★★★☆｜值得看全文'))
         self.assertEqual(render_daily_summary(rendered), rendered)
+
+    def test_stars_show_reading_action_without_numeric_subscores(self):
+        for rating, advice in [(5, '值得编译'), (4, '值得看全文'), (3, '看摘要即可'),
+                                (2, '可跳过'), (1, '可跳过')]:
+            original = '推荐星级：' + '★' * rating + '☆' * (5 - rating)
+            rendered = render_daily_summary(original)
+            self.assertEqual(rendered, original + '｜' + advice)
+            self.assertEqual(render_daily_summary(rendered), rendered)

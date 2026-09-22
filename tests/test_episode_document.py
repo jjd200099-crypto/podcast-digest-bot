@@ -19,7 +19,7 @@ class SelectedDocuments(unittest.TestCase):
         f = self.fixture
         self.compiler = SelectedEpisodeCompiler(f.store, f.api, f.writer, start_date='2026-09-21')
         self.compiler.initialize()
-        self.rate('one', 4)
+        self.rate('one', 5)
         f.store.ensure_outbox(job_key=f.base, group_key='daily:bundle:test', delivery_key='daily-test',
                              operation='send', target_id='oc_test', target_type='chat_id',
                              reply_in_thread=False, parts=[('text', 'daily', 'daily-uuid')])
@@ -49,7 +49,7 @@ class SelectedDocuments(unittest.TestCase):
         result = self.compiler.publish(job)
         self.assertEqual(result['count'], 2)
         self.assertEqual(f.api.creates, 2)
-        self.assertTrue(result['documents'][0]['title'].startswith('two｜'))
+        self.assertEqual({d['title'].split('｜')[0] for d in result['documents']}, {'one', 'two'})
         for doc in result['documents']:
             token = doc['url'].rsplit('/', 1)[-1]
             headings = [b['heading1']['elements'][0]['text_run']['content']
@@ -65,8 +65,11 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(self.fixture.api.creates, 0)
         self.assertEqual(stars('没有评级'), 0)
 
-    def test_three_stars_is_included(self):
-        self.rate('one', 3)
+    def test_only_five_stars_is_automatically_compiled(self):
+        for rating in (3, 4):
+            self.rate('one', rating)
+            self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        self.rate('one', 5)
         self.assertEqual(self.compiler.publish(self.job())['count'], 1)
 
     def test_daily_must_finish_delivery_before_document_enqueue(self):
@@ -80,6 +83,15 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
         f.store.mark_outbox_sent(f.store.outbox_items(f.base)[0].id)
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
+
+    def test_frozen_old_batch_cannot_bypass_raised_threshold(self):
+        job = self.job()
+        self.fixture.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
+                                           {'documents': [{'stars': 4}]})
+        result = self.compiler.publish(job)
+        self.assertFalse(result['notify'])
+        self.assertEqual(result['count'], 0)
+        self.assertEqual(self.fixture.api.creates, 0)
 
     def test_legacy_combined_job_is_retired_without_writing(self):
         self.assertIsNone(self.compiler.publish(self.fixture.job()))

@@ -12,6 +12,10 @@ from news_officer.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_automatic_compilation_defaults_to_exceptional_five_stars(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            self.assertEqual(Settings.from_env().daily_document_min_stars, 5)
+
     def base_environment(self):
         return {
             "FEISHU_APP_ID": "app-id",

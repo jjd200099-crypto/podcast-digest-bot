@@ -17,7 +17,7 @@ def stars(markdown):
 
 
 class SelectedEpisodeCompiler(DailyDocumentCompiler):
-    def __init__(self, *args, min_stars=3, request_authorizer=None, **kwargs):
+    def __init__(self, *args, min_stars=5, request_authorizer=None, **kwargs):
         super().__init__(*args, **kwargs)
         if min_stars not in range(1, 6):
             raise ValueError('Document minimum stars must be 1–5')
@@ -145,6 +145,9 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                                                 {'documents': documents})
         links = []
         for document in bundle['documents']:
+            # An older pending batch must not bypass a newly raised threshold.
+            if not requested and document['stars'] < self.min_stars:
+                continue
             row = self._document(document['key'], document['title'])
             token = row['document_id']
             self._write(token, document['nodes'])
