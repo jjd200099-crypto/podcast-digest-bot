@@ -163,6 +163,8 @@ class SelectedDelivery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messenger.delivered), 1)
         self.assertEqual(rows[0].content.count('https://www.feishu.cn/docx/'), 2)
         self.assertIn('早间文字日报保持不变', rows[0].content)
+        self.assertNotIn('★', rows[0].content)
+        self.assertNotIn('☆', rows[0].content)
 
 
 if __name__ == '__main__':

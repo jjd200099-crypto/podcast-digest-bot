@@ -542,7 +542,8 @@ class ResearchTests(LibraryFixture):
             reply = self.agent.handle(message.text, message)
             replies.append(reply.messages)
             self.assertFalse(reply.attachments)
-            self.assertIn("推荐星级", reply.messages[0])
+            self.assertIn("阅读建议：值得看全文", reply.messages[0])
+            self.assertNotIn("★", reply.messages[0])
         self.assertEqual(replies[0], replies[1])
         self.assertEqual(replies[1], replies[2])
 

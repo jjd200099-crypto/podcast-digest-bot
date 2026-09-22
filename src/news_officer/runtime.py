@@ -556,7 +556,7 @@ class NewsOfficerRuntime:
         if not catchup and not bundles:
             blocks.append(f"统计窗口：{start:%m-%d %H:%M} 至 {when:%m-%d %H:%M}（{zone}）。")
         if summaries:
-            blocks.append("以下按星级从高到低排列，均基于已核验全文。节目中的数字与预测为嘉宾或公司表述，未经独立审计。")
+            blocks.append("以下按阅读优先级排列，均基于已核验全文。节目中的数字与预测为嘉宾或公司表述，未经独立审计。")
         blocks.extend(render_daily_summary(item.message) for item in summaries)
         blocks.extend(notices)
         report = coverage_report(report_items)
@@ -907,8 +907,7 @@ class NewsOfficerRuntime:
                     lines.append('以下重点节目已分别编译成独立文档，早间文字日报保持不变。')
                 for document in result['documents']:
                     title = document['title'].replace('[', '（').replace(']', '）')
-                    rating = ('★' * document['stars'] + '☆' * (5 - document['stars'])) if document['stars'] else ''
-                    lines.append(f"{rating} [{title}]({document['url']})")
+                    lines.append(f"[{title}]({document['url']})")
                 content = '\n\n'.join(lines)
             else:
                 content = (f"{result['title']}已整理完成，共 {result['count']} 期。"

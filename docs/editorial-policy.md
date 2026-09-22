@@ -22,13 +22,13 @@ A long transcript or a large count of numbers does not imply high density. Five
 is exceptional: compressing it into a brief would lose important detail. There is
 no daily quota; zero compilation-worthy episodes is a valid outcome.
 
-| Rating | Code gate: relevance / density | Reader action |
+| Internal rating (not displayed) | Code gate: relevance / density | Reader action |
 |---|---|---|
 | ★★★★★ | Both exactly 5 | 值得编译 — automatically create an individual Feishu document |
 | ★★★★☆ | Both at least 4, or relevance ≥3 and density 5 | 值得看全文 |
-| ★★★☆☆ | Both at least 3, below the above gates | 看摘要即可 |
-| ★★☆☆☆ | Both at least 2, below the above gates | 可跳过 |
-| ★☆☆☆☆ | Otherwise | 可跳过 |
+| ★★★☆☆ | Both at least 3, below the above gates | 看摘要 |
+| ★★☆☆☆ | Both at least 2, below the above gates | 无关 |
+| ★☆☆☆☆ | Otherwise | 无关 |
 
 There are no separate investment, fame, company-watchlist, novelty or evidence
 scores. The internal ordering total is `(relevance + density) * 10`; it is not
@@ -54,8 +54,12 @@ disables the grounded rating pass, not complete-transcript validation.
 ## Presentation and compilation
 
 The brief retains coherent Chinese paragraphs and a short recommendation reason.
-The archived summary ends with five star glyphs; the delivery renderer appends
-the reader action, without numeric subscores or repeated evidence labels.
+The archived summary retains its internal five-star encoding for ordering, audit
+and compilation gates. Delivery replaces that line with only the reader action:
+值得编译 / 值得看全文 / 看摘要 / 无关. No stars or numeric subscores are displayed,
+including document-link notifications. Here 无关 means not recommended for this
+research brief: relevance OR information density is insufficient. A missing or
+unverified transcript remains pending/unrated, never automatically 无关.
 
 `NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **5**. Production should also
 set it to 5 explicitly, since an older environment override of 3 wins over code
