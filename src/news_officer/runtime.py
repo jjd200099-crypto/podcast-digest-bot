@@ -535,6 +535,8 @@ class NewsOfficerRuntime:
                     report_items.append(DailyItem(item.episode, "summary_format_error"))
                     reason = "版本信息已过期" if item.attachment is None else "原稿或摘要版本在发送前发生变化"
                     notices.append(f"《{item.episode.title}》的{reason}，本次不发送，待重新核验。")
+            elif item.status in {'discovery_status', 'discovery_filtered'}:
+                report_items.append(item)
             elif item.status in {"not_recommended", "no_transcript", "outside_window",
                                  "summary_format_error", "unverified_date"}:
                 self.store.record_episode(item.episode, item.status)
@@ -557,7 +559,8 @@ class NewsOfficerRuntime:
             blocks.append(f"统计窗口：{start:%m-%d %H:%M} 至 {when:%m-%d %H:%M}（{zone}）。")
         if summaries:
             blocks.append("以下按阅读优先级排列，均基于已核验全文。节目中的数字与预测为嘉宾或公司表述，未经独立审计。")
-        blocks.extend(render_daily_summary(item.message) for item in summaries)
+        blocks.extend(render_daily_summary(item.message, discovered=item.episode.id.startswith('podwise:'))
+                      for item in summaries)
         blocks.extend(notices)
         report = coverage_report(report_items)
         if report and not catchup:
@@ -633,7 +636,7 @@ class NewsOfficerRuntime:
                     job,
                     f"episode:{item.episode.id}",
                     ('全文已补齐｜补充摘要\n\n' if job.payload.get('transcript_catchup') else '')
-                    + render_daily_summary(item.message),
+                    + render_daily_summary(item.message, discovered=item.episode.id.startswith('podwise:')),
                     f"daily:{item.episode.id}",
                     file_key,
                 )

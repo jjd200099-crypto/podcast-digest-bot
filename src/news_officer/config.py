@@ -60,6 +60,7 @@ class Settings:
     research_focus_path: Path | None = None
     daily_rss_only: bool = True
     podwise_auto_process: bool = False
+    podwise_discovery_enabled: bool = False
     daily_document_enabled: bool = False
     daily_document_start_date: str = ''
     daily_document_folder: str = ''
@@ -135,7 +136,12 @@ class Settings:
         hermes_python = os.environ.get("NEWS_OFFICER_HERMES_PYTHON", "").strip()
         if backend == "hermes" and not Path(hermes_python).is_absolute():
             raise ValueError("Hermes requires an absolute NEWS_OFFICER_HERMES_PYTHON")
+        discovery = os.environ.get('NEWS_OFFICER_PODWISE_DISCOVERY', 'false').lower() == 'true'
+        if discovery and (not os.environ.get('PODWISE_API_TOKEN', '').strip()
+                          or os.environ.get('NEWS_OFFICER_EDITORIAL_FILTER', 'true').lower() != 'true'):
+            raise ValueError('Podwise discovery requires PODWISE_API_TOKEN and editorial review')
         return cls(
+            podwise_discovery_enabled=discovery,
             podwise_auto_process=os.environ.get('PODWISE_AUTO_PROCESS', 'false').lower() == 'true',
             daily_rss_only=os.environ.get('NEWS_OFFICER_DAILY_RSS_ONLY', 'true').lower() == 'true',
             editorial_enabled=os.environ.get('NEWS_OFFICER_EDITORIAL_FILTER', 'true').lower() == 'true',

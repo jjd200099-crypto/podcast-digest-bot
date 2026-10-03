@@ -1310,7 +1310,8 @@ class Store:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT episode_json FROM daily_transcript_backlog "
-                "WHERE state != 'delivered' AND next_check_at<=? ORDER BY created_at LIMIT ?",
+                "WHERE state != 'delivered' AND next_check_at<=? "
+                "ORDER BY CASE WHEN episode_id LIKE 'podwise:%' THEN 1 ELSE 0 END, next_check_at, created_at LIMIT ?",
                 (_now(), limit),
             ).fetchall()
         result = []
@@ -1326,11 +1327,12 @@ class Store:
 
     def publisher_episode_aliases(self, episode: Episode) -> set[str]:
         """Find historical merged IDs by exact publisher metadata, not fuzzy titles."""
-        if not episode.published_at or not episode.metadata.get('rss_feed_url'):
+        if not episode.published_at or not (episode.metadata.get('rss_feed_url') or episode.id.startswith('podwise:')):
             return set()
         with self._connect() as connection:
             rows = connection.execute(
-                'SELECT episode_id FROM episodes WHERE title=? AND show_name=? AND published_at=?',
+                "SELECT episode_id FROM episodes WHERE title=? AND show_name=? AND julianday(published_at)=julianday(?) "
+                "AND result!='discovery_filtered'",
                 (episode.title, episode.show, episode.published_at.isoformat()),
             ).fetchall()
         return {str(row['episode_id']) for row in rows}

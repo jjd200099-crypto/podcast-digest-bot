@@ -54,7 +54,9 @@ def read_daily_digest(store, day: str) -> dict:
             continue
         valid.append(item)
         # The raw source stays in the archive, not as an inaccessible API link.
-        summaries.append(render_daily_summary(re.sub(r"^\*{0,2}文字稿来源：.*\n?", "", item.message, flags=re.MULTILINE)))
+        summaries.append(render_daily_summary(
+            re.sub(r"^\*{0,2}文字稿来源：.*\n?", "", item.message, flags=re.MULTILINE),
+            discovered=item.episode.id.startswith('podwise:')))
     blocks = [f"# 情报官日报｜{day}",
               f"已归档 {len(summaries)} 期摘要。以下与每日推送共用正式资料库；不附全文。",
               *summaries]

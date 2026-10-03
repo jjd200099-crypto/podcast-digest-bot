@@ -24,6 +24,7 @@ from .models import (
 )
 from .official import DwarkeshOfficialTranscriptProvider
 from .podwise import PodwiseTranscriptProvider
+from .podwise_discovery import PodwiseDiscovery
 from .rss import (
     RSSDeclaredTranscriptProvider,
     SubstackApprovedTranscriptProvider,
@@ -285,7 +286,15 @@ def _episode_dedupe_keys(episode: Episode) -> set[str]:
     )
     if episode.published_at and len(normalized_title) >= 12:
         published_day = episode.published_at.astimezone(UTC).date().isoformat()
-        keys.add(f"title-day:{normalized_title}:{published_day}")
+        if not episode.id.startswith('podwise:'):
+            keys.add(f"title-day:{normalized_title}:{published_day}")
+    # Keep legacy RSS/video syndication matching, but do not merge a global
+    # discovery with another publisher just because their headlines coincide.
+    publisher_title = ' '.join(re.findall(r'\w+', episode.title.casefold()))
+    show = ' '.join(re.findall(r'\w+', episode.show.casefold())).removeprefix('the ')
+    if episode.published_at and show and len(publisher_title) >= 8:
+        day = episode.published_at.astimezone(UTC).date().isoformat()
+        keys.add(f'publisher-title-day:{show}:{publisher_title}:{day}')
     return keys
 
 
@@ -303,6 +312,8 @@ def _transcript_preference(episode: Episode, resolver: TranscriptResolver) -> in
         score += 2
     if episode.published_at:
         score += 1
+    if episode.id.startswith('podwise:'):
+        score -= 100  # Prefer the tracked publisher representation of a duplicate.
     return score
 
 
@@ -334,11 +345,17 @@ class PodcastService:
         editorial_policy=None,
         daily_rss_only: bool = False,
         podwise_auto_process: bool = False,
+        podwise_discovery_enabled: bool = False,
     ):
         self.store = store
         self.feeds_path = feeds_path
         self.summarizer = summarizer
         self.editorial_policy = editorial_policy
+        if podwise_discovery_enabled and editorial_policy is None:
+            raise ValueError('Podwise discovery requires editorial review')
+        self.discovery = PodwiseDiscovery(podwise_api_token) if podwise_discovery_enabled else None
+        self._discovery_notice = ''
+        self._discovery_failed = False
         # The production Settings default is RSS-only. Retain the legacy library
         # constructor default for existing standalone callers and explicit opt-in.
         self.daily_rss_only = daily_rss_only
@@ -617,6 +634,17 @@ class PodcastService:
                 )
 
         new_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
+        self._discovery_notice = ''
+        self._discovery_failed = False
+        if self.discovery is not None:
+            try:
+                discovered = self.discovery.discover(now, self.lookback_hours)
+                groups_by_priority['B'].append(discovered.episodes)
+                self._discovery_notice = discovered.notice
+                self._discovery_failed = bool(discovered.failed_requests)
+            except Exception:  # noqa: BLE001 - a discovery outage must not stop healthy RSS
+                self._discovery_notice = 'Podwise 扩展发现失败；本次仅提供已成功扫描的订阅源，不代表列表外没有更新。'
+                self._discovery_failed = True
         retry_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
         all_episodes = [
             episode
@@ -731,7 +759,7 @@ class PodcastService:
 
         successful_sources = len(sources) - len(failed_sources)
         self._last_failed_feeds = tuple(failed_sources)
-        if failed_sources and (
+        if failed_sources and not any(e.id.startswith('podwise:') for e in candidates) and (
             not candidates or len(failed_sources) >= successful_sources
         ):
             raise FeedDiscoveryError(
@@ -777,6 +805,12 @@ class PodcastService:
             )
             for source_url in (self._last_failed_feeds if pending is None else ())
         ]
+        if pending is None and self._discovery_notice:
+            results.append(DailyItem(Episode('discovery:podwise', 'Podwise 扩展发现', '', 'Podwise'),
+                                     'discovery_status', self._discovery_notice))
+        if pending is None and self._discovery_failed:
+            results.append(DailyItem(Episode('source-failure:podwise', '扩展发现读取失败', '', 'Podwise'),
+                                     'failed', 'Podwise discovery incomplete; retry required'))
         summary_count = 0
         priority_b_summaries = 0
         reserve_b_slot = self.max_daily_summaries >= 2
@@ -823,6 +857,13 @@ class PodcastService:
                     continue
                 stored = self.store.save_verified_transcript(episode, transcript)
                 decision = self.editorial_policy.assess(episode, transcript) if self.editorial_policy else None
+                if episode.id.startswith('podwise:') and decision is not None and not decision['selected']:
+                    # Only the exploratory lane filters low-value material. The
+                    # subscribed RSS lane still covers all fully transcribed updates.
+                    self.store.record_episode(episode, 'discovery_filtered')
+                    self.store.complete_daily_transcript(episode.id)
+                    results.append(DailyItem(episode, 'discovery_filtered'))
+                    continue
                 source_priority = str(
                     episode.metadata.get("source_priority") or "B"
                 ).upper()

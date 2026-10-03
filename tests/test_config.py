@@ -80,6 +80,17 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.daily_rss_only)
         self.assertEqual(settings.agent_backend, "agents_sdk")
 
+    def test_podwise_discovery_requires_credentials_and_fulltext_editorial_review(self):
+        env = {**self.base_environment(), 'NEWS_OFFICER_PODWISE_DISCOVERY': 'true'}
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+        env['PODWISE_API_TOKEN'] = 'fake'
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(Settings.from_env().podwise_discovery_enabled)
+        env['NEWS_OFFICER_EDITORIAL_FILTER'] = 'false'
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+
     def test_expression_advisor_is_opt_in_with_separate_credentials(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
             settings = Settings.from_env()

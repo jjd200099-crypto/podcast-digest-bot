@@ -6,9 +6,12 @@ from collections import Counter
 from .models import DailyItem
 
 
-def render_daily_summary(markdown: str) -> str:
+def render_daily_summary(markdown: str, *, discovered: bool = False) -> str:
     """Presentation migration only; never rewrite an immutable archived digest."""
     # The generator's structural marker is not a useful reader-facing heading.
+    marker = '发现渠道：Podwise 扩展发现\n\n'
+    if discovered and not markdown.startswith(marker):
+        markdown = marker + markdown
     markdown = markdown.replace('\n## 内容解读\n', '\n')
     markdown = re.sub(
         r'(?m)(^推荐理由：[^\r\n]*?)（AI \d+/40，投资 \d+/20，研究关联 \d+/5，增量 \d+/20，论据 \d+/15）[ \t]*$',
@@ -29,6 +32,17 @@ def ranked_daily_items(items: list[DailyItem]) -> list[DailyItem]:
 
 
 def coverage_report(items: list[DailyItem]) -> str | None:
+    notices = [item.message for item in items if item.status == 'discovery_status']
+    filtered = sum(item.status == 'discovery_filtered' for item in items)
+    if filtered:
+        notices.append(f'扩展发现另有 {filtered} 期已读取并归档全文，但未达到推荐门槛，未纳入正文。')
+    core = _coverage_report([i for i in items if i.status not in {'discovery_status', 'discovery_filtered'}])
+    if core:
+        notices.append(core)
+    return '\n\n'.join(notices) or None
+
+
+def _coverage_report(items: list[DailyItem]) -> str | None:
     counts = Counter(item.status for item in items)
     reasons = {
         "no_transcript": "未取得完整文字稿，本次不摘要、不评级",

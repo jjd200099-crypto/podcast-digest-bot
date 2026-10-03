@@ -258,6 +258,20 @@ class PodwiseTranscriptProvider:
         self.diagnostics.pop(episode.id, None)
         if not self._token:
             return None
+        # Revalidate the discovered stable asset ID instead of searching its title.
+        # This read-only path never submits untracked episodes for paid processing.
+        if episode.id.startswith('podwise:'):
+            identity = episode.id.removeprefix('podwise:')
+            if not identity.isdecimal() or int(identity) <= 0:
+                return None
+            seq = int(identity)
+            match = (self._get(f'/episodes/{seq}') or {}).get('result', {})
+            if not isinstance(match, dict) or match.get('seq') != seq or not _matches(episode, match):
+                return None
+            if match.get('transcribed') is not True:
+                self.diagnostics[episode.id] = 'Podwise 已收录但全文尚未就绪；列表外发现不会自动消耗转写额度。'
+                return None
+            return self._read_transcript(episode, seq)
         search = self._get(
             "/episodes/search", {"q": episode.title[:300], "hitsPerPage": 30}
         )
@@ -332,6 +346,9 @@ class PodwiseTranscriptProvider:
         seq, match = next(iter(matches.items()))
         if match.get("transcribed") is not True:
             return None
+        return self._read_transcript(episode, seq)
+
+    def _read_transcript(self, episode: Episode, seq: int) -> Transcript | None:
         path = f"/episodes/{seq}/transcripts"
         data = self._get(path)
         if not data:
