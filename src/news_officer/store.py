@@ -174,6 +174,12 @@ class Store:
                     FOREIGN KEY(job_key) REFERENCES jobs(job_key) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS daily_release_announcements (
+                    release_id TEXT PRIMARY KEY,
+                    job_key TEXT NOT NULL REFERENCES jobs(job_key),
+                    note_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS outbox (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_key TEXT NOT NULL,
@@ -571,6 +577,29 @@ class Store:
                 (key, kind),
             ).fetchall()
         return [json.loads(str(row["payload_json"])) for row in rows]
+
+    def claim_daily_release_notes(self, key: str, day: str, notes: tuple) -> list[dict]:
+        """Reserve announcements for one scheduled report, including its retries.
+
+        The frozen outbox remains responsible for delivery/receipts. Reserving
+        does not mark a message sent, and a failed report retains its notes.
+        """
+        if key != f"daily:{day}":
+            return []
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for note in notes:
+                if note["date"] <= day:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO daily_release_announcements "
+                        "(release_id, job_key, note_json) VALUES (?, ?, ?)",
+                        (note["id"], key, json.dumps(note, ensure_ascii=False)),
+                    )
+            rows = connection.execute(
+                "SELECT note_json FROM daily_release_announcements "
+                "WHERE job_key = ? ORDER BY release_id", (key,),
+            ).fetchall()
+        return [json.loads(row["note_json"]) for row in rows]
 
     def mark_analysis_complete(self, key: str) -> None:
         with self._connect() as connection:

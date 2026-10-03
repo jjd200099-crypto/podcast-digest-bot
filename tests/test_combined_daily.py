@@ -136,6 +136,63 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.messenger.attempts), 1)
         self.assertEqual(podcast.calls, 1)
 
+    async def test_release_note_first_morning_only_and_in_archive(self):
+        from news_officer.daily_archive import read_daily_digest
+
+        instance, job, _ = self.setup_job([], key="daily:2026-10-04", payload={
+            "scheduled_for": "2026-10-04T08:30:00+08:00"})
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(self.messenger.attempts), 1)
+        self.assertIn("功能更新", body(self.messenger.attempts[0]))
+        self.assertIn("新增 Podwise 扩展发现", body(self.messenger.attempts[0]))
+        self.assertIn("功能更新", read_daily_digest(self.store, "2026-10-04")["markdown"])
+        self.store.complete(job.key)
+        reopened = Store(self.store.path)
+        reopened.initialize()
+        self.store = reopened
+        instance, job, _ = self.setup_job([], key="daily:2026-10-05", payload={
+            "scheduled_for": "2026-10-05T08:30:00+08:00"})
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(self.messenger.attempts), 2)
+        self.assertNotIn("功能更新", body(self.messenger.attempts[-1]))
+
+    async def test_release_note_retry_retains_frozen_content(self):
+        item = self.item("release-retry")
+        instance, job, _ = self.setup_job([item], key="daily:2026-10-04", payload={
+            "scheduled_for": "2026-10-04T08:30:00+08:00"})
+        instance._persist_daily_items(job, [item])
+        instance._prepare_daily_outbox_and_terminal_states(job)
+        before = self.store.outbox_items(job.key)[0]
+        self.messenger.fail_groups_once.add(before.group_key)
+        with self.assertRaises(RuntimeError):
+            await instance._handle_daily_job(job)
+        with patch("news_officer.release_notes.RELEASE_NOTES", ()):
+            await instance._handle_daily_job(job)
+        after = self.store.outbox_items(job.key)[0]
+        self.assertEqual((before.uuid, before.content), (after.uuid, after.content))
+        self.assertTrue(self.store.outbox_group_sent(job.key, after.group_key))
+        self.assertIn("功能更新", body(after))
+
+    async def test_manual_and_catchup_do_not_consume_release_note(self):
+        for key, catchup in (("daily:manual-test", False), ("daily:catchup-test", True)):
+            instance, job, podcast = self.setup_job([self.item(key)], key=key, payload={
+                "scheduled_for": "2026-10-04T08:30:00+08:00",
+                "transcript_catchup": catchup})
+            podcast.build_pending = podcast.build_daily
+            await instance._handle_daily_job(job)
+            self.assertNotIn("功能更新", body(self.messenger.attempts[-1]))
+            self.store.complete(job.key)
+        instance, job, _ = self.setup_job([], key="daily:2026-10-05", payload={
+            "scheduled_for": "2026-10-05T08:30:00+08:00"})
+        await instance._handle_daily_job(job)
+        self.assertIn("功能更新", body(self.messenger.attempts[-1]))
+
+    async def test_old_report_does_not_announce_future_feature(self):
+        instance, job, _ = self.setup_job([], key="daily:2026-10-03", payload={
+            "scheduled_for": "2026-10-03T08:30:00+08:00"})
+        await instance._handle_daily_job(job)
+        self.assertNotIn("功能更新", body(self.messenger.attempts[0]))
+
     async def test_lost_receipt_replays_frozen_bundle_without_regenerating(self):
         item = self.item("saved")
         instance, job, _ = self.setup_job([item])

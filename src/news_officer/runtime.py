@@ -555,6 +555,13 @@ class NewsOfficerRuntime:
         start = when - timedelta(hours=getattr(settings, "lookback_hours", 24))
         title = "全文已补齐｜补充摘要" if catchup or bundles else "情报官日报"
         blocks = [f"{title}｜{when:%Y-%m-%d}｜{len(summaries)} 期"]
+        feature_updates = ""
+        if not catchup and not bundles:
+            from .release_notes import RELEASE_NOTES, render_release_notes
+            feature_updates = render_release_notes(self.store.claim_daily_release_notes(
+                job.key, when.date().isoformat(), RELEASE_NOTES))
+            if feature_updates:
+                blocks.append(feature_updates)
         if not catchup and not bundles:
             blocks.append(f"统计窗口：{start:%m-%d %H:%M} 至 {when:%m-%d %H:%M}（{zone}）。")
         if summaries:
@@ -576,6 +583,7 @@ class NewsOfficerRuntime:
             raise RuntimeError("A daily delivery has no active subscribers")
         bundle = self.store.save_job_result(job.key, group, "daily_bundle", {
             "group_key": group, "episode_ids": [i.episode.id for i in summaries],
+            "feature_updates": feature_updates,
             "deliveries": deliveries,
         })
         self._restore_daily_bundle(job, bundle)

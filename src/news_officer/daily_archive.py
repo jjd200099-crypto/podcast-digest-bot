@@ -20,6 +20,7 @@ def read_daily_digest(store, day: str) -> dict:
             "WHERE kind='daily' ORDER BY created_at,job_key"
         ).fetchall()
     matching = []
+    feature_updates = []
     items = {}
     for job in jobs:
         payload = json.loads(job["payload_json"])
@@ -29,6 +30,10 @@ def read_daily_digest(store, day: str) -> dict:
         if scheduled.astimezone(ZoneInfo("Asia/Shanghai")).date() != requested:
             continue
         matching.append(job)
+        for bundle in store.list_job_results(job["job_key"], "daily_bundle"):
+            update = bundle.get("feature_updates", "")
+            if update and update not in feature_updates:
+                feature_updates.append(update)
         for value in store.list_job_results(job["job_key"], "daily_item"):
             item = DailyItem.from_persisted_dict(value)
             previous = items.get(item.episode.id)
@@ -58,6 +63,7 @@ def read_daily_digest(store, day: str) -> dict:
             re.sub(r"^\*{0,2}文字稿来源：.*\n?", "", item.message, flags=re.MULTILINE),
             discovered=item.episode.id.startswith('podwise:')))
     blocks = [f"# 情报官日报｜{day}",
+              *feature_updates,
               f"已归档 {len(summaries)} 期摘要。以下与每日推送共用正式资料库；不附全文。",
               *summaries]
     report = coverage_report(valid)
