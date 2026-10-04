@@ -206,7 +206,7 @@ class EditorialTests(unittest.TestCase):
         policy.assess(self.episode, changed)
         self.assertEqual(client.responses.create.call_count, 2)
 
-    def test_daily_retains_low_rating_and_sorts_high_rating_first(self):
+    def test_daily_archives_but_does_not_display_unrelated_tracked_episodes(self):
         policy = Mock()
         rejected = decide(assessment(relevance=1), FULL_TEXT)
         accepted = decide(assessment(), FULL_TEXT)
@@ -222,12 +222,14 @@ class EditorialTests(unittest.TestCase):
                          published_at=datetime.now(UTC), duration_seconds=300)
         service.discover_daily_candidates = Mock(return_value=[self.episode, second])
         items = service.build_daily()
-        self.assertEqual([item.status for item in items], ['summarized', 'summarized'])
+        self.assertEqual([item.status for item in items], ['summarized', 'editorial_filtered'])
         self.assertEqual([item.episode.id for item in items], ['second', 'e'])
-        self.assertEqual(summarizer.summarize.call_count, 2)
+        self.assertEqual(summarizer.summarize.call_count, 1)
         self.assertIsNotNone(self.store.get_verified_transcript('e'))
         self.assertIn('★★★★☆', items[0].message)
-        self.assertIsNone(coverage_report(items))
+        self.assertIn('关注列表另有 1 期', coverage_report(items))
+        self.assertFalse(self.store.should_review_episode('e'))
+        self.assertFalse(self.store.episode_is_delivered(self.episode))
 
     def test_filtered_report_is_not_no_updates_or_missing_transcript(self):
         report = coverage_report([DailyItem(self.episode, 'not_recommended')])

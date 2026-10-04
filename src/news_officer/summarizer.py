@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import re
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -131,6 +133,10 @@ class TranscriptSummarizer:
     def __init__(self, api_key: str, model: str):
         self.client = OpenAI(api_key=api_key, timeout=180, max_retries=2)
         self.model = model
+
+    def cache_identity(self) -> str:
+        # Prompt/validator edits automatically invalidate prepared summaries.
+        return hashlib.sha256(Path(__file__).read_bytes() + self.model.encode()).hexdigest()
 
     def summarize(self, episode: Episode, transcript: Transcript) -> str:
         if not transcript.verified_complete:

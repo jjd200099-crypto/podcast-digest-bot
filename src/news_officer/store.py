@@ -180,6 +180,21 @@ class Store:
                     note_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS prepared_digest_keys (
+                    episode_id TEXT PRIMARY KEY,
+                    cache_key TEXT NOT NULL,
+                    digest_sha256 TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS discovery_observations (
+                    episode_id TEXT PRIMARY KEY,
+                    podcast_seq INTEGER,
+                    show_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stars INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS outbox (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_key TEXT NOT NULL,
@@ -600,6 +615,41 @@ class Store:
                 "WHERE job_key = ? ORDER BY release_id", (key,),
             ).fetchall()
         return [json.loads(row["note_json"]) for row in rows]
+
+    def observe_discovery(self, episode: Episode, status: str, stars: int = 0) -> None:
+        if not episode.id.startswith('podwise:'):
+            return
+        seq = episode.metadata.get('podwise_podcast_seq')
+        seq = seq if type(seq) is int and seq > 0 else None
+        with self._connect() as db:
+            db.execute("INSERT INTO discovery_observations VALUES (?,?,?,?,?,?) "
+                       "ON CONFLICT(episode_id) DO UPDATE SET podcast_seq=excluded.podcast_seq, "
+                       "status=excluded.status,stars=excluded.stars,observed_at=excluded.observed_at",
+                       (episode.id, seq, episode.show, status, stars, _now()))
+
+    def discovery_watch_catalogs(self, now: datetime) -> list[int]:
+        # Two distinct high-value episodes, not two retries of the same one.
+        with self._connect() as db:
+            rows = db.execute("SELECT podcast_seq FROM discovery_observations "
+                "WHERE podcast_seq IS NOT NULL AND status='summarized' AND stars>=4 "
+                "AND julianday(observed_at)>=julianday(?) GROUP BY podcast_seq HAVING count(*)>=2 "
+                "ORDER BY max(observed_at) DESC LIMIT 20", ((now - timedelta(days=30)).isoformat(),)).fetchall()
+        return [row[0] for row in rows]
+
+    def prepared_digest(self, episode_id: str, cache_key: str) -> str:
+        with self._connect() as db:
+            row = db.execute("SELECT digest_sha256,cache_key FROM prepared_digest_keys WHERE episode_id=?",
+                             (episode_id,)).fetchone()
+        digest = self.get_transcript_digest(episode_id) if row else ""
+        if digest and row['cache_key'] == cache_key and hashlib.sha256(digest.encode()).hexdigest() != row[0]:
+            raise ValueError('Prepared digest integrity mismatch')
+        return digest if digest and row['cache_key'] == cache_key else ""
+
+    def mark_digest_prepared(self, episode_id: str, cache_key: str, digest: str) -> None:
+        with self._connect() as db:
+            db.execute("INSERT INTO prepared_digest_keys VALUES (?,?,?) ON CONFLICT(episode_id) "
+                       "DO UPDATE SET cache_key=excluded.cache_key,digest_sha256=excluded.digest_sha256",
+                       (episode_id, cache_key, hashlib.sha256(digest.encode()).hexdigest()))
 
     def mark_analysis_complete(self, key: str) -> None:
         with self._connect() as connection:

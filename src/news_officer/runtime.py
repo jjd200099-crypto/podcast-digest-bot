@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -535,7 +536,7 @@ class NewsOfficerRuntime:
                     report_items.append(DailyItem(item.episode, "summary_format_error"))
                     reason = "版本信息已过期" if item.attachment is None else "原稿或摘要版本在发送前发生变化"
                     notices.append(f"《{item.episode.title}》的{reason}，本次不发送，待重新核验。")
-            elif item.status in {'discovery_status', 'discovery_filtered'}:
+            elif item.status in {'discovery_status', 'discovery_filtered', 'editorial_filtered'}:
                 report_items.append(item)
             elif item.status in {"not_recommended", "no_transcript", "outside_window",
                                  "summary_format_error", "unverified_date"}:
@@ -689,6 +690,20 @@ class NewsOfficerRuntime:
                 self.store.complete_daily_transcript(item.episode.id)
 
     async def _handle_daily_job(self, job: Job) -> None:
+        if job.payload.get('prepare_only'):
+            local_now = datetime.now(self.settings.timezone)
+            scheduled = datetime.fromisoformat(job.payload['scheduled_for'])
+            # Do not let a retry/restart start an old warm-up at delivery time.
+            if local_now >= scheduled - timedelta(minutes=30) or not self.store.has_subscriptions():
+                self.store.mark_analysis_complete(job.key)
+                return
+            results = await asyncio.to_thread(self.podcast_service.build_daily, preparation=True)
+            counts = {}
+            for item in results:
+                counts[item.status] = counts.get(item.status, 0) + 1
+            self.store.save_job_result(job.key, 'preparation:counts', 'preparation_counts', counts)
+            self.store.mark_analysis_complete(job.key)
+            return  # Never creates outbox entries, documents, or release notices.
         targets = await asyncio.to_thread(self._daily_targets, job)
         if not targets:
             # A queued job may race with the last recipient unsubscribing. Do
@@ -866,6 +881,15 @@ class NewsOfficerRuntime:
         while True:
             local_now = datetime.now(self.settings.timezone)
             has_subscribers = await asyncio.to_thread(self.store.has_subscriptions)
+            scheduled = local_now.replace(hour=self.settings.daily_time.hour,
+                minute=self.settings.daily_time.minute, second=0, microsecond=0)
+            if (has_subscribers and getattr(self.settings, 'daily_preparation_enabled', False)
+                    and scheduled - timedelta(hours=2) <= local_now < scheduled - timedelta(hours=1)):
+                inserted = await asyncio.to_thread(self.store.enqueue,
+                    f'daily:prepare:{scheduled.date().isoformat()}', 'daily',
+                    {'scheduled_for': scheduled.isoformat(), 'prepare_only': True})
+                if inserted:
+                    self._wake_worker('daily')
             if has_subscribers and local_now.time() >= self.settings.daily_time:
                 jobs = [
                     (
@@ -944,6 +968,26 @@ class NewsOfficerRuntime:
                 logger.warning("Library archive pending retry: %s", type(error).__name__)
             await asyncio.sleep(60)
 
+    async def _business_monitor(self) -> None:
+        from .operations import business_snapshot
+
+        previous = None
+        while True:
+            try:
+                state = await asyncio.to_thread(business_snapshot, self.store.path,
+                    daily_time=self.settings.daily_time.strftime("%H:%M"),
+                    timezone=str(self.settings.timezone))
+                encoded = json.dumps(state, ensure_ascii=False, sort_keys=True)
+                if encoded != previous:
+                    # Business failure must alert operators, not restart the
+                    # worker mid-analysis and repeatedly lose progress.
+                    log = logger.error if state["daily_overdue"] else logger.info
+                    log("Business delivery status: %s", encoded)
+                    previous = encoded
+            except Exception as error:  # noqa: BLE001 - monitoring must not kill delivery
+                logger.warning("Business monitor unavailable: %s", type(error).__name__)
+            await asyncio.sleep(60)
+
     async def _channel_loop(self) -> None:
         # connect() runs the SDK's foreground WS loop: it can remain blocked
         # before _mark_ready(). Use its public async readiness API instead.
@@ -978,6 +1022,7 @@ class NewsOfficerRuntime:
               for i in range(getattr(self.settings, "message_workers", 4))],
             asyncio.create_task(self._worker("daily"), name="daily-worker"),
             asyncio.create_task(self._scheduler(), name="daily-scheduler"),
+            asyncio.create_task(self._business_monitor(), name="business-monitor"),
             asyncio.create_task(self._channel_loop(), name="feishu-channel"),
         ]
         if getattr(self, 'document_compiler', None) is not None:

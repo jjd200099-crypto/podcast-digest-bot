@@ -61,6 +61,8 @@ class Settings:
     daily_rss_only: bool = True
     podwise_auto_process: bool = False
     podwise_discovery_enabled: bool = False
+    daily_preparation_enabled: bool = False
+    discovery_topics: tuple[str, ...] = ()
     daily_document_enabled: bool = False
     daily_document_start_date: str = ''
     daily_document_folder: str = ''
@@ -137,10 +139,15 @@ class Settings:
         if backend == "hermes" and not Path(hermes_python).is_absolute():
             raise ValueError("Hermes requires an absolute NEWS_OFFICER_HERMES_PYTHON")
         discovery = os.environ.get('NEWS_OFFICER_PODWISE_DISCOVERY', 'false').lower() == 'true'
+        topics = _csv(os.environ.get('NEWS_OFFICER_DISCOVERY_TOPICS', ''))
+        if len(topics) > 24 or any(len(t) > 80 for t in topics):
+            raise ValueError('Discovery supports at most 24 queries of up to 80 characters')
         if discovery and (not os.environ.get('PODWISE_API_TOKEN', '').strip()
                           or os.environ.get('NEWS_OFFICER_EDITORIAL_FILTER', 'true').lower() != 'true'):
             raise ValueError('Podwise discovery requires PODWISE_API_TOKEN and editorial review')
         return cls(
+            discovery_topics=topics,
+            daily_preparation_enabled=os.environ.get('NEWS_OFFICER_DAILY_PREPARATION', 'false').lower() == 'true',
             podwise_discovery_enabled=discovery,
             podwise_auto_process=os.environ.get('PODWISE_AUTO_PROCESS', 'false').lower() == 'true',
             daily_rss_only=os.environ.get('NEWS_OFFICER_DAILY_RSS_ONLY', 'true').lower() == 'true',

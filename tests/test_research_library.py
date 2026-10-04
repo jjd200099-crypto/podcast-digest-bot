@@ -436,6 +436,27 @@ class SourceTests(LibraryFixture):
 
 
 class ResearchTests(LibraryFixture):
+    def test_followup_cannot_bypass_source_by_using_conversation_kind(self):
+        from dataclasses import replace
+        self.state.message = replace(self.message, text='那为什么多智能体不适合所有任务？')
+        value = {'kind': 'conversation', 'message': '因为协调有成本。', 'points': []}
+        with patch('news_officer.research_agent.previous_task', return_value={'document_ids': ['doc1']}):
+            with self.assertRaisesRegex(ValueError, 'fresh source evidence'):
+                self.state.render(value)
+            self.state.message = replace(self.message, text='那这个周报功能上线了吗？')
+            self.assertIn('还没有', self.state.render({**value, 'message': '还没有上线，仅登记了需求。'}))
+
+    def test_feedback_is_idempotent_and_never_applies_group_settings(self):
+        result = self.state.execute('record_editorial_feedback', {'feedback': '更短的自然段', 'scope': 'personal'})
+        again = self.state.execute('record_editorial_feedback', {'feedback': '更短的自然段', 'scope': 'personal'})
+        self.assertEqual(result['id'], again['id'])
+        self.assertEqual(result['status'], 'proposed')
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM editorial_feedback').fetchone()[0], 1)
+        from dataclasses import replace
+        self.state.message = replace(self.message, chat_type='p2p', message_id='private-feedback')
+        self.assertIn('error', self.state.execute('record_editorial_feedback', {'feedback': '修改全群', 'scope': 'group'}))
+
     def test_unauthorized_conversation_never_reaches_expression_provider(self):
         from dataclasses import replace
         self.agent.tone_advisor = SimpleNamespace(advise=AsyncMock())

@@ -12,6 +12,17 @@ from news_officer.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_bounded_discovery_topics_and_opt_in_preparation(self):
+        env = {**self.base_environment(), 'NEWS_OFFICER_DISCOVERY_TOPICS': 'OpenAI, Fireworks',
+               'NEWS_OFFICER_DAILY_PREPARATION': 'true'}
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings.from_env()
+        self.assertTrue(settings.daily_preparation_enabled)
+        self.assertEqual(settings.discovery_topics, ('OpenAI', 'Fireworks'))
+        env['NEWS_OFFICER_DISCOVERY_TOPICS'] = ','.join(str(i) for i in range(25))
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+
     def test_automatic_compilation_defaults_to_exceptional_five_stars(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
             self.assertEqual(Settings.from_env().daily_document_min_stars, 5)

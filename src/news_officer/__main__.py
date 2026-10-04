@@ -53,6 +53,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         daily_rss_only=settings.daily_rss_only,
         podwise_auto_process=settings.podwise_auto_process,
         podwise_discovery_enabled=settings.podwise_discovery_enabled,
+        discovery_topics=settings.discovery_topics,
         editorial_policy=EditorialPolicy(summarizer.client, settings.openai_model, store,
                                         settings.research_focus_path) if settings.editorial_enabled else None,
     )
@@ -81,6 +82,8 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
                 enabled=settings.tone_advisor_enabled, model=settings.tone_advisor_model),
         )
         plugins.append(research)
+        research.daily_time = settings.daily_time.strftime('%H:%M')
+        research.timezone = str(settings.timezone)
     router = CommandRouter(
         plugins
         + [

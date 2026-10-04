@@ -46,6 +46,9 @@ def function(name, description, **properties):
 STRING = {"type": "string"}
 INTEGER = {"type": "integer"}
 TOOLS = [
+    function("get_delivery_health", "读取早报实际发送状态、全文积压和失败任务数量。用户问日报为什么没到、只收到几期时先查；不是连接正常就代表日报成功，不含他人的聊天内容。"),
+    function("record_editorial_feedback", "保存用户明确提出的内容或表达偏好，供维护者审阅。scope=personal 为个人建议，scope=group 为群级变更提议；两者均先登记，不自动修改全群规则或模型。", feedback=STRING,
+             scope={"type": "string", "enum": ["personal", "group"]}),
     function("get_request_status", "读取当前用户当前会话的真实处理记录、交付状态和未完成回答检测。用户要求检查错误、不回复或截断时必须先查，不能只道歉或猜系统故障。"),
     function("record_feature_request", "记录用户明确提出的新功能需求，返回持久化需求编号。仅登记待开发，不代表实现或上线，也不改变权限。", summary=STRING),
     function(
@@ -135,6 +138,7 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
 你也可以回答一般知识、解释概念、帮用户改写和规划；这些普通对话不要求播客引用，用 conversation.message 写完整答案（允许多段和列表）。只有归因于具体播客的观点才必须读取原文并使用 answer 引用，不能把“必须有播客全文”错误套到所有请求上。涉及最新事实而工具无法核实的部分明确区分，不猜测。
 每轮结束前检查当前用户真正要求的交付是否完成。不要只说“我会检查/下面有几点：”就停止；冒号或标题后必须有实质内容。不要用道歉代替答案，不要声称已修复代码或保证永不出错。解释功能应结合真实工具，不许虚构操作能力。
 用户反馈“为什么截断/没回复/检查错误”时，先 get_request_status，再根据真实记录说明已确认的事实、无法确认的原因以及下一步。如果工具不支持某项新功能，帮助整理可执行需求并在用户明确提出需求时 record_feature_request，清楚区分“已记录待开发”和“已完成上线”。权限限制只解释受限部分，继续完成能完成的部分。
+用户明确提出内容筛选或表达偏好时，可以 record_editorial_feedback 保存建议；分清个人建议与群级变更提议，明确仍待审阅，不能声称已训练或已改全群规则。单次对当前答案的“短一点”应先直接改写，不必把每次临时指令永久记录。用户问整份日报未送达或全文积压时先 get_delivery_health，不把系统在线等同于任务成功。
 重要边界：
 0. 用户说“今天的日报”“重发日报”“发一下日报”时，必须先 get_daily_digest(date=当天北京时间日期)。后端原样附上已归档的每期摘要、推荐理由和星级；不要用 recent_updates(days=1) 的发布目录代替日报，不要重写或压缩成总共十条。工具成功后用空 conversation 结束。只有用户另行问更新目录才 recent_updates。日报尚未生成时如实说明，不把它说成没有更新或没有全文。
 1. 查询“监听哪些播客”必须 list_sources；查询“过去一周更新什么”必须 recent_updates(days=7)，不能拿资料库替代全网/订阅源更新；失败来源必须披露。
@@ -207,6 +211,10 @@ class PodcastResearchAgent:
                     id TEXT PRIMARY KEY, session TEXT NOT NULL, message_id TEXT NOT NULL,
                     summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'recorded',
                     created_at TEXT NOT NULL, UNIQUE(session,message_id));
+                CREATE TABLE IF NOT EXISTS editorial_feedback (
+                    id TEXT PRIMARY KEY, session TEXT NOT NULL, message_id TEXT NOT NULL,
+                    scope TEXT NOT NULL, feedback TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'proposed',
+                    created_at TEXT NOT NULL, UNIQUE(session,message_id));
             """)
         initialize_context(self.store)
         initialize_checkpoints(self.store)
@@ -273,6 +281,8 @@ class PodcastResearchAgent:
             "quoted_message": quoted_context(self.store, message),
             "previous_task": previous_task(self.store, key),
         }
+        if context['previous_task'] and re.search(r'^(?:那|他|她|这篇|这期|这个观点|刚才|上面)', text.strip()):
+            context['followup_reminder'] = '若是在追问刚才节目里的原因或观点，必须重新读取相关原文并用 answer 引用回答；一句话也不例外。不要将这类追问归为无需来源的一般聊天。'
         state = ResearchTools(self, key, message)
         resumed = restore_checkpoint(state) if self.backend == 'agents_sdk' else None
         if not resumed and self.tone_advisor is not None:
@@ -408,6 +418,24 @@ class ResearchTools:
             if schema["type"] == "integer" and type(args[key]) is not int:
                 raise ValueError("Invalid integer")
         registry = self.agent.registry
+        if name == "get_delivery_health":
+            from .operations import business_snapshot
+            return business_snapshot(self.agent.store.path,
+                daily_time=getattr(self.agent, 'daily_time', '08:30'),
+                timezone=getattr(self.agent, 'timezone', 'Asia/Shanghai'))
+        if name == "record_editorial_feedback":
+            feedback, scope = args['feedback'].strip(), args['scope']
+            if not feedback or scope not in {'personal', 'group'}:
+                raise ValueError('Invalid feedback')
+            if scope == 'group' and self.message.chat_type != 'group':
+                return {'error': '群级偏好请在对应群中提出；私聊不会改动全群规则。'}
+            identity = hashlib.sha256((self.key + ':' + self.message.message_id).encode()).hexdigest()[:12]
+            with self.agent.store._connect() as db:
+                db.execute("INSERT OR IGNORE INTO editorial_feedback(id,session,message_id,scope,feedback,created_at) "
+                    "VALUES (?,?,?,?,?,?)", (identity, self.key, self.message.message_id, scope, feedback,
+                                             datetime.now(ZoneInfo('UTC')).isoformat()))
+                row = db.execute("SELECT id,scope,feedback,status FROM editorial_feedback WHERE id=?", (identity,)).fetchone()
+            return {**dict(row), 'meaning': '偏好建议已记录，待审阅；尚未自动调整推荐、全群设置或训练模型。'}
         if name == "get_request_status":
             self.diagnosed = True
             return request_status(self.agent.store, self.key)
@@ -787,6 +815,12 @@ class ResearchTools:
             # a request to find/summarize a podcast cannot end in an unresearched
             # request for its title/link/name. Genuine post-search ambiguity is OK.
             question = self.message.text if self.message else ''
+            followup = (re.search(r'^(?:那|他|她|这篇|这期|这个观点|刚才|上面)', question.strip())
+                        and re.search(r'为什么|为何|依据|限制|观点|意味着|怎么看|原因', question)
+                        and not re.search(r'换.{0,3}话题|不谈播客|改写|翻译|功能|机器人|系统|上线|权限', question)
+                        and previous_task(self.agent.store, self.key))
+            if followup and not self.tool_warnings and self.outcome == 'pending':
+                raise ValueError('Podcast follow-up requires fresh source evidence: use previous_task to select the episode, set_research_task and read_document/search_library, then return kind=answer with citations even for a one-sentence explanation. History alone is not evidence.')
             asks_for_episode = bool(re.search(r'播客|podcast|访谈', question, re.IGNORECASE)
                                     and re.search(r'总结|整理|找|拉出|重点|summary|summari', question, re.IGNORECASE))
             clarification = bool(re.search(r'无法.{0,8}定位|没法.{0,8}定位|请.{0,12}(?:标题|链接|姓名)|你.{0,8}补|发.{0,8}(?:节目|播客)?链接|哪一?期|哪一?篇', value['message']))

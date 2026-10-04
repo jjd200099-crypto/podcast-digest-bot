@@ -4,6 +4,15 @@
 # meaningful deployed feature. Never advertise unimplemented plans or secrets.
 RELEASE_NOTES = (
     {
+        "id": "2026-10-04-editorial-and-reliability",
+        "date": "2026-10-04",
+        "text": (
+            "日报现在只展示达到推荐门槛的内容，无关节目仍保留全文归档，不占正文。"
+            "连续追问会重新核对原文；也可以在对话中登记长期表达或选题偏好，先供审阅，不直接改动全群规则。"
+            "新增早报前的有限预处理和送达状态检查，减少重复处理并发现积压。"
+        ),
+    },
+    {
         "id": "2026-10-04-podwise-discovery",
         "date": "2026-10-04",
         "text": (

@@ -25,13 +25,14 @@ class DiscoveryResult:
 
 class PodwiseDiscovery:
     def __init__(self, token, *, topics=TOPICS, pages=3, popular_limit=100,
-                 podcast_topics=PODCAST_TOPICS, catalog_limit=100, candidate_limit=200):
+                 podcast_topics=PODCAST_TOPICS, catalog_limit=100, candidate_limit=200, store=None):
         if not token:
             raise ValueError('Podwise discovery requires PODWISE_API_TOKEN')
         if not (1 <= pages <= 10 and 1 <= popular_limit <= 100
                 and 1 <= catalog_limit <= 200 and 1 <= candidate_limit <= 1000):
             raise ValueError('Invalid Podwise discovery limits')
         self.api = PodwiseTranscriptProvider(token, timeout=15)
+        self.store = store
         self.topics, self.podcast_topics = tuple(topics), tuple(podcast_topics)
         self.pages, self.popular_limit = pages, popular_limit
         self.catalog_limit, self.candidate_limit = catalog_limit, candidate_limit
@@ -72,12 +73,15 @@ class PodwiseDiscovery:
         return Episode(f"podwise:{row['seq']}", title[:1000], link, show[:300],
                        duration_seconds=duration, published_at=when,
                        metadata={'discovery_origin': 'podwise', 'podwise_seq': row['seq'],
+                                 'podwise_podcast_seq': row.get('podcastSeq'),
                                  'source_priority': 'B'}), None
 
     def discover(self, now: datetime, lookback_hours: int) -> DiscoveryResult:
         now = now.astimezone(UTC)
         cutoff = now - timedelta(hours=lookback_hours)
         rows, catalogs, details, errors, capped = [], set(), set(), [], []
+        watch = self.store.discovery_watch_catalogs(now) if self.store else []
+        catalogs.update(watch)
         request_count = 1
         # Popular entries have no publication date. Never substitute list position
         # or discovery time; read their dated catalog (or episode info) instead.
@@ -142,6 +146,10 @@ class PodwiseDiscovery:
                 if request[0].startswith('/podcasts/') and not isinstance(value, list):
                     errors.append('日期目录/元数据')
                     continue
+                if request[0].startswith('/podcasts/'):
+                    seq = int(request[0].split('/')[2])
+                    value = [dict(r, podcastSeq=r.get('podcastSeq') or seq) if isinstance(r, dict) else r
+                             for r in value]
                 rows.extend(value if isinstance(value, list) else [value])
         episodes, invalid = {}, 0
         for row in rows:
@@ -156,6 +164,8 @@ class PodwiseDiscovery:
         notice = (f'Podwise 扩展发现：热门榜前 {self.popular_limit} 条、{len(self.topics)} 组主题搜索'
                   f'和 {len(catalogs)} 个频道日期目录，找到 {len(selected)} 期时间窗内候选'
                   '（去重和全文筛选前，不等于新增推荐数）。不自动订阅新频道。')
+        if watch:
+            notice += f' 包含 {len(watch)} 个近期多次产出高价值内容的观察频道。'
         if capped:
             notice += f' {len(capped)} 项达到扫描上限；搜索并非按最新时间完整排序，不保证覆盖所有新集。'
         if errors:

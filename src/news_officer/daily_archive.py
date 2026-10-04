@@ -24,6 +24,8 @@ def read_daily_digest(store, day: str) -> dict:
     items = {}
     for job in jobs:
         payload = json.loads(job["payload_json"])
+        if payload.get('prepare_only'):
+            continue
         scheduled = datetime.fromisoformat(payload.get("scheduled_for") or job["created_at"])
         if scheduled.tzinfo is None:
             raise ValueError("Daily job timestamp has no timezone")

@@ -46,9 +46,10 @@ episodes join the same daily brief; exceptional compilation-tier episodes follow
 the same individual Feishu-document workflow. The outward recommendation remains
 值得编译 / 值得看全文 / 看摘要 / 无关, with no visible stars.
 
-Low-value exploratory material is archived but omitted from the brief body, with
-a count in the coverage notice. This does **not** change the user's rule that all
-fully transcribed tracked-RSS releases receive a summary. Missing full text remains
+Low-value material from both exploratory and tracked-RSS lanes is archived but
+omitted from the brief body, with separate counts in the coverage notice. Every
+tracked source is still scanned: coverage is not the same as recommending all
+episodes. Missing full text remains
 in the durable backlog, including after the original publication window expires.
 Tracked RSS retries precede exploratory retries; overdue work rotates by next-check
 time so unready discoveries cannot monopolize every backlog batch.

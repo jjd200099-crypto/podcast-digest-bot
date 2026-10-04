@@ -36,7 +36,11 @@ def coverage_report(items: list[DailyItem]) -> str | None:
     filtered = sum(item.status == 'discovery_filtered' for item in items)
     if filtered:
         notices.append(f'扩展发现另有 {filtered} 期已读取并归档全文，但未达到推荐门槛，未纳入正文。')
-    core = _coverage_report([i for i in items if i.status not in {'discovery_status', 'discovery_filtered'}])
+    tracked_filtered = sum(item.status == 'editorial_filtered' for item in items)
+    if tracked_filtered:
+        notices.append(f'关注列表另有 {tracked_filtered} 期已读取并归档全文，但与 AI 研究的相关性或信息密度不足，未纳入正文。')
+    core_items = [i for i in items if i.status not in {'discovery_status', 'discovery_filtered', 'editorial_filtered'}]
+    core = _coverage_report(core_items) if core_items or not (filtered or tracked_filtered) else None
     if core:
         notices.append(core)
     return '\n\n'.join(notices) or None
