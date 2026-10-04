@@ -11,6 +11,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY feeds.json ./
+COPY release.json ./
 COPY src ./src
 
 CMD ["python", "-m", "news_officer"]

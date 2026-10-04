@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import time
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from lark_channel import (
     ChatQueueConfig,
@@ -18,10 +21,17 @@ from lark_channel import (
 
 from .config import Settings
 from .daily_report import coverage_report
-from .feishu import FeishuMessenger, delivery_parts, file_delivery_part
+from .feishu import (
+    FeishuMessenger,
+    combined_delivery_parts,
+    delivery_parts,
+    file_delivery_part,
+)
+from .health import health_snapshot, serve_health, watch_health
 from .models import DailyItem, IncomingMessage, Job, TranscriptAttachment
 from .podcast import PodcastService
 from .qa import render_transcript_attachment
+from .research_checkpoint import ResearchContinuationPending
 from .router import CommandRouter
 from .store import Store
 from .transcript_view import RENDERER_VERSION
@@ -45,10 +55,13 @@ class NewsOfficerRuntime:
         self.router = router
         self.podcast_service = podcast_service
         self.research_agent = research_agent
+        self.active_jobs = {}
         self.wake_workers = {
             "message": asyncio.Event(),
             "daily": asyncio.Event(),
+            "document": asyncio.Event(),
         }
+        self.document_compiler = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self.channel = FeishuChannel(
             app_id=settings.feishu_app_id,
@@ -145,11 +158,18 @@ class NewsOfficerRuntime:
         reply_in_thread: bool,
         file_keys: tuple[str, ...] = (),
     ) -> None:
-        parts = delivery_parts(markdown, idempotency_key)
-        for file_key in file_keys:
-            parts.append(
-                file_delivery_part(file_key, idempotency_key, len(parts) + 1)
-            )
+        existing = [p for p in self.store.outbox_items(job.key)
+                    if p.delivery_key == idempotency_key]
+        if existing:
+            # Upgrade/retry must finish exactly the previously frozen payload,
+            # including any legacy parts or explicitly requested attachments.
+            parts = [(p.msg_type, p.content, p.uuid) for p in existing]
+        else:
+            parts = combined_delivery_parts(markdown, idempotency_key)
+            for file_key in file_keys:
+                parts.append(
+                    file_delivery_part(file_key, idempotency_key, len(parts) + 1)
+                )
         self.store.ensure_outbox(
             job_key=job.key,
             group_key=group_key,
@@ -339,7 +359,7 @@ class NewsOfficerRuntime:
                 thread_id=str(payload.get("thread_id") or ""),
                 parent_message_id=str(payload.get("parent_message_id") or ""),
             )
-            response = await asyncio.to_thread(plugin.handle, text, incoming)
+            response = await self._invoke_with_progress(job, plugin, text, incoming)
             attachment_descriptors = [
                 descriptor.to_persisted_dict()
                 for descriptor in response.attachments
@@ -412,6 +432,16 @@ class NewsOfficerRuntime:
                 replies = (unavailable,)
         if not replies and file_keys:
             replies = ("精编可读版文字稿见附件；原始核验全文已保留用于问答。",)
+        layout = await asyncio.to_thread(self.store.get_job_result, job.key, "message:delivery-layout")
+        if layout is None:
+            previous_parts = await asyncio.to_thread(self.store.outbox_items, job.key)
+            legacy = any(p.delivery_key.startswith(f"{job.key}:result:") for p in previous_parts)
+            if len(replies) > 1 and not legacy:
+                replies = ("\n\n".join(replies),)
+            layout = await asyncio.to_thread(self.store.save_job_result, job.key,
+                                            "message:delivery-layout", "message_delivery_layout",
+                                            {"messages": list(replies)})
+        replies = tuple(layout["messages"])
         context_episode_id = str(persisted.get("context_episode_id") or "")
         for index, reply in enumerate(replies, start=1):
             group_key = (
@@ -433,8 +463,9 @@ class NewsOfficerRuntime:
         await self._drain_outbox(job)
 
     def _persisted_daily_items(self, job: Job) -> list[DailyItem]:
+        from .daily_report import ranked_daily_items
         values = self.store.list_job_results(job.key, "daily_item")
-        return [DailyItem.from_persisted_dict(value) for value in values]
+        return ranked_daily_items([DailyItem.from_persisted_dict(value) for value in values])
 
     def _persist_daily_items(self, job: Job, results: list[DailyItem]) -> None:
         for item in results:
@@ -464,7 +495,104 @@ class NewsOfficerRuntime:
             # cause a different payload to be delivered under the same UUID.
             DailyItem.from_persisted_dict(canonical)
 
-    def _prepare_daily_outbox_and_terminal_states(self, job: Job) -> list[DailyItem]:
+    def _combined_daily(self, job: Job) -> bool:
+        if self.store.list_job_results(job.key, "daily_bundle"):
+            return True
+        settings = getattr(self, "settings", None)
+        # Resume old jobs in their original format; never mutate frozen UUIDs.
+        return (getattr(settings, "daily_combined_message", True)
+                and not getattr(settings, "daily_transcript_attachments", False)
+                and not any(p.group_key.startswith(("episode:", "attachment-unavailable:"))
+                            for p in self.store.outbox_items(job.key)))
+
+    def _restore_daily_bundle(self, job, bundle):
+        for delivery in bundle["deliveries"]:
+            self.store.ensure_outbox(
+                job_key=job.key, group_key=bundle["group_key"],
+                delivery_key=delivery["key"], operation="send",
+                target_id=delivery["target_id"], target_type=delivery["target_type"],
+                reply_in_thread=False, parts=[tuple(p) for p in delivery["parts"]],
+            )
+
+    def _prepare_combined_daily(self, job, *, finalize=False):
+        from .daily_report import render_daily_summary
+
+        items = self._persisted_daily_items(job)
+        bundles = self.store.list_job_results(job.key, "daily_bundle")
+        covered = set()
+        for bundle in bundles:
+            self._restore_daily_bundle(job, bundle)
+            covered.update(bundle["episode_ids"])
+        summaries, report_items, notices = [], [], []
+        for item in items:
+            if item.status == "summarized":
+                if item.episode.id in covered:
+                    report_items.append(item)
+                elif self._daily_summary_is_current(item):
+                    summaries.append(item)
+                    report_items.append(item)
+                else:
+                    self.store.record_episode(item.episode, "summary_format_error")
+                    report_items.append(DailyItem(item.episode, "summary_format_error"))
+                    reason = "版本信息已过期" if item.attachment is None else "原稿或摘要版本在发送前发生变化"
+                    notices.append(f"《{item.episode.title}》的{reason}，本次不发送，待重新核验。")
+            elif item.status in {'discovery_status', 'discovery_filtered', 'editorial_filtered'}:
+                report_items.append(item)
+            elif item.status in {"not_recommended", "no_transcript", "outside_window",
+                                 "summary_format_error", "unverified_date"}:
+                self.store.record_episode(item.episode, item.status)
+                report_items.append(item)
+        catchup = bool(job.payload.get("transcript_catchup"))
+        # A catch-up with nothing ready stays quiet. On retry, previously sent
+        # episodes are represented by their frozen bundle, never re-rendered.
+        if not summaries and (catchup or bundles or not finalize):
+            return items
+        settings = getattr(self, "settings", None)
+        zone = getattr(settings, "timezone", ZoneInfo("Asia/Shanghai"))
+        when = datetime.fromisoformat(job.payload["scheduled_for"]) if job.payload.get("scheduled_for") else datetime.now(zone)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=zone)
+        when = when.astimezone(zone)
+        start = when - timedelta(hours=getattr(settings, "lookback_hours", 24))
+        title = "全文已补齐｜补充摘要" if catchup or bundles else "情报官日报"
+        blocks = [f"{title}｜{when:%Y-%m-%d}｜{len(summaries)} 期"]
+        feature_updates = ""
+        if not catchup and not bundles:
+            from .release_notes import RELEASE_NOTES, render_release_notes
+            feature_updates = render_release_notes(self.store.claim_daily_release_notes(
+                job.key, when.date().isoformat(), RELEASE_NOTES))
+            if feature_updates:
+                blocks.append(feature_updates)
+        if not catchup and not bundles:
+            blocks.append(f"统计窗口：{start:%m-%d %H:%M} 至 {when:%m-%d %H:%M}（{zone}）。")
+        if summaries:
+            blocks.append("以下按阅读优先级排列，均基于已核验全文。节目中的数字与预测为嘉宾或公司表述，未经独立审计。")
+        blocks.extend(render_daily_summary(item.message, discovered=item.episode.id.startswith('podwise:'))
+                      for item in summaries)
+        blocks.extend(notices)
+        report = coverage_report(report_items)
+        if report and not catchup:
+            blocks.append(report)
+        markdown = "\n\n---\n\n".join(blocks)
+        group = "daily:bundle:" + hashlib.sha256(markdown.encode()).hexdigest()[:20]
+        deliveries = []
+        for target_type, target_id in self._daily_targets(job):
+            key = f"{job.key}:{group}:{target_type}:{target_id}"
+            deliveries.append({"key": key, "target_type": target_type, "target_id": target_id,
+                               "parts": combined_delivery_parts(markdown, key)})
+        if not deliveries:
+            raise RuntimeError("A daily delivery has no active subscribers")
+        bundle = self.store.save_job_result(job.key, group, "daily_bundle", {
+            "group_key": group, "episode_ids": [i.episode.id for i in summaries],
+            "feature_updates": feature_updates,
+            "deliveries": deliveries,
+        })
+        self._restore_daily_bundle(job, bundle)
+        return items
+
+    def _prepare_daily_outbox_and_terminal_states(self, job: Job, *, finalize=False) -> list[DailyItem]:
+        if self._combined_daily(job):
+            return self._prepare_combined_daily(job, finalize=finalize)
         items = self._persisted_daily_items(job)
         for item in items:
             if item.status == "summarized":
@@ -505,14 +633,24 @@ class NewsOfficerRuntime:
                         item.episode, "summary_format_error"
                     )
                     continue
+                # A cached v1 digest can contain numeric scores. Normalize the
+                # new delivery only, preserving its archived revision and any
+                # already-frozen outbox parts from an interrupted older release.
+                from .daily_report import render_daily_summary
+
+                if any(part.group_key == f'episode:{item.episode.id}'
+                       for part in self.store.outbox_items(job.key)):
+                    continue
                 self._ensure_broadcast(
                     job,
                     f"episode:{item.episode.id}",
-                    item.message,
+                    ('全文已补齐｜补充摘要\n\n' if job.payload.get('transcript_catchup') else '')
+                    + render_daily_summary(item.message, discovered=item.episode.id.startswith('podwise:')),
                     f"daily:{item.episode.id}",
                     file_key,
                 )
             elif item.status in {
+                "not_recommended",
                 "no_transcript",
                 "outside_window",
                 "summary_format_error",
@@ -540,13 +678,32 @@ class NewsOfficerRuntime:
         )
 
     def _finalize_daily_deliveries(self, job: Job, items: list[DailyItem]) -> None:
+        bundled_sent = set()
+        for bundle in self.store.list_job_results(job.key, "daily_bundle"):
+            if self.store.outbox_group_sent(job.key, bundle["group_key"]):
+                bundled_sent.update(bundle["episode_ids"])
         for item in items:
-            if item.status == "summarized" and self.store.outbox_group_sent(
+            if item.status == "summarized" and (item.episode.id in bundled_sent or self.store.outbox_group_sent(
                 job.key, f"episode:{item.episode.id}"
-            ):
+            )):
                 self.store.record_episode(item.episode, "sent")
+                self.store.complete_daily_transcript(item.episode.id)
 
     async def _handle_daily_job(self, job: Job) -> None:
+        if job.payload.get('prepare_only'):
+            local_now = datetime.now(self.settings.timezone)
+            scheduled = datetime.fromisoformat(job.payload['scheduled_for'])
+            # Do not let a retry/restart start an old warm-up at delivery time.
+            if local_now >= scheduled - timedelta(minutes=30) or not self.store.has_subscriptions():
+                self.store.mark_analysis_complete(job.key)
+                return
+            results = await asyncio.to_thread(self.podcast_service.build_daily, preparation=True)
+            counts = {}
+            for item in results:
+                counts[item.status] = counts.get(item.status, 0) + 1
+            self.store.save_job_result(job.key, 'preparation:counts', 'preparation_counts', counts)
+            self.store.mark_analysis_complete(job.key)
+            return  # Never creates outbox entries, documents, or release notices.
         targets = await asyncio.to_thread(self._daily_targets, job)
         if not targets:
             # A queued job may race with the last recipient unsubscribing. Do
@@ -564,7 +721,9 @@ class NewsOfficerRuntime:
             return
 
         try:
-            results = await asyncio.to_thread(self.podcast_service.build_daily)
+            build = (self.podcast_service.build_pending if job.payload.get('transcript_catchup')
+                     else self.podcast_service.build_daily)
+            results = await asyncio.to_thread(build)
         except Exception:
             # A broken source scan is not an empty digest. Persist and deliver a
             # single idempotent warning while leaving the job retryable.
@@ -583,7 +742,7 @@ class NewsOfficerRuntime:
         failures = sum(item.status == "failed" for item in results)
         await asyncio.to_thread(self._persist_daily_items, job, results)
         persisted = await asyncio.to_thread(
-            self._prepare_daily_outbox_and_terminal_states, job
+            self._prepare_daily_outbox_and_terminal_states, job, finalize=not failures
         )
 
         if failures:
@@ -600,7 +759,7 @@ class NewsOfficerRuntime:
 
         if not failures:
             report = coverage_report(persisted)
-            if report:
+            if report and not job.payload.get('transcript_catchup') and not self._combined_daily(job):
                 group = "daily:coverage" if persisted else "daily:empty"
                 await asyncio.to_thread(
                     self._ensure_broadcast,
@@ -620,6 +779,67 @@ class NewsOfficerRuntime:
                 f"{failures} podcast candidates failed and remain retryable"
             )
 
+    async def _invoke_with_progress(self, job, plugin, text, incoming):
+        # Never stream an unvalidated partial answer. Fast replies stay quiet;
+        # slow work gets one durable, idempotent progress notice per event.
+        work = asyncio.create_task(asyncio.to_thread(plugin.handle, text, incoming))
+        try:
+            done, _ = await asyncio.wait({work}, timeout=getattr(getattr(self, 'settings', None), 'progress_delay_seconds', 8))
+            if not done and plugin.acknowledgement(text) is None:
+                try:
+                    await asyncio.to_thread(self._ensure_reply, job, 'message:progress',
+                        '这条请求仍在处理中，完成后会在这里回复；不需要重复发送。',
+                        incoming.message_id, f'{job.key}:progress', bool(incoming.thread_id))
+                    await self._drain_outbox(job)
+                except Exception as error:  # noqa: BLE001 - preserve running analysis and retry delivery
+                    logger.warning('Progress notice deferred: %s', type(error).__name__)
+            return await work
+        finally:
+            # Do not start a second tool loop after a progress-send failure.
+            # Shutdown is handled by the process supervisor and durable jobs.
+            if not work.done():
+                work.cancel()
+
+    async def _failure_notice(self, job, terminal):
+        if job.kind == 'document' and terminal:
+            try:
+                if job.payload.get('mode') == 'requested_episode':
+                    if self.document_compiler.request_allowed(job.payload):
+                        await asyncio.to_thread(self._ensure_reply, job, 'document:delayed',
+                            '这期文档还未编译完成，云端会继续重试；完成后会在这里回复链接，不需要重复发送。',
+                            job.payload['message_id'], f'{job.key}:document-delayed',
+                            job.payload.get('reply_in_thread', False))
+                        await self._drain_outbox(job)
+                    return
+                active = set(self.store.list_subscriptions())
+                content = (f"{job.payload['day']} 的播客精读文档暂未编译完成，云端会继续重试。"
+                           "短版日报与聊天问答不受影响；尚未完成的文档不会作为成品推送。")
+                for kind, target in job.payload['targets']:
+                    if (kind, target) not in active:
+                        continue
+                    key = f"{job.key}:document-delayed:{kind}:{target}"
+                    self.store.ensure_outbox(job_key=job.key, group_key='document:delayed',
+                        delivery_key=key, operation='send', target_id=target, target_type=kind,
+                        reply_in_thread=False, parts=combined_delivery_parts(content, key))
+                await self._drain_outbox(job)
+            except Exception as error:  # noqa: BLE001 - durable retry boundary
+                logger.warning('Document failure notice deferred: %s', type(error).__name__)
+            return
+        if job.kind != 'message':
+            return
+        message_id = job.payload.get('message_id')
+        if not message_id:
+            return
+        stage = 'failed' if terminal else 'retry'
+        text = ('这次请求遇到持续故障，自动重试仍未完成。我已保留这条请求，不能把它说成处理成功。你可以问我“检查这次请求的状态”。'
+                if terminal else '处理这条请求时连接或服务暂时出错，我正在自动重试；你不需要重新发送问题。')
+        try:
+            await asyncio.to_thread(self._ensure_reply, job, f'message:{stage}', text,
+                message_id, f'{job.key}:{stage}', bool(job.payload.get('thread_id')))
+            await self._drain_outbox(job)
+        except Exception as error:  # noqa: BLE001 - a notice must not kill the worker
+            logger.warning('Failure notice delivery deferred: %s', type(error).__name__)
+
     async def _worker(self, kind: str) -> None:
         wake_event = self.wake_workers[kind]
         while True:
@@ -634,24 +854,42 @@ class NewsOfficerRuntime:
                     pass
                 continue
             try:
+                if kind == 'message' and hasattr(self, 'active_jobs'):
+                    self.active_jobs[job.key] = time.monotonic()
                 if kind == "message":
                     await self._handle_message_job(job)
                 elif kind == "daily":
                     await self._handle_daily_job(job)
+                elif kind == "document":
+                    await self._handle_document_job(job)
                 else:
                     raise ValueError(f"Unknown job kind: {job.kind}")
-            except Exception as error:
-                logger.exception("Job %s failed", job.key)
+            except Exception as error:  # noqa: BLE001 - durable worker retry boundary
+                logger.error("Job %s failed: %s", job.key, type(error).__name__)
+                if not isinstance(error, ResearchContinuationPending) or job.attempts >= 5:
+                    await self._failure_notice(job, terminal=job.attempts >= 5)
                 await asyncio.to_thread(
-                    self.store.fail, job.key, str(error), job.attempts
+                    self.store.fail, job.key, type(error).__name__, job.attempts
                 )
             else:
                 await asyncio.to_thread(self.store.complete, job.key)
+            finally:
+                if hasattr(self, 'active_jobs'):
+                    self.active_jobs.pop(job.key, None)
 
     async def _scheduler(self) -> None:
         while True:
             local_now = datetime.now(self.settings.timezone)
             has_subscribers = await asyncio.to_thread(self.store.has_subscriptions)
+            scheduled = local_now.replace(hour=self.settings.daily_time.hour,
+                minute=self.settings.daily_time.minute, second=0, microsecond=0)
+            if (has_subscribers and getattr(self.settings, 'daily_preparation_enabled', False)
+                    and scheduled - timedelta(hours=2) <= local_now < scheduled - timedelta(hours=1)):
+                inserted = await asyncio.to_thread(self.store.enqueue,
+                    f'daily:prepare:{scheduled.date().isoformat()}', 'daily',
+                    {'scheduled_for': scheduled.isoformat(), 'prepare_only': True})
+                if inserted:
+                    self._wake_worker('daily')
             if has_subscribers and local_now.time() >= self.settings.daily_time:
                 jobs = [
                     (
@@ -683,24 +921,92 @@ class NewsOfficerRuntime:
                     if inserted:
                         logger.info("Queued daily digest %s", key)
                         self._wake_worker("daily")
+            if has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1):
+                slot = int(local_now.timestamp()) // 1800
+                inserted = await asyncio.to_thread(self.store.enqueue,
+                    f'daily:transcript-catchup:{slot}', 'daily',
+                    {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
+                if inserted:
+                    self._wake_worker('daily')
+            if (getattr(self, 'document_compiler', None)
+                    and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat())):
+                self._wake_worker('document')
             await asyncio.sleep(30)
+
+    async def _handle_document_job(self, job):
+        result = await asyncio.to_thread(self.document_compiler.publish, job)
+        if result and result['notify']:
+            if 'documents' in result:
+                lines = [result['title']]
+                if not result.get('reply_to'):
+                    lines.append('以下重点节目已分别编译成独立文档，早间文字日报保持不变。')
+                for document in result['documents']:
+                    title = document['title'].replace('[', '（').replace(']', '）')
+                    lines.append(f"[{title}]({document['url']})")
+                content = '\n\n'.join(lines)
+            else:
+                content = (f"{result['title']}已整理完成，共 {result['count']} 期。"
+                           "\n\n文档内含带时间戳的核心论点与分章节精读，不附整期实录。"
+                           f"\n\n[打开今日播客精读]({result['url']})")
+            if result.get('reply_to'):
+                await asyncio.to_thread(self._ensure_reply, job, 'document:link', content,
+                    result['reply_to'], f'{job.key}:document-link', result.get('reply_in_thread', False))
+            for kind, target in (() if result.get('reply_to') else result['targets']):
+                key = f"{job.key}:document-link:{kind}:{target}"
+                self.store.ensure_outbox(job_key=job.key, group_key='document:link',
+                    delivery_key=key, operation='send', target_id=target, target_type=kind,
+                    reply_in_thread=False, parts=combined_delivery_parts(content, key))
+        await self._drain_outbox(job)
 
     async def _library_archiver(self) -> None:
         while True:
             try:
                 completed = await asyncio.to_thread(self.research_agent.library.archive_pending)
                 if completed:
-                    logger.info("Verified %s Feishu podcast archive(s)", len(completed))
+                    logger.info("Verified %s podcast archive(s)", len(completed))
             except Exception as error:  # noqa: BLE001 - independent worker retries without stopping the bot
                 logger.warning("Library archive pending retry: %s", type(error).__name__)
             await asyncio.sleep(60)
 
+    async def _business_monitor(self) -> None:
+        from .operations import business_snapshot
+
+        previous = None
+        while True:
+            try:
+                state = await asyncio.to_thread(business_snapshot, self.store.path,
+                    daily_time=self.settings.daily_time.strftime("%H:%M"),
+                    timezone=str(self.settings.timezone))
+                encoded = json.dumps(state, ensure_ascii=False, sort_keys=True)
+                if encoded != previous:
+                    # Business failure must alert operators, not restart the
+                    # worker mid-analysis and repeatedly lose progress.
+                    log = logger.error if state["daily_overdue"] else logger.info
+                    log("Business delivery status: %s", encoded)
+                    previous = encoded
+            except Exception as error:  # noqa: BLE001 - monitoring must not kill delivery
+                logger.warning("Business monitor unavailable: %s", type(error).__name__)
+            await asyncio.sleep(60)
+
+    async def _channel_loop(self) -> None:
+        # connect() runs the SDK's foreground WS loop: it can remain blocked
+        # before _mark_ready(). Use its public async readiness API instead.
+        await self.channel.connect_until_ready(timeout=60)
+        if not self.channel.connection_snapshot().ready:
+            raise RuntimeError('feishu-channel stopped before readiness')
+        logger.info('Feishu channel is ready')
+        # Reconnect/stall detection is handled by the health watchdog. A ready
+        # connection is long-lived, not a task that should immediately finish.
+        await asyncio.Future()
+
     async def run(self) -> None:
         self._main_loop = asyncio.get_running_loop()
         self.store.initialize()
+        if getattr(self, 'document_compiler', None) is not None:
+            self.document_compiler.initialize()
         if self.research_agent is not None:
             self.research_agent.initialize()
-            logger.info("Research execution: OpenAI Agents SDK (model=%s)", self.settings.openai_model)
+            logger.info("Research execution: %s (model=%s)", self.research_agent.backend, self.settings.openai_model)
         else:
             logger.warning("Research execution: legacy intent router; Agents SDK mode is disabled")
         seeded = self.store.seed_subscriptions(
@@ -712,13 +1018,24 @@ class NewsOfficerRuntime:
         if recovered:
             logger.warning("Recovered %s interrupted jobs", recovered)
         tasks = [
-            asyncio.create_task(self._worker("message"), name="message-worker"),
+            *[asyncio.create_task(self._worker("message"), name=f"message-worker-{i}")
+              for i in range(getattr(self.settings, "message_workers", 4))],
             asyncio.create_task(self._worker("daily"), name="daily-worker"),
             asyncio.create_task(self._scheduler(), name="daily-scheduler"),
-            asyncio.create_task(self.channel.connect(), name="feishu-channel"),
+            asyncio.create_task(self._business_monitor(), name="business-monitor"),
+            asyncio.create_task(self._channel_loop(), name="feishu-channel"),
         ]
-        if self.research_agent is not None and self.research_agent.library.folder:
+        if getattr(self, 'document_compiler', None) is not None:
+            tasks.append(asyncio.create_task(self._worker('document'), name='document-worker'))
+        if self.research_agent is not None and (
+            self.research_agent.library.folder
+            or getattr(self.research_agent.library, "archive_root", None)
+        ):
             tasks.append(asyncio.create_task(self._library_archiver(), name="library-archiver"))
+        if getattr(self.settings, 'health_port', 0):
+            snapshot = lambda: health_snapshot(self.channel, self.active_jobs)
+            tasks += [asyncio.create_task(serve_health(self.settings.health_port, snapshot), name='health-http'),
+                      asyncio.create_task(watch_health(snapshot), name='health-watchdog')]
         try:
             logger.info("情报官 is connecting to Feishu over WebSocket")
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -731,6 +1048,8 @@ class NewsOfficerRuntime:
             stopped = next(iter(done))
             raise RuntimeError(f"Supervised task stopped unexpectedly: {stopped.get_name()}")
         finally:
+            if begin_shutdown := getattr(self, 'on_shutdown', None):
+                begin_shutdown()
             for task in tasks:
                 task.cancel()
             try:

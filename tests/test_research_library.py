@@ -6,7 +6,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import requests
 from agents import Model, ModelResponse, Usage
@@ -19,6 +19,8 @@ from openai.types.responses import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from news_officer.daily_archive import read_daily_digest
+from news_officer.feishu import delivery_parts
 from news_officer.library import (
     FeishuLibraryAPI,
     LibraryDocument,
@@ -27,10 +29,11 @@ from news_officer.library import (
     block_signature,
     markdown_blocks,
 )
-from news_officer.models import Episode, IncomingMessage, Transcript
-from news_officer.podcast import PodcastService
+from news_officer.models import DailyItem, Episode, IncomingMessage, Transcript
+from news_officer.podcast import PodcastService, _readable_attachment
 from news_officer.podcast_archive import PodcastArchive
 from news_officer.research_agent import PodcastResearchAgent, ResearchTools
+from news_officer.research_context import previous_task, quoted_context
 from news_officer.source_registry import SourceRegistry
 from news_officer.store import Store
 
@@ -433,6 +436,203 @@ class SourceTests(LibraryFixture):
 
 
 class ResearchTests(LibraryFixture):
+    def test_followup_cannot_bypass_source_by_using_conversation_kind(self):
+        from dataclasses import replace
+        self.state.message = replace(self.message, text='那为什么多智能体不适合所有任务？')
+        value = {'kind': 'conversation', 'message': '因为协调有成本。', 'points': []}
+        with patch('news_officer.research_agent.previous_task', return_value={'document_ids': ['doc1']}):
+            with self.assertRaisesRegex(ValueError, 'fresh source evidence'):
+                self.state.render(value)
+            self.state.message = replace(self.message, text='那这个周报功能上线了吗？')
+            self.assertIn('还没有', self.state.render({**value, 'message': '还没有上线，仅登记了需求。'}))
+
+    def test_feedback_is_idempotent_and_never_applies_group_settings(self):
+        result = self.state.execute('record_editorial_feedback', {'feedback': '更短的自然段', 'scope': 'personal'})
+        again = self.state.execute('record_editorial_feedback', {'feedback': '更短的自然段', 'scope': 'personal'})
+        self.assertEqual(result['id'], again['id'])
+        self.assertEqual(result['status'], 'proposed')
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM editorial_feedback').fetchone()[0], 1)
+        from dataclasses import replace
+        self.state.message = replace(self.message, chat_type='p2p', message_id='private-feedback')
+        self.assertIn('error', self.state.execute('record_editorial_feedback', {'feedback': '修改全群', 'scope': 'group'}))
+
+    def test_unauthorized_conversation_never_reaches_expression_provider(self):
+        from dataclasses import replace
+        self.agent.tone_advisor = SimpleNamespace(advise=AsyncMock())
+        self.agent.handle('你好', replace(self.message, chat_type='group', chat_id='not-authorized'))
+        self.agent.tone_advisor.advise.assert_not_awaited()
+
+    def test_expression_failure_fallback_still_reaches_main_model(self):
+        self.agent.tone_advisor = SimpleNamespace(advise=AsyncMock(return_value=None))
+        expected = '你好，今天想聊哪期播客？'
+        self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': expected, 'points': []})])
+        self.assertEqual(self.agent.handle('你好', self.message).messages[0], expected)
+
+    def test_expression_advice_reaches_main_model_but_does_not_replace_its_answer(self):
+        from test_tone_advisor import PLAN
+        self.agent.tone_advisor = SimpleNamespace(advise=AsyncMock(return_value=PLAN))
+        expected = '可以。把你想讨论的那期发来，我们就从你最关心的问题聊起。'
+        model = self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': expected, 'points': []})])
+        response = self.agent.handle('你好', self.message)
+        self.assertEqual(response.messages[0], expected)
+        context = json.loads(model.inputs[0][-1]['content'])
+        self.assertEqual(context['expression_advice'], PLAN)
+        # Repeated delivery must reuse the committed answer, not call either model again.
+        self.agent.handle('你好', self.message)
+        self.agent.tone_advisor.advise.assert_awaited_once()
+
+    def test_actual_half_sentence_is_repaired_before_commit(self):
+        self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': '主要错误有：', 'points': []}),
+            final_output({'kind': 'conversation', 'message': '刚才只有开头，没有回答你的问题。应当补全具体原因和下一步。', 'points': []}),
+        ])
+        reply = self.agent.handle('你说话没说完', self.message)
+        self.assertIn('补全具体原因', reply.messages[0])
+        with self.store._connect() as db:
+            audit = json.loads(db.execute('SELECT audit_json FROM research_run_state').fetchone()[0])
+            self.assertEqual(db.execute('SELECT answer FROM research_turns').fetchone()[0], reply.messages[0])
+        self.assertEqual(len(audit['validation_errors']), 1)
+
+    def test_answer_preamble_is_not_silently_discarded(self):
+        self.state.evidence_item('Source successfully added', identity='E0001')
+        with self.assertRaisesRegex(ValueError, 'Do not lose answer text'):
+            self.state.render({'kind': 'answer', 'message': '已添加成功。', 'points': [
+                {'text': 'Practical AI', 'citations': [{'id': 'E0001'}]}]})
+
+    def test_general_questions_do_not_require_podcast_citations(self):
+        answer = 'Agent 会选择工具并根据结果继续执行。普通聊天主要生成回答。\n\n例如查播客时，Agent 先定位节目，再读全文。'
+        self.agent.sdk_model = ScriptedModel([final_output({'kind': 'conversation', 'message': answer, 'points': []})])
+        self.assertEqual(self.agent.handle('解释 Agent 和聊天机器人的区别', self.message).messages[0], answer)
+
+    def test_diagnosis_requires_real_session_tool(self):
+        from dataclasses import replace
+        message = replace(self.message, text='为什么你说话会截断')
+        self.agent.sdk_model = ScriptedModel([
+            final_output({'kind': 'conversation', 'message': '可能是网络问题。', 'points': []}),
+            tool_call('get_request_status'),
+            final_output({'kind': 'conversation', 'message': '当前会话没有足够历史记录，不能确认截断原因；不能据此断言网络故障。', 'points': []}),
+        ])
+        self.assertIn('不能确认', self.agent.handle(message.text, message).messages[0])
+
+    def test_feature_request_is_durable_idempotent_not_implemented(self):
+        first = self.state.execute('record_feature_request', {'summary': '增加每周播客对比功能'})
+        again = self.state.execute('record_feature_request', {'summary': '重复登记'})
+        self.assertEqual(first, again)
+        self.assertEqual(first['status'], 'recorded')
+        self.assertIn('尚未实现', first['meaning'])
+
+    def test_diagnostics_never_read_other_members(self):
+        from news_officer.request_status import request_status
+        for user in ('user', 'colleague'):
+            message = IncomingMessage('status-' + user, 'team', '检查记录', 'group', user)
+            self.store.enqueue('message:' + message.message_id, 'message', message.__dict__)
+            with self.store._connect() as db:
+                db.execute('INSERT INTO research_turns(session,message_id,question,answer) VALUES (?,?,?,?)',
+                           (message.conversation_key, message.message_id, user + '-question', user + '-answer'))
+        result = request_status(self.store, 'group:team:user')
+        self.assertEqual(len(result['requests']), 1)
+        self.assertNotIn('colleague', json.dumps(result))
+
+    def saved_daily(self):
+        record = self.archive_record()
+        digest = "推荐理由：具体讨论经营方法。\n\n1. 观点来自完整文字稿。\n\n推荐星级：★★★★☆"
+        self.store.save_transcript_digest(record.episode.id, digest,
+                                         record.content_sha256, record.record_revision_sha256)
+        key = "daily:2026-09-17"
+        self.store.enqueue(key, "daily", {"scheduled_for": "2026-09-17T08:30:00+08:00"})
+        item = DailyItem(record.episode, "summarized", digest, _readable_attachment(record, digest))
+        self.store.save_job_result(key, "episode:episode", "daily_item", item.to_persisted_dict())
+        self.store.mark_analysis_complete(key)
+        return record, item
+
+    def test_daily_tool_shared_by_private_and_different_group_members(self):
+        self.saved_daily()
+        replies = []
+        for index, (chat, kind, user) in enumerate([
+            ("private", "p2p", "user"), ("team", "group", "user"),
+            ("team", "group", "colleague"),
+        ]):
+            self.agent.sdk_model = ScriptedModel([
+                tool_call("get_daily_digest", {"date": "2026-09-17"}),
+                final_output({"kind": "conversation", "message": "", "points": []}),
+            ])
+            message = IncomingMessage(f"daily-{index}", chat, "发一下今天的日报", kind, user)
+            reply = self.agent.handle(message.text, message)
+            replies.append(reply.messages)
+            self.assertFalse(reply.attachments)
+            self.assertIn("阅读建议：值得看全文", reply.messages[0])
+            self.assertNotIn("★", reply.messages[0])
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual(replies[1], replies[2])
+
+    def test_daily_missing_does_not_claim_no_new_podcasts(self):
+        value = self.state.execute("get_daily_digest", {"date": "2026-09-17"})
+        self.assertEqual(value["status"], "not_generated")
+        reply = self.state.render({"kind": "conversation", "message": "", "points": []})
+        self.assertIn("尚未生成或归档", reply)
+
+    def test_daily_reads_delivery_date_not_episode_publication_date(self):
+        self.saved_daily()
+        self.assertEqual(read_daily_digest(self.store, "2026-09-17")["count"], 1)
+        self.assertEqual(read_daily_digest(self.store, "2026-09-14")["status"], "not_generated")
+        with self.assertRaises(ValueError):
+            read_daily_digest(self.store, "yesterday")
+
+    def test_daily_rejects_stale_transcript_revision(self):
+        record, _ = self.saved_daily()
+        self.store.save_verified_transcript(record.episode, Transcript("changed full text", "official", "https://example.test/transcript", True))
+        report = read_daily_digest(self.store, "2026-09-17")
+        self.assertEqual(report["count"], 0)
+        self.assertIn("版本不一致", report["markdown"])
+
+    def test_daily_retry_does_not_duplicate_summary(self):
+        _, item = self.saved_daily()
+        self.store.enqueue("daily:retry", "daily", {"scheduled_for": "2026-09-17T10:00:00+08:00"})
+        self.store.save_job_result("daily:retry", "episode:episode", "daily_item", item.to_persisted_dict())
+        report = read_daily_digest(self.store, "2026-09-17")
+        self.assertEqual(report["count"], 1)
+        self.assertIn("未完成", report["markdown"])
+
+    def test_recent_metadata_reaches_analysis_without_url_adapter_gate(self):
+        episode = Episode("rss:fixture", "A new podcast", "https://example.test/ep", "Original Show",
+                          published_at=datetime.now(UTC), metadata={"audio_url": "https://example.test/audio.mp3", "rss_feed_url": "https://example.test/rss"})
+        seen = []
+        def analyze(value):
+            seen.append(value)
+            return SimpleNamespace(message="完整文字稿摘要")
+        self.agent.podcast_service = SimpleNamespace(analyze_discovered_episode=analyze)
+        with patch("news_officer.source_registry.latest_rss_episodes", return_value=[episode]):
+            payload = self.state.execute("recent_updates", {"days": 1, "show": ""})
+        self.assertNotIn("audio.mp3", json.dumps(payload))
+        result = self.state.execute("analyze_podcast", {"url": episode.url})
+        self.assertIn("摘要", result["text"])
+        self.assertEqual(seen, [episode])
+
+    def test_same_url_multiple_episodes_is_not_silently_misidentified(self):
+        episodes = [Episode(f"rss:{i}", f"Episode {i}", "https://example.test/feed", "Original Show", published_at=datetime.now(UTC)) for i in range(2)]
+        self.agent.podcast_service = SimpleNamespace()
+        with patch("news_officer.source_registry.latest_rss_episodes", return_value=episodes):
+            self.state.execute("recent_updates", {"days": 1, "show": ""})
+        result = self.state.execute("analyze_podcast", {"url": episodes[0].url})
+        self.assertIn("无法唯一定位", result["error"])
+
+    def test_discovered_rss_reuses_verified_digest_without_new_model_call(self):
+        record, item = self.saved_daily()
+        service = PodcastService(self.store, self.feeds, SimpleNamespace())
+        with patch.object(service.transcript_resolver, "fetch", side_effect=AssertionError):
+            result = service.analyze_discovered_episode(record.episode)
+        self.assertEqual(result.message, item.message)
+
+    def test_podwise_citation_uses_public_episode_page_not_token_required_api(self):
+        record = self.archive_record()
+        self.store.save_verified_transcript(record.episode, Transcript(
+            record.transcript.text, "Podwise", "https://app.podwise.ai/api/open/v1/episodes/123/transcripts", True))
+        docs, _ = PodcastArchive(self.store).snapshot()
+        self.assertEqual(docs[0].url, "https://podwise.ai/episodes/123")
+
     def setUp(self):
         super().setUp()
         self.agent = PodcastResearchAgent(
@@ -666,7 +866,7 @@ class ResearchTests(LibraryFixture):
         self.assertIn("error", result)
 
     def test_fabricated_evidence_rejected(self):
-        with self.assertRaises(KeyError):
+        with self.assertRaisesRegex(ValueError, "Unknown evidence"):
             self.state.render(
                 {
                     "kind": "answer",
@@ -820,12 +1020,47 @@ class ResearchTests(LibraryFixture):
             self.assertEqual("Bending Spoons" in json.dumps(model.inputs[0]), expected)
 
     def test_sdk_loop_budget_is_enforced(self):
+        from news_officer.research_checkpoint import ResearchContinuationPending
         model = self.agent.sdk_model = ScriptedModel(
-            [tool_call("list_sources", call_id=f"c{i}") for i in range(30)]
+            [tool_call("list_sources", call_id=f"c{i}") for i in range(60)]
         )
+        for _ in range(2):
+            with self.assertRaises(ResearchContinuationPending):
+                self.agent.handle("一直找", self.message)
         reply = self.agent.handle("一直找", self.message)
-        self.assertLessEqual(len(model.inputs), 16)
-        self.assertIn("上限", reply.messages[0])
+        self.assertLessEqual(len(model.inputs), 48)
+        self.assertIn("继续", reply.messages[0])
+        self.assertNotIn("订阅变更", reply.messages[0])
+        with self.store._connect() as db:
+            audit = json.loads(db.execute("SELECT audit_json FROM research_run_state").fetchone()[0])
+        self.assertEqual(audit["outcome"], "budget_exhausted")
+
+    def test_provider_failure_resumes_saved_tool_result_not_fresh_research(self):
+        class FlakyModel(ScriptedModel):
+            failed = False
+
+            async def get_response(self, **kwargs):
+                if len(self.inputs) == 1 and not self.failed:
+                    self.failed = True
+                    raise TimeoutError('simulated provider timeout')
+                return await super().get_response(**kwargs)
+
+        model = self.agent.sdk_model = FlakyModel([
+            tool_call('list_sources'),
+            final_output({'kind': 'answer', 'message': '', 'points': [
+                {'text': '追踪 Original Show。', 'citations': [{'id': 'E0001'}]}]}),
+        ])
+        with self.assertRaises(TimeoutError):
+            self.agent.handle('追踪什么', self.message)
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM research_turns').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM research_checkpoints').fetchone()[0], 1)
+        reply = self.agent.handle('追踪什么', self.message)
+        self.assertIn('Original Show', reply.messages[0])
+        self.assertIn('function_call_output', json.dumps(model.inputs[-1]))
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM research_checkpoints').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT count(*) FROM research_steps').fetchone()[0], 1)
 
     def test_discovered_episode_can_be_analyzed_without_requiring_user_copy(self):
         self.agent.podcast_service = SimpleNamespace(
@@ -854,6 +1089,167 @@ class ResearchTests(LibraryFixture):
         self.assertEqual(
             "".join(c["text"] for c in first["chunks"] + second["chunks"]), doc.text
         )
+
+    def publish_quote(self, group_key, target="team", target_type="chat_id", payload=None):
+        key = "message:" + payload["message_id"] if payload else "quote-job"
+        self.store.enqueue(key, "message" if payload else "daily", payload or {})
+        self.store.ensure_outbox(
+            job_key=key, group_key=group_key, delivery_key=key,
+            operation="reply" if payload else "send",
+            target_id=target, target_type=target_type, reply_in_thread=False,
+            parts=delivery_parts("visible message", key),
+        )
+        self.store.mark_outbox_sent(self.store.outbox_items(key)[0].id, "quoted-bot")
+
+    def test_quote_resolves_episode_for_colleague_without_other_chat_leak(self):
+        record = self.archive_record()
+        self.publish_quote("episode:" + record.episode.id)
+        message = IncomingMessage("new", "team", "这篇做详细版", "group", "colleague",
+                                  parent_message_id="quoted-bot")
+        self.assertEqual(quoted_context(self.store, message)["episode"]["document_id"], record.reference)
+        foreign = IncomingMessage("new", "foreign", "这篇", "group", "colleague",
+                                  parent_message_id="quoted-bot")
+        self.assertIsNone(quoted_context(self.store, foreign))
+
+    def test_private_quote_cannot_be_read_in_group_or_by_other_user(self):
+        record = self.archive_record()
+        self.publish_quote("episode:" + record.episode.id, "user", "open_id")
+        for chat, kind, sender in [("team", "group", "user"), ("dm2", "p2p", "colleague")]:
+            self.assertIsNone(quoted_context(self.store, IncomingMessage(
+                "m", chat, "这篇", kind, sender, parent_message_id="quoted-bot")))
+        self.assertIsNotNone(quoted_context(self.store, IncomingMessage(
+            "m", "dm", "这篇", "p2p", "user", parent_message_id="quoted-bot")))
+
+    def test_quoted_reply_exposes_only_visible_turn_not_speakers_history(self):
+        with self.store._connect() as db:
+            db.executemany("INSERT INTO research_turns(session,message_id,question,answer) VALUES (?,?,?,?)", [
+                ("group:team:other", "quoted-original", "Noam Brown", "visible answer"),
+                ("group:team:other", "unrelated", "unrelated personal note", "do not expose"),
+            ])
+        self.publish_quote("message:result:1", payload={"message_id": "quoted-original", "chat_id": "team"})
+        msg = IncomingMessage("m", "team", "展开", "group", "user", parent_message_id="quoted-bot")
+        context = quoted_context(self.store, msg)
+        self.assertEqual(context["answer"], "visible answer")
+        self.assertNotIn("unrelated", json.dumps(context))
+        self.assertIsNone(quoted_context(self.store, IncomingMessage(
+            "m", "foreign", "展开", "group", "user", parent_message_id="quoted-bot")))
+
+    def test_task_rejects_unknown_docs_and_long_internal_anchor(self):
+        with (patch.object(self.library, "snapshot", return_value=([], [])),
+              self.assertRaises(ValueError)):
+            self.state.execute("set_research_task", {"goal": "task", "document_ids": ["fake"], "format": "detailed"})
+        evidence = self.state.evidence_item("word " * 30)
+        with self.assertRaisesRegex(ValueError, "anchor too long"):
+            self.state.render({"kind": "answer", "message": "", "points": [{
+                "text": "paraphrase", "citations": [{"id": evidence["evidence_id"], "quote": "word " * 26}]}]})
+
+    def test_id_only_citations_require_real_selected_body_evidence(self):
+        doc = LibraryDocument("d", "Noam Brown", "https://example.test/noam", "Evidence about agents")
+        with patch.object(self.library, "snapshot", return_value=([doc], [])):
+            self.state.execute("set_research_task", {"goal": "分析", "document_ids": ["d"], "format": "brief"})
+            self.state.execute("list_documents", {"offset": 0})
+            answer = {"kind": "answer", "message": "", "points": [
+                {"text": "分析原文", "citations": [{"id": "d:metadata"}]}]}
+            with self.assertRaisesRegex(ValueError, "not metadata"):
+                self.state.render(answer)
+            self.state.execute("read_document", {"document_id": "d", "start": 0})
+            answer["points"][0]["citations"] = [{"id": "d:C0001"}]
+            self.assertIn("https://example.test/noam", self.state.render(answer))
+
+    def test_brief_citations_are_deduplicated_in_one_footer(self):
+        doc = LibraryDocument("d", "Town CEO", "https://example.test/town", "Verified transcript body")
+        with patch.object(self.library, "snapshot", return_value=([doc], [])):
+            self.state.execute("set_research_task", {"goal": "重点总结", "document_ids": ["d"], "format": "brief"})
+            self.state.execute("read_document", {"document_id": "d", "start": 0})
+            points = [{"text": f"{i}. 原文支持的第{i}条要点。", "citations": [{"id": "d:C0001"}]}
+                      for i in range(1, 9)]
+            value = {"kind": "answer", "message": "", "points": points}
+            rendered = self.state.render(value)
+            self.assertEqual(rendered.count(doc.url), 1)
+            self.assertEqual(rendered.split('\n\n来源：')[0], '\n\n'.join(p['text'] for p in points))
+            self.assertTrue(rendered.endswith(f"来源：[{doc.title}]({doc.url})"))
+            # Deduplicating presentation must not skip validation of later points.
+            points[-1]['citations'] = [{'id': 'invented'}]
+            with self.assertRaises(ValueError):
+                self.state.render(value)
+
+    def test_comparison_keeps_each_distinct_source_once_in_first_use_order(self):
+        first = self.state.evidence_item('first source', 'https://example.test/first', 'First')
+        second = self.state.evidence_item('second source', 'https://example.test/second', 'Second')
+        rendered = self.state.render({'kind': 'answer', 'message': '', 'points': [
+            {'text': '比较两个来源。', 'citations': [{'id': first['evidence_id']}, {'id': second['evidence_id']}]},
+            {'text': '继续解释两个来源。', 'citations': [{'id': second['evidence_id']}, {'id': first['evidence_id']}]},
+        ]})
+        self.assertEqual(rendered.count(first['url']), 1)
+        self.assertEqual(rendered.count(second['url']), 1)
+        self.assertTrue(rendered.endswith('来源：[First](https://example.test/first)；[Second](https://example.test/second)'))
+
+    def test_quoted_episode_is_in_real_sdk_input(self):
+        record = self.archive_record()
+        self.publish_quote("episode:" + record.episode.id)
+        model = self.agent.sdk_model = ScriptedModel([final_output(
+            {"kind": "conversation", "message": "test", "points": []})])
+        msg = IncomingMessage("new", "team", "这篇做详细版", "group", "colleague",
+                              parent_message_id="quoted-bot")
+        self.agent.handle(msg.text, msg)
+        context = json.loads(model.inputs[0][-1]["content"])
+        self.assertEqual(context["quoted_message"]["episode"]["document_id"], record.reference)
+
+    def test_detailed_requires_every_page_and_accepts_internal_anchors(self):
+        doc = LibraryDocument("long", "Noam Brown", "https://example.test/noam",
+                              "agents learn from experience. " * 4000)
+        with patch.object(self.library, "snapshot", return_value=([doc], [])):
+            self.state.execute("set_research_task", {
+                "goal": "完整详细版", "document_ids": ["long"], "format": "detailed"})
+            self.state.execute("read_document", {"document_id": "long", "start": 0})
+            result = {"kind": "answer", "message": "", "points": [
+                {"text": "## 主题\n\n" + "基于正文解释观点及条件。" * 50,
+                 "citations": [{"id": "long:C0001", "quote": "agents learn from experience"}]}
+                for _ in range(14)]}
+            with self.assertRaisesRegex(ValueError, "Full reading incomplete"):
+                self.state.render(result)
+            while missing := self.state.incomplete_documents():
+                self.state.execute("read_document", {
+                    "document_id": "long", "start": missing[0]["next_start"]})
+            answer = self.state.render(result)
+        self.assertEqual(answer.count("https://example.test/noam"), 1)
+        self.assertNotIn("agents learn from experience", answer)
+        self.assertEqual(self.state.outcome, "completed")
+
+    def test_task_persists_and_followup_restores_without_other_user_leak(self):
+        doc = LibraryDocument("d", "Noam Brown", "https://example.test/noam", "Research evidence")
+        self.agent.sdk_model = ScriptedModel([
+            tool_call("set_research_task", {"goal": "Noam Brown 的完整详细纪要",
+                                           "document_ids": ["d"], "format": "detailed"}),
+            final_output({"kind": "conversation", "message": "待继续", "points": []}),
+        ])
+        with patch.object(self.library, "snapshot", return_value=([doc], [])):
+            self.agent.handle("做详细版", self.message)
+        self.assertEqual(previous_task(self.store, "group:team:user")["format"], "detailed")
+        restarted = PodcastResearchAgent(self.store, self.registry, self.library,
+                                         "test-key", "test-model", chats=("team",))
+        restarted.initialize()
+        for sender, expected in [("user", True), ("colleague", False)]:
+            model = restarted.sdk_model = ScriptedModel([final_output(
+                {"kind": "conversation", "message": "test", "points": []})])
+            msg = IncomingMessage("continue-" + sender, "team", "继续", "group", sender)
+            restarted.handle(msg.text, msg)
+            context = json.loads(model.inputs[0][-1]["content"])
+            self.assertEqual(bool(context["previous_task"]), expected)
+
+    def test_validation_repair_gets_specific_cause_and_is_audited(self):
+        bad = {"kind": "answer", "message": "", "points": [
+            {"text": "Original Show", "citations": [{"id": "fake", "quote": "fake"}]}]}
+        good = copy.deepcopy(bad)
+        good["points"][0]["citations"] = [{"id": "E0001", "quote": "Original Show"}]
+        model = self.agent.sdk_model = ScriptedModel([
+            tool_call("list_sources"), final_output(bad), final_output(good)])
+        self.agent.handle("监听什么", self.message)
+        self.assertIn("Unknown evidence", json.dumps(model.inputs[-1]))
+        with self.store._connect() as db:
+            audit = json.loads(db.execute("SELECT audit_json FROM research_run_state").fetchone()[0])
+        self.assertEqual(len(audit["validation_errors"]), 1)
+        self.assertEqual(audit["outcome"], "completed")
 
 
 if __name__ == "__main__":

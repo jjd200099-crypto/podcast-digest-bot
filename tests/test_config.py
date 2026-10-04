@@ -12,6 +12,21 @@ from news_officer.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_bounded_discovery_topics_and_opt_in_preparation(self):
+        env = {**self.base_environment(), 'NEWS_OFFICER_DISCOVERY_TOPICS': 'OpenAI, Fireworks',
+               'NEWS_OFFICER_DAILY_PREPARATION': 'true'}
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings.from_env()
+        self.assertTrue(settings.daily_preparation_enabled)
+        self.assertEqual(settings.discovery_topics, ('OpenAI', 'Fireworks'))
+        env['NEWS_OFFICER_DISCOVERY_TOPICS'] = ','.join(str(i) for i in range(25))
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+
+    def test_automatic_compilation_defaults_to_exceptional_five_stars(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            self.assertEqual(Settings.from_env().daily_document_min_stars, 5)
+
     def base_environment(self):
         return {
             "FEISHU_APP_ID": "app-id",
@@ -50,6 +65,17 @@ class SettingsTests(unittest.TestCase):
                 settings = Settings.from_env()
         self.assertEqual(settings.db_path, Path(environment["NEWS_OFFICER_DB_PATH"]))
 
+    def test_file_memory_defaults_next_to_database(self):
+        with patch.dict(os.environ, {**self.base_environment(), "NEWS_OFFICER_DB_PATH": "/tmp/test/state.sqlite3"}, clear=True):
+            self.assertEqual(Settings.from_env().podcast_memory_path, Path("/tmp/test/podcast-memory"))
+
+    def test_cloud_file_memory_cannot_use_ephemeral_storage(self):
+        with patch.dict(os.environ, {
+            **self.base_environment(), "RAILWAY_DEPLOYMENT_ID": "deploy",
+            "RAILWAY_VOLUME_MOUNT_PATH": "/data", "NEWS_OFFICER_MEMORY_PATH": "/tmp/memory",
+        }, clear=True), self.assertRaisesRegex(RuntimeError, "MEMORY_PATH"):
+            Settings.from_env()
+
     def test_podwise_is_optional_and_configured_only_by_environment(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
             self.assertEqual(Settings.from_env().podwise_api_token, "")
@@ -62,6 +88,40 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_daily_candidates, 0)
         self.assertEqual(settings.max_daily_summaries, 0)
         self.assertFalse(settings.daily_transcript_attachments)
+        self.assertTrue(settings.daily_rss_only)
+        self.assertEqual(settings.agent_backend, "agents_sdk")
+
+    def test_podwise_discovery_requires_credentials_and_fulltext_editorial_review(self):
+        env = {**self.base_environment(), 'NEWS_OFFICER_PODWISE_DISCOVERY': 'true'}
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+        env['PODWISE_API_TOKEN'] = 'fake'
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(Settings.from_env().podwise_discovery_enabled)
+        env['NEWS_OFFICER_EDITORIAL_FILTER'] = 'false'
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+
+    def test_expression_advisor_is_opt_in_with_separate_credentials(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            settings = Settings.from_env()
+        self.assertFalse(settings.tone_advisor_enabled)
+        self.assertEqual(settings.deepseek_api_key, '')
+        with patch.dict(os.environ, {**self.base_environment(), 'DEEPSEEK_API_KEY': ' separate-key ',
+                                    'NEWS_OFFICER_TONE_ADVISOR': 'true'}, clear=True):
+            settings = Settings.from_env()
+        self.assertTrue(settings.tone_advisor_enabled)
+        self.assertEqual(settings.deepseek_api_key, 'separate-key')
+        self.assertEqual(settings.tone_advisor_model, 'deepseek-flash')
+
+    def test_hermes_is_explicit_and_requires_absolute_interpreter(self):
+        env = {**self.base_environment(), "NEWS_OFFICER_AGENT_BACKEND": "hermes"}
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
+        with patch.dict(os.environ, {**env, "NEWS_OFFICER_HERMES_PYTHON": "/opt/hermes/bin/python"}, clear=True):
+            self.assertEqual(Settings.from_env().agent_backend, "hermes")
+        with patch.dict(os.environ, {**env, "NEWS_OFFICER_AGENT_BACKEND": "typo"}, clear=True), self.assertRaises(ValueError):
+            Settings.from_env()
 
     def test_explicit_daily_limits_and_files_remain_supported(self):
         with patch.dict(os.environ, {

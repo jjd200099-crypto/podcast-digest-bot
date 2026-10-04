@@ -221,14 +221,7 @@ def _candidate_sort_key(record: StoredTranscript) -> tuple[int, float, float, st
 
 
 def conversation_key(message: IncomingMessage) -> str:
-    if message.thread_id:
-        return (
-            f"thread:{message.chat_id}:{message.thread_id}:"
-            f"{message.sender_open_id or 'anonymous'}"
-        )
-    if message.chat_type.strip().lower() == "p2p":
-        return f"p2p:{message.sender_open_id or message.chat_id}"
-    return f"group:{message.chat_id}:{message.sender_open_id or 'anonymous'}"
+    return message.conversation_key
 
 
 @dataclass(frozen=True)

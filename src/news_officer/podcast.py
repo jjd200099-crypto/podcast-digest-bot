@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import subprocess
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -24,6 +26,7 @@ from .models import (
 )
 from .official import DwarkeshOfficialTranscriptProvider
 from .podwise import PodwiseTranscriptProvider
+from .podwise_discovery import PodwiseDiscovery
 from .rss import (
     RSSDeclaredTranscriptProvider,
     SubstackApprovedTranscriptProvider,
@@ -285,7 +288,15 @@ def _episode_dedupe_keys(episode: Episode) -> set[str]:
     )
     if episode.published_at and len(normalized_title) >= 12:
         published_day = episode.published_at.astimezone(UTC).date().isoformat()
-        keys.add(f"title-day:{normalized_title}:{published_day}")
+        if not episode.id.startswith('podwise:'):
+            keys.add(f"title-day:{normalized_title}:{published_day}")
+    # Keep legacy RSS/video syndication matching, but do not merge a global
+    # discovery with another publisher just because their headlines coincide.
+    publisher_title = ' '.join(re.findall(r'\w+', episode.title.casefold()))
+    show = ' '.join(re.findall(r'\w+', episode.show.casefold())).removeprefix('the ')
+    if episode.published_at and show and len(publisher_title) >= 8:
+        day = episode.published_at.astimezone(UTC).date().isoformat()
+        keys.add(f'publisher-title-day:{show}:{publisher_title}:{day}')
     return keys
 
 
@@ -303,6 +314,8 @@ def _transcript_preference(episode: Episode, resolver: TranscriptResolver) -> in
         score += 2
     if episode.published_at:
         score += 1
+    if episode.id.startswith('podwise:'):
+        score -= 100  # Prefer the tracked publisher representation of a duplicate.
     return score
 
 
@@ -331,10 +344,26 @@ class PodcastService:
         max_daily_summaries: int = 0,
         source_registry=None,
         podwise_api_token: str = "",
+        editorial_policy=None,
+        daily_rss_only: bool = False,
+        podwise_auto_process: bool = False,
+        podwise_discovery_enabled: bool = False,
+        discovery_topics: tuple[str, ...] = (),
     ):
         self.store = store
         self.feeds_path = feeds_path
         self.summarizer = summarizer
+        self.editorial_policy = editorial_policy
+        if podwise_discovery_enabled and editorial_policy is None:
+            raise ValueError('Podwise discovery requires editorial review')
+        self.discovery = (PodwiseDiscovery(podwise_api_token, store=store,
+                          **({'topics': discovery_topics} if discovery_topics else {}))
+                          if podwise_discovery_enabled else None)
+        self._discovery_notice = ''
+        self._discovery_failed = False
+        # The production Settings default is RSS-only. Retain the legacy library
+        # constructor default for existing standalone callers and explicit opt-in.
+        self.daily_rss_only = daily_rss_only
         self.transcript_resolver = transcript_resolver or TranscriptResolver(
             [
                 ArchivedTranscriptProvider(store),
@@ -344,10 +373,23 @@ class PodcastService:
                 DwarkeshOfficialTranscriptProvider(),
                 SequoiaOfficialTranscriptProvider(),
                 ColossusOfficialTranscriptProvider(),
-                YouTubeTranscriptProvider(),
                 *([PodwiseTranscriptProvider(podwise_api_token)] if podwise_api_token else []),
+                YouTubeTranscriptProvider(),
             ]
         )
+        self.daily_transcript_resolver = (
+            TranscriptResolver([p for p in self.transcript_resolver.providers
+                                if not isinstance(p, YouTubeTranscriptProvider)])
+            if daily_rss_only else self.transcript_resolver
+        )
+        # Keep billable processing out of general chat/link lookups. Only the
+        # configured daily pipeline receives the explicit processing opt-in.
+        if podwise_auto_process:
+            self.daily_transcript_resolver = TranscriptResolver([
+                PodwiseTranscriptProvider(podwise_api_token, processing_store=store, auto_process=True)
+                if isinstance(p, PodwiseTranscriptProvider) else p
+                for p in self.daily_transcript_resolver.providers
+            ])
         self.lookback_hours = lookback_hours
         self.max_daily_candidates = max_daily_candidates
         self.max_daily_summaries = max_daily_summaries
@@ -429,6 +471,29 @@ class PodcastService:
                 status="unsupported",
                 message="未能读取这个官方播客页面。请检查链接是否公开可访问。",
             )
+        return self.analyze_episode(episode)
+
+    def analyze_discovered_episode(self, episode: Episode) -> AnalysisResult:
+        """Analyze trusted RSS metadata through the same providers as daily jobs."""
+        if not episode.metadata.get("youtube_url"):
+            for source in load_youtube_sources(self.feeds_path):
+                if source.url and source.rss_url == episode.metadata.get("rss_feed_url"):
+                    try:
+                        videos = latest_videos(source.url, playlist_end=source.scan_depth)
+                        episode = attach_youtube_fallbacks([episode], videos)[0]
+                    except Exception:  # noqa: BLE001 - captions must not block other providers
+                        logger.warning("Optional caption matching unavailable for %s", episode.show)
+                    break
+        return self.analyze_episode(episode)
+
+    def analyze_episode(self, episode: Episode) -> AnalysisResult:
+        """Internal entry point: caller supplies a verified-discovery Episode."""
+        record = self.store.get_verified_transcript(episode.id)
+        if record and record.episode.to_persisted_dict() == episode.to_persisted_dict():
+            digest = self.store.get_transcript_digest(episode.id)
+            if digest:
+                return AnalysisResult(status="summarized", episode=episode, message=digest,
+                                      attachment=_readable_attachment(record, digest))
         youtube_url = str(episode.metadata.get("youtube_url") or "")
         if episode.duration_seconds is None and is_youtube_url(youtube_url):
             try:
@@ -503,7 +568,7 @@ class PodcastService:
             youtube_episodes: list[Episode] = []
             rss_episodes: list[Episode] = []
             channel_with_results = 0
-            if source.url:
+            if source.url and not self.daily_rss_only:
                 try:
                     discovered_youtube = latest_videos(
                         source.url, playlist_end=source.scan_depth
@@ -541,7 +606,9 @@ class PodcastService:
                         source.name or source.rss_url,
                         error,
                     )
-            if rss_episodes:
+            if self.daily_rss_only:
+                source_episodes = rss_episodes
+            elif rss_episodes:
                 source_episodes = _rss_with_unmatched_youtube(
                     rss_episodes, youtube_episodes
                 )
@@ -572,6 +639,17 @@ class PodcastService:
                 )
 
         new_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
+        self._discovery_notice = ''
+        self._discovery_failed = False
+        if self.discovery is not None:
+            try:
+                discovered = self.discovery.discover(now, self.lookback_hours)
+                groups_by_priority['B'].append(discovered.episodes)
+                self._discovery_notice = discovered.notice
+                self._discovery_failed = bool(discovered.failed_requests)
+            except Exception:  # noqa: BLE001 - a discovery outage must not stop healthy RSS
+                self._discovery_notice = 'Podwise 扩展发现失败；本次仅提供已成功扫描的订阅源，不代表列表外没有更新。'
+                self._discovery_failed = True
         retry_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
         all_episodes = [
             episode
@@ -600,7 +678,7 @@ class PodcastService:
                     if (
                         published_at is not None
                         and published_at.tzinfo is not None
-                        and published_at.astimezone(UTC) < cutoff
+                        and (published_at.astimezone(UTC) < cutoff or published_at > now)
                     ):
                         continue
                     identity_keys = _episode_dedupe_keys(episode)
@@ -616,6 +694,11 @@ class PodcastService:
                         for identity in identity_keys
                         for member in identity_members.get(identity, ())
                     }
+                    if self.daily_rss_only:
+                        # Older daily scans stored merged RSS episodes under
+                        # YouTube IDs. Consult existing publisher identities
+                        # without contacting YouTube or replaying sent items.
+                        aliases.update(self.store.publisher_episode_aliases(episode))
                     alias_states = {
                         alias: self.store.episode_review_state(alias)
                         for alias in aliases
@@ -681,7 +764,7 @@ class PodcastService:
 
         successful_sources = len(sources) - len(failed_sources)
         self._last_failed_feeds = tuple(failed_sources)
-        if failed_sources and (
+        if failed_sources and not any(e.id.startswith('podwise:') for e in candidates) and (
             not candidates or len(failed_sources) >= successful_sources
         ):
             raise FeedDiscoveryError(
@@ -697,12 +780,46 @@ class PodcastService:
         ))
         return candidates[: self.max_daily_candidates] if self.max_daily_candidates else candidates
 
-    def build_daily(self, now: datetime | None = None) -> list[DailyItem]:
+    def build_pending(self) -> list[DailyItem]:
+        pending = []
+        for episode in self.store.due_daily_transcripts():
+            if self.store.episode_is_delivered(episode):
+                self.store.complete_daily_transcript(episode.id)
+            else:
+                pending.append(episode)
+        return self.build_daily(pending=pending)
+
+    def _digest_key(self, stored, decision):
+        identity = getattr(self.summarizer, 'cache_identity', lambda: '')()
+        if not isinstance(identity, str) or not identity:
+            return ''  # Custom summarizers explicitly opt into caching.
+        return hashlib.sha256(json.dumps([identity, stored.record_revision_sha256, decision],
+                                         sort_keys=True).encode()).hexdigest()
+
+    def _daily_digest(self, episode, transcript, stored, decision):
+        key = self._digest_key(stored, decision)
+        summary = self.store.prepared_digest(episode.id, key) if key else ''
+        if not summary:
+            summary = self.summarizer.summarize(episode, transcript)
+            if decision is not None:
+                summary = self.editorial_policy.apply(summary, decision)
+        summary = self.store.save_transcript_digest(
+            episode.id, summary, stored.content_sha256, stored.record_revision_sha256)
+        if key:
+            self.store.mark_digest_prepared(episode.id, key, summary)
+        return summary
+
+    def build_daily(self, now: datetime | None = None, *, pending: list[Episode] | None = None,
+                    preparation: bool = False) -> list[DailyItem]:
+        from .daily_report import ranked_daily_items
+
         now = now or datetime.now(UTC)
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
         cutoff = now.astimezone(UTC) - timedelta(hours=self.lookback_hours)
-        candidates = self.discover_daily_candidates(now)
+        candidates = self.discover_daily_candidates(now) if pending is None else pending
+        if preparation:
+            candidates = candidates[:12]
         results: list[DailyItem] = [
             DailyItem(
                 Episode(
@@ -714,16 +831,25 @@ class PodcastService:
                 "failed",
                 "feed discovery failed",
             )
-            for source_url in self._last_failed_feeds
+            for source_url in (self._last_failed_feeds if pending is None else ())
         ]
+        if pending is None and self._discovery_notice:
+            results.append(DailyItem(Episode('discovery:podwise', 'Podwise 扩展发现', '', 'Podwise'),
+                                     'discovery_status', self._discovery_notice))
+        if pending is None and self._discovery_failed:
+            results.append(DailyItem(Episode('source-failure:podwise', '扩展发现读取失败', '', 'Podwise'),
+                                     'failed', 'Podwise discovery incomplete; retry required'))
         summary_count = 0
+        preparation_deadline = time.monotonic() + 480 if preparation else None
         priority_b_summaries = 0
         reserve_b_slot = self.max_daily_summaries >= 2
         priority_a_soft_cap = self.max_daily_summaries - int(reserve_b_slot)
         deferred_priority_a: list[
-            tuple[Episode, Transcript, StoredTranscript]
+            tuple[Episode, Transcript, StoredTranscript, dict | None]
         ] = []
         for discovered in candidates:
+            if preparation_deadline is not None and time.monotonic() >= preparation_deadline:
+                break
             episode = discovered
             try:
                 # Flat playlist metadata often omits dates and duration. Enrich only
@@ -734,7 +860,8 @@ class PodcastService:
                     else str(episode.metadata.get("youtube_url") or "")
                 )
                 if (
-                    is_youtube_url(youtube_url)
+                    not self.daily_rss_only
+                    and is_youtube_url(youtube_url)
                     and (
                         episode.published_at is None
                         or episode.duration_seconds is None
@@ -746,14 +873,32 @@ class PodcastService:
                 if episode.published_at is None:
                     results.append(DailyItem(episode, "unverified_date"))
                     continue
-                if episode.published_at.astimezone(UTC) < cutoff:
+                if pending is None and episode.published_at.astimezone(UTC) < cutoff:
                     results.append(DailyItem(episode, "outside_window"))
                     continue
-                transcript = self.transcript_resolver.fetch(episode)
+                transcript = self.daily_transcript_resolver.fetch(episode)
                 if transcript is None:
-                    results.append(DailyItem(episode, "no_transcript"))
+                    providers = getattr(self.daily_transcript_resolver, 'providers', ())
+                    providers = providers if isinstance(providers, (list, tuple)) else ()
+                    reason = next((p.diagnostics[episode.id] for p in providers
+                        if isinstance(p, PodwiseTranscriptProvider) and episode.id in p.diagnostics),
+                        '尚未找到通过完整性校验的全文，已保留待办继续复查。')
+                    self.store.defer_daily_transcript(episode, reason)
+                    self.store.observe_discovery(episode, 'no_transcript')
+                    results.append(DailyItem(episode, "no_transcript", reason))
                     continue
                 stored = self.store.save_verified_transcript(episode, transcript)
+                decision = self.editorial_policy.assess(episode, transcript) if self.editorial_policy else None
+                if decision is not None and not decision['selected']:
+                    # Coverage means scanning/archiving, not forcing unrelated
+                    # episodes into the reader's morning brief.
+                    status = 'discovery_filtered' if episode.id.startswith('podwise:') else 'editorial_filtered'
+                    if not preparation:
+                        self.store.record_episode(episode, status)
+                        self.store.complete_daily_transcript(episode.id)
+                    results.append(DailyItem(episode, status))
+                    self.store.observe_discovery(episode, status, decision.get('stars', 0))
+                    continue
                 source_priority = str(
                     episode.metadata.get("source_priority") or "B"
                 ).upper()
@@ -764,16 +909,11 @@ class PodcastService:
                     and priority_b_summaries == 0
                 ):
                     deferred_priority_a.append(
-                        (episode, transcript, stored)
+                        (episode, transcript, stored, decision)
                     )
                     continue
-                summary_candidate = self.summarizer.summarize(episode, transcript)
-                summary = self.store.save_transcript_digest(
-                    episode.id,
-                    summary_candidate,
-                    stored.content_sha256,
-                    stored.record_revision_sha256,
-                )
+                summary = self._daily_digest(episode, transcript, stored, decision)
+                self.store.observe_discovery(episode, 'summarized', (decision or {}).get('stars', 0))
                 results.append(
                     DailyItem(
                         episode,
@@ -790,20 +930,16 @@ class PodcastService:
             except SummaryFormatError as error:
                 logger.warning("Podcast summary format failed for %s: %s", episode.url, error)
                 results.append(DailyItem(episode, "summary_format_error", str(error)))
+                self.store.defer_daily_transcript(episode, '摘要格式待重试')
             except Exception as error:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
-        for episode, transcript, stored in deferred_priority_a:
+                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
+        for episode, transcript, stored, decision in deferred_priority_a:
             if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                 break
             try:
-                summary_candidate = self.summarizer.summarize(episode, transcript)
-                summary = self.store.save_transcript_digest(
-                    episode.id,
-                    summary_candidate,
-                    stored.content_sha256,
-                    stored.record_revision_sha256,
-                )
+                summary = self._daily_digest(episode, transcript, stored, decision)
             except SummaryFormatError as error:
                 logger.warning(
                     "Deferred podcast summary format failed for %s: %s",
@@ -825,4 +961,4 @@ class PodcastService:
                 )
             )
             summary_count += 1
-        return results
+        return ranked_daily_items(results)

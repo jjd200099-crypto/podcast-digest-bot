@@ -47,6 +47,26 @@ class Settings:
     knowledge_mode: str = "feishu_folder"
     podwise_api_token: str = ""
     daily_transcript_attachments: bool = False
+    daily_combined_message: bool = True
+    podcast_memory_path: Path | None = None
+    agent_backend: str = "agents_sdk"
+    hermes_python: str = ""
+    message_workers: int = 4
+    health_port: int = 8080
+    tone_advisor_enabled: bool = False
+    deepseek_api_key: str = ''
+    tone_advisor_model: str = 'deepseek-flash'
+    editorial_enabled: bool = True
+    research_focus_path: Path | None = None
+    daily_rss_only: bool = True
+    podwise_auto_process: bool = False
+    podwise_discovery_enabled: bool = False
+    daily_preparation_enabled: bool = False
+    discovery_topics: tuple[str, ...] = ()
+    daily_document_enabled: bool = False
+    daily_document_start_date: str = ''
+    daily_document_folder: str = ''
+    daily_document_min_stars: int = 5
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -63,6 +83,9 @@ class Settings:
         db_path = Path(
             os.environ.get("NEWS_OFFICER_DB_PATH", "/data/news-officer.sqlite3")
         )
+        memory_path = Path(os.environ.get(
+            "NEWS_OFFICER_MEMORY_PATH", str(db_path.parent / "podcast-memory")
+        ))
         if os.environ.get("RAILWAY_DEPLOYMENT_ID"):
             mount_path = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").rstrip("/")
             if mount_path != "/data":
@@ -75,6 +98,10 @@ class Settings:
                 raise RuntimeError(
                     "NEWS_OFFICER_DB_PATH must live under the Railway /data volume"
                 ) from None
+            try:
+                memory_path.resolve().relative_to(Path("/data").resolve())
+            except ValueError:
+                raise RuntimeError("NEWS_OFFICER_MEMORY_PATH must live under the Railway /data volume") from None
         feeds_path = Path(
             os.environ.get("NEWS_OFFICER_FEEDS_PATH", str(ROOT / "feeds.json"))
         )
@@ -105,12 +132,41 @@ class Settings:
         ).strip()
         if knowledge_mode not in {"feishu_folder", "podcast_archive"}:
             raise ValueError("Invalid NEWS_OFFICER_KNOWLEDGE_MODE")
+        backend = os.environ.get("NEWS_OFFICER_AGENT_BACKEND", "agents_sdk").strip()
+        if backend not in {"agents_sdk", "hermes"}:
+            raise ValueError("Invalid NEWS_OFFICER_AGENT_BACKEND")
+        hermes_python = os.environ.get("NEWS_OFFICER_HERMES_PYTHON", "").strip()
+        if backend == "hermes" and not Path(hermes_python).is_absolute():
+            raise ValueError("Hermes requires an absolute NEWS_OFFICER_HERMES_PYTHON")
+        discovery = os.environ.get('NEWS_OFFICER_PODWISE_DISCOVERY', 'false').lower() == 'true'
+        topics = _csv(os.environ.get('NEWS_OFFICER_DISCOVERY_TOPICS', ''))
+        if len(topics) > 24 or any(len(t) > 80 for t in topics):
+            raise ValueError('Discovery supports at most 24 queries of up to 80 characters')
+        if discovery and (not os.environ.get('PODWISE_API_TOKEN', '').strip()
+                          or os.environ.get('NEWS_OFFICER_EDITORIAL_FILTER', 'true').lower() != 'true'):
+            raise ValueError('Podwise discovery requires PODWISE_API_TOKEN and editorial review')
         return cls(
+            discovery_topics=topics,
+            daily_preparation_enabled=os.environ.get('NEWS_OFFICER_DAILY_PREPARATION', 'false').lower() == 'true',
+            podwise_discovery_enabled=discovery,
+            podwise_auto_process=os.environ.get('PODWISE_AUTO_PROCESS', 'false').lower() == 'true',
+            daily_rss_only=os.environ.get('NEWS_OFFICER_DAILY_RSS_ONLY', 'true').lower() == 'true',
+            editorial_enabled=os.environ.get('NEWS_OFFICER_EDITORIAL_FILTER', 'true').lower() == 'true',
+            research_focus_path=Path(os.environ['NEWS_OFFICER_RESEARCH_FOCUS_PATH'])
+                if os.environ.get('NEWS_OFFICER_RESEARCH_FOCUS_PATH') else None,
+            tone_advisor_enabled=os.environ.get('NEWS_OFFICER_TONE_ADVISOR', 'false').lower() == 'true',
+            deepseek_api_key=os.environ.get('DEEPSEEK_API_KEY', '').strip(),
+            tone_advisor_model=os.environ.get('NEWS_OFFICER_TONE_MODEL', 'deepseek-flash').strip(),
+            health_port=int(os.environ.get('PORT', '8080')),
+            message_workers=max(1, min(16, int(os.environ.get("NEWS_OFFICER_MESSAGE_WORKERS", "4")))),
+            agent_backend=backend,
+            hermes_python=hermes_python,
             feishu_app_id=os.environ["FEISHU_APP_ID"].strip(),
             feishu_app_secret=os.environ["FEISHU_APP_SECRET"].strip(),
             openai_api_key=os.environ["OPENAI_API_KEY"].strip(),
             openai_model=os.environ.get("OPENAI_MODEL", "gpt-5.6-terra").strip(),
             db_path=db_path,
+            podcast_memory_path=memory_path,
             feeds_path=feeds_path,
             timezone=timezone,
             daily_time=_clock(os.environ.get("NEWS_OFFICER_DAILY_TIME", "08:30")),
@@ -141,7 +197,12 @@ class Settings:
             ),
             knowledge_mode=knowledge_mode,
             podwise_api_token=os.environ.get("PODWISE_API_TOKEN", "").strip(),
+            daily_combined_message=os.environ.get("NEWS_OFFICER_DAILY_COMBINED_MESSAGE", "true").lower() == "true",
             daily_transcript_attachments=os.environ.get(
                 "NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS", "false"
             ).lower() == "true",
+            daily_document_enabled=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT', 'false').lower() == 'true',
+            daily_document_start_date=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_START_DATE', ''),
+            daily_document_folder=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FOLDER', ''),
+            daily_document_min_stars=int(os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS', '5')),
         )

@@ -27,16 +27,17 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from .library import LibraryError
+from .research_checkpoint import ResearchContinuationPending, save_checkpoint
 
 LOGGER = logging.getLogger(__name__)
 MAX_MODEL_TURNS = 16
+MAX_TOTAL_MODEL_CALLS = 48
 MAX_HISTORY_TURNS = 20
 MAX_HISTORY_CHARS = 32_000
 
 
 class Citation(BaseModel):
     id: str
-    quote: str
 
 
 class AnswerPoint(BaseModel):
@@ -59,11 +60,21 @@ class TurnBudget(RunHooks):
 
     def __init__(self):
         self.calls = 0
+        self.input_tokens = self.output_tokens = self.cached_input_tokens = 0
 
     async def on_llm_start(self, context, agent, system_prompt, input_items):
-        if self.calls >= MAX_MODEL_TURNS:
+        state = context.context
+        if self.calls >= MAX_MODEL_TURNS or getattr(state, 'total_model_calls', 0) >= MAX_TOTAL_MODEL_CALLS:
             raise BudgetExceeded()
         self.calls += 1
+        state.total_model_calls = getattr(state, 'total_model_calls', 0) + 1
+        await asyncio.to_thread(save_checkpoint, state, input_items)
+
+    async def on_llm_end(self, context, agent, response):
+        usage = response.usage
+        self.input_tokens += usage.input_tokens
+        self.output_tokens += usage.output_tokens
+        self.cached_input_tokens += getattr(usage.input_tokens_details, "cached_tokens", 0) or 0
 
 
 def dialogue_input(history, current):
@@ -98,7 +109,7 @@ def sdk_tool(definition):
 
     async def invoke(context, arguments):
         state = context.context
-        if len(state.steps) >= 32:
+        if len(state.steps) >= 96:
             raise BudgetExceeded()
         started = time.monotonic()
         status = "ok"
@@ -139,6 +150,7 @@ def sdk_tool(definition):
 
 
 async def run_research(owner, state, messages, instructions, definitions):
+    started = time.monotonic()
     # One client per event loop: synchronous workers call asyncio.run for each
     # Feishu turn. Reusing an AsyncOpenAI across closed loops breaks follow-ups.
     async with AsyncOpenAI(api_key=owner._api_key, timeout=90, max_retries=0) as client:
@@ -151,7 +163,7 @@ async def run_research(owner, state, messages, instructions, definitions):
             model_settings=ModelSettings(
                 parallel_tool_calls=False,
                 store=False,
-                max_tokens=2200,
+                max_tokens=7500,
                 response_include=["reasoning.encrypted_content"],
             ),
         )
@@ -176,20 +188,54 @@ async def run_research(owner, state, messages, instructions, definitions):
                 )
                 try:
                     return state.render(result.final_output.model_dump())
-                except (ValueError, TypeError, KeyError):
+                except (ValueError, TypeError, KeyError) as error:
+                    # Render errors are application-authored and contain no source
+                    # text or credentials. Keep their specific cause for repair
+                    # and audit, rather than silently treating every failure alike.
+                    reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+                    state.validation_errors.append(reason[:1200])
+                    LOGGER.info("Research answer validation: %s", reason[:1200])
                     messages = result.to_input_list()
                     messages.append(
                         {
                             "role": "user",
-                            "content": "输出未通过证据校验。只引用本轮实际工具证据和短原文；没有证据时解释限制，不得编造。",
+                            "content": (
+                                "回答还没有交付，请修复以下具体问题后直接给出结果：" + reason[:1200]
+                                + "。已有工具证据仍有效，不要重复检索已读正文；"
+                                "若缺全文页则从提示的 next_start 继续读。citations 只填写已返回的真实 evidence_id，"
+                                "不需要抄写原文。不要把格式失败说成没找到资料，也不要让用户重述任务。"
+                            ),
                         }
                     )
-        except (MaxTurnsExceeded, BudgetExceeded):
-            pass
+        except (MaxTurnsExceeded, BudgetExceeded) as error:
+            if getattr(state, 'total_model_calls', 0) < MAX_TOTAL_MODEL_CALLS:
+                # SDK error details contain completed tool results. Resume those
+                # results rather than running all previous tools a second time.
+                if data := getattr(error, 'run_data', None):
+                    resumed = data.input if isinstance(data.input, list) else [{'role': 'user', 'content': data.input}]
+                    resumed = resumed + [item.to_input_item() for item in data.new_items]
+                    await asyncio.to_thread(save_checkpoint, state, resumed)
+                raise ResearchContinuationPending() from None
+            state.outcome = "budget_exhausted"
+        finally:
+            state.model_calls = budget.calls
+            state.engine_metrics = {"backend": "agents_sdk",
+                                    "total_model_calls": getattr(state, 'total_model_calls', budget.calls),
+                                    "input_tokens": budget.input_tokens,
+                                    "output_tokens": budget.output_tokens,
+                                    "cached_input_tokens": budget.cached_input_tokens,
+                                    "elapsed_seconds": round(time.monotonic() - started, 3)}
+        if state.outcome == "pending":
+            state.outcome = "validation_failed"
+        if state.task:
+            titles = "、".join(state.corpus()[t].title for t in state.task["document_ids"])
+            failure = f"已定位《{titles}》，但本次分析尚未完成。任务和节目已保留，回复“继续”即可接着整理，无需重发标题或链接。"
+        else:
+            failure = "这次分析未能完成；已有对话仍然保留，回复“继续”即可重试，不必重新描述问题。"
         return state.render(
             {
                 "kind": "conversation",
-                "message": "本轮研究达到执行或证据校验上限，尚未形成可核验的完整回答。请指定要继续研究的节目或问题；已完成的订阅变更仍然有效。",
+                "message": failure,
                 "points": [],
             }
         )

@@ -9,9 +9,17 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from .models import Episode, Job, OutboxItem, StoredTranscript, Transcript
+from .models import (
+    Episode,
+    IncomingMessage,
+    Job,
+    OutboxItem,
+    StoredTranscript,
+    Transcript,
+)
 
 RETRY_DELAYS_SECONDS = (60, 300, 900, 1800)
+MESSAGE_RETRY_DELAYS_SECONDS = (3, 10, 30, 60)
 FAILED_DAILY_REQUEUE_SECONDS = 3600
 MAX_CONVERSATION_TURNS = 4
 MAX_HISTORY_USER_CHARS = 500
@@ -65,6 +73,21 @@ class Store:
                 CREATE INDEX IF NOT EXISTS jobs_ready_idx
                     ON jobs(status, available_at, created_at);
 
+                CREATE TABLE IF NOT EXISTS podwise_process_requests (
+                    seq INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS daily_transcript_backlog (
+                    episode_id TEXT PRIMARY KEY,
+                    episode_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    next_check_at TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS episodes (
                     episode_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -73,6 +96,14 @@ class Store:
                     published_at TEXT,
                     result TEXT NOT NULL,
                     checked_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS editorial_reviews (
+                    episode_id TEXT NOT NULL,
+                    cache_key TEXT NOT NULL,
+                    decision_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(episode_id, cache_key)
                 );
 
                 CREATE TABLE IF NOT EXISTS episode_transcripts (
@@ -143,6 +174,27 @@ class Store:
                     FOREIGN KEY(job_key) REFERENCES jobs(job_key) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS daily_release_announcements (
+                    release_id TEXT PRIMARY KEY,
+                    job_key TEXT NOT NULL REFERENCES jobs(job_key),
+                    note_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS prepared_digest_keys (
+                    episode_id TEXT PRIMARY KEY,
+                    cache_key TEXT NOT NULL,
+                    digest_sha256 TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS discovery_observations (
+                    episode_id TEXT PRIMARY KEY,
+                    podcast_seq INTEGER,
+                    show_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    stars INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS outbox (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_key TEXT NOT NULL,
@@ -172,6 +224,9 @@ class Store:
                 """
             )
             # Forward-compatible migration for databases created by 0.1.x.
+            transcript_columns = {str(row['name']) for row in connection.execute('PRAGMA table_info(episode_transcripts)')}
+            if 'episode_metadata_json' not in transcript_columns:
+                connection.execute("ALTER TABLE episode_transcripts ADD COLUMN episode_metadata_json TEXT NOT NULL DEFAULT '{}'")
             columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
@@ -180,6 +235,12 @@ class Store:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN analysis_complete INTEGER NOT NULL DEFAULT 0"
                 )
+            if "session_key" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN session_key TEXT NOT NULL DEFAULT ''")
+                for row in connection.execute("SELECT job_key,payload_json FROM jobs WHERE kind='message'").fetchall():
+                    connection.execute("UPDATE jobs SET session_key=? WHERE job_key=?",
+                                       (self._message_session(json.loads(row['payload_json'])), row['job_key']))
+            connection.execute("CREATE INDEX IF NOT EXISTS jobs_session_idx ON jobs(session_key,status,created_at)")
             outbox_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(outbox)").fetchall()
@@ -361,55 +422,53 @@ class Store:
                 """
                 INSERT OR IGNORE INTO jobs(
                     job_key, kind, payload_json, status, attempts,
-                    available_at, created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                    available_at, created_at, updated_at, session_key
+                ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)
                 """,
-                (key, kind, json.dumps(payload, ensure_ascii=False), now, now, now),
+                (key, kind, json.dumps(payload, ensure_ascii=False), now, now, now,
+                 self._message_session(payload) if kind == "message" else ""),
             )
             if result.rowcount == 1:
                 return True
             # A daily job that exhausted its immediate retries may be revived
             # later the same day by the scheduler. Its immutable results and
             # outbox are deliberately retained and resumed.
-            if kind != "daily":
+            if kind not in {"daily", "document"}:
                 return False
             revived = connection.execute(
                 """
                 UPDATE jobs
                 SET status = 'pending', attempts = 0, updated_at = ?
-                WHERE job_key = ? AND kind = 'daily' AND status = 'failed'
+                WHERE job_key = ? AND kind IN ('daily','document') AND status = 'failed'
                     AND available_at <= ?
                 """,
                 (now, key, now),
             )
             return revived.rowcount == 1
 
+    @staticmethod
+    def _message_session(payload: dict) -> str:
+        return IncomingMessage(**{name: str(payload.get(name) or '')
+                                  for name in IncomingMessage.__dataclass_fields__}).conversation_key
+
     def claim_next(self, kind: str | None = None) -> Job | None:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if kind is None:
-                row = connection.execute(
-                    """
-                SELECT job_key, kind, payload_json, attempts
-                FROM jobs
-                WHERE status = 'pending' AND available_at <= ?
-                ORDER BY CASE kind WHEN 'message' THEN 0 ELSE 1 END, created_at
-                LIMIT 1
-                    """,
-                    (now,),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    """
-                    SELECT job_key, kind, payload_json, attempts
-                    FROM jobs
-                    WHERE status = 'pending' AND available_at <= ? AND kind = ?
-                    ORDER BY created_at
-                    LIMIT 1
-                    """,
-                    (now, kind),
-                ).fetchone()
+            # Atomic session FIFO, including older turns waiting for retry.
+            # Independent conversations are free to run concurrently.
+            row = connection.execute("""
+                SELECT j.job_key,j.kind,j.payload_json,j.attempts FROM jobs j
+                WHERE j.status='pending' AND j.available_at<=?
+                  AND (? IS NULL OR j.kind=?)
+                  AND (j.kind!='message' OR NOT EXISTS (
+                    SELECT 1 FROM jobs older WHERE older.kind='message'
+                      AND older.session_key=j.session_key AND older.job_key!=j.job_key
+                      AND (older.status='processing' OR
+                        (older.status='pending' AND (older.created_at<j.created_at OR
+                         (older.created_at=j.created_at AND older.rowid<j.rowid))))))
+                ORDER BY CASE j.kind WHEN 'message' THEN 0 ELSE 1 END,j.created_at,j.rowid
+                LIMIT 1""", (now, kind, kind)).fetchone()
             if row is None:
                 return None
             updated = connection.execute(
@@ -456,13 +515,14 @@ class Store:
         now = datetime.now(UTC)
         if attempts < max_attempts:
             status = "pending"
-            delay_index = min(max(0, attempts - 1), len(RETRY_DELAYS_SECONDS) - 1)
-            available_at = now + timedelta(seconds=RETRY_DELAYS_SECONDS[delay_index])
+            delays = MESSAGE_RETRY_DELAYS_SECONDS if self.job_kind(key) == 'message' else RETRY_DELAYS_SECONDS
+            delay_index = min(max(0, attempts - 1), len(delays) - 1)
+            available_at = now + timedelta(seconds=delays[delay_index])
         else:
             status = "failed"
             available_at = now + timedelta(
                 seconds=max(0, failed_daily_requeue_seconds)
-                if self.job_kind(key) == "daily"
+                if self.job_kind(key) in {"daily", "document"}
                 else 0
             )
         with self._connect() as connection:
@@ -532,6 +592,64 @@ class Store:
                 (key, kind),
             ).fetchall()
         return [json.loads(str(row["payload_json"])) for row in rows]
+
+    def claim_daily_release_notes(self, key: str, day: str, notes: tuple) -> list[dict]:
+        """Reserve announcements for one scheduled report, including its retries.
+
+        The frozen outbox remains responsible for delivery/receipts. Reserving
+        does not mark a message sent, and a failed report retains its notes.
+        """
+        if key != f"daily:{day}":
+            return []
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for note in notes:
+                if note["date"] <= day:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO daily_release_announcements "
+                        "(release_id, job_key, note_json) VALUES (?, ?, ?)",
+                        (note["id"], key, json.dumps(note, ensure_ascii=False)),
+                    )
+            rows = connection.execute(
+                "SELECT note_json FROM daily_release_announcements "
+                "WHERE job_key = ? ORDER BY release_id", (key,),
+            ).fetchall()
+        return [json.loads(row["note_json"]) for row in rows]
+
+    def observe_discovery(self, episode: Episode, status: str, stars: int = 0) -> None:
+        if not episode.id.startswith('podwise:'):
+            return
+        seq = episode.metadata.get('podwise_podcast_seq')
+        seq = seq if type(seq) is int and seq > 0 else None
+        with self._connect() as db:
+            db.execute("INSERT INTO discovery_observations VALUES (?,?,?,?,?,?) "
+                       "ON CONFLICT(episode_id) DO UPDATE SET podcast_seq=excluded.podcast_seq, "
+                       "status=excluded.status,stars=excluded.stars,observed_at=excluded.observed_at",
+                       (episode.id, seq, episode.show, status, stars, _now()))
+
+    def discovery_watch_catalogs(self, now: datetime) -> list[int]:
+        # Two distinct high-value episodes, not two retries of the same one.
+        with self._connect() as db:
+            rows = db.execute("SELECT podcast_seq FROM discovery_observations "
+                "WHERE podcast_seq IS NOT NULL AND status='summarized' AND stars>=4 "
+                "AND julianday(observed_at)>=julianday(?) GROUP BY podcast_seq HAVING count(*)>=2 "
+                "ORDER BY max(observed_at) DESC LIMIT 20", ((now - timedelta(days=30)).isoformat(),)).fetchall()
+        return [row[0] for row in rows]
+
+    def prepared_digest(self, episode_id: str, cache_key: str) -> str:
+        with self._connect() as db:
+            row = db.execute("SELECT digest_sha256,cache_key FROM prepared_digest_keys WHERE episode_id=?",
+                             (episode_id,)).fetchone()
+        digest = self.get_transcript_digest(episode_id) if row else ""
+        if digest and row['cache_key'] == cache_key and hashlib.sha256(digest.encode()).hexdigest() != row[0]:
+            raise ValueError('Prepared digest integrity mismatch')
+        return digest if digest and row['cache_key'] == cache_key else ""
+
+    def mark_digest_prepared(self, episode_id: str, cache_key: str, digest: str) -> None:
+        with self._connect() as db:
+            db.execute("INSERT INTO prepared_digest_keys VALUES (?,?,?) ON CONFLICT(episode_id) "
+                       "DO UPDATE SET cache_key=excluded.cache_key,digest_sha256=excluded.digest_sha256",
+                       (episode_id, cache_key, hashlib.sha256(digest.encode()).hexdigest()))
 
     def mark_analysis_complete(self, key: str) -> None:
         with self._connect() as connection:
@@ -746,6 +864,7 @@ class Store:
                 title=str(row["title"]),
                 url=str(row["episode_url"]),
                 show=str(row["show_name"]),
+                metadata=json.loads(row['episode_metadata_json'] or '{}'),
                 duration_seconds=(
                     float(row["duration_seconds"])
                     if row["duration_seconds"] is not None
@@ -831,6 +950,11 @@ class Store:
                 ),
             )
             # Read back through the same write transaction. A second worker
+            metadata = {k: episode.metadata[k] for k in ('description', 'chapters', 'rss_feed_url', 'audio_url', 'youtube_url')
+                        if k in episode.metadata}
+            if metadata:
+                connection.execute('UPDATE episode_transcripts SET episode_metadata_json=? WHERE episode_id=?',
+                                   (json.dumps(metadata, ensure_ascii=False), episode.id))
             # cannot replace this episode between the upsert and snapshot;
             # callers therefore summarize exactly the revision they saved.
             row = connection.execute(
@@ -1225,6 +1349,80 @@ class Store:
                 is not None
             )
 
+    def reserve_podwise_processing(self, seq: int) -> bool:
+        """At most one billable POST per asset, even after a crash/timeout."""
+        if type(seq) is not int or seq <= 0:
+            raise ValueError('Invalid Podwise asset')
+        with self._connect() as connection:
+            return connection.execute(
+                'INSERT OR IGNORE INTO podwise_process_requests VALUES (?, ?, ?, ?)',
+                (seq, 'requesting', _now(), _now()),
+            ).rowcount == 1
+
+    def set_podwise_processing_state(self, seq: int, state: str) -> None:
+        with self._connect() as connection:
+            connection.execute('UPDATE podwise_process_requests SET state=?, updated_at=? WHERE seq=?',
+                               (state, _now(), seq))
+
+    def defer_daily_transcript(self, episode: Episode, state: str) -> None:
+        """Keep original publisher identity after the daily 24h window closes."""
+        value = episode.to_persisted_dict()
+        value['metadata'] = episode.metadata
+        now = datetime.now(UTC)
+        with self._connect() as connection:
+            prior = connection.execute('SELECT attempts FROM daily_transcript_backlog WHERE episode_id=?',
+                                       (episode.id,)).fetchone()
+            # Pending transcription is checked promptly, persistently unavailable
+            # material backs off after a day instead of hammering paid APIs forever.
+            delay = timedelta(hours=6) if prior and prior['attempts'] >= 48 else timedelta(minutes=30)
+            connection.execute(
+                'INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, 1) '
+                'ON CONFLICT(episode_id) DO UPDATE SET state=excluded.state, '
+                'next_check_at=excluded.next_check_at, attempts=attempts+1',
+                (episode.id, json.dumps(value, ensure_ascii=False), state, now.isoformat(),
+                 (now + delay).isoformat()),
+            )
+
+    def due_daily_transcripts(self, limit: int = 50) -> list[Episode]:
+        from dataclasses import replace
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT episode_json FROM daily_transcript_backlog "
+                "WHERE state != 'delivered' AND next_check_at<=? "
+                "ORDER BY CASE WHEN episode_id LIKE 'podwise:%' THEN 1 ELSE 0 END, next_check_at, created_at LIMIT ?",
+                (_now(), limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            value = json.loads(row['episode_json'])
+            result.append(replace(Episode.from_persisted_dict(value), metadata=value.get('metadata', {})))
+        return result
+
+    def complete_daily_transcript(self, episode_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("UPDATE daily_transcript_backlog SET state='delivered' WHERE episode_id=?",
+                               (episode_id,))
+
+    def publisher_episode_aliases(self, episode: Episode) -> set[str]:
+        """Find historical merged IDs by exact publisher metadata, not fuzzy titles."""
+        if not episode.published_at or not (episode.metadata.get('rss_feed_url') or episode.id.startswith('podwise:')):
+            return set()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT episode_id FROM episodes WHERE title=? AND show_name=? AND julianday(published_at)=julianday(?) "
+                "AND result!='discovery_filtered'",
+                (episode.title, episode.show, episode.published_at.isoformat()),
+            ).fetchall()
+        return {str(row['episode_id']) for row in rows}
+
+    def episode_is_delivered(self, episode: Episode) -> bool:
+        aliases = self.publisher_episode_aliases(episode) | {episode.id}
+        with self._connect() as connection:
+            return any(connection.execute(
+                "SELECT 1 FROM episodes WHERE episode_id=? AND result IN ('sent', 'summarized')", (alias,)
+            ).fetchone() is not None for alias in aliases)
+
     def should_review_episode(
         self, episode_id: str, no_transcript_retry_hours: int = 6
     ) -> bool:
@@ -1253,6 +1451,10 @@ class Store:
             ).fetchone()
         if row is None:
             return "new"
+        if row['result'] == 'not_recommended':
+            # Policy v2 ranks low-star episodes instead of permanently excluding
+            # them. Discovery still enforces the publisher's daily date window.
+            return 'retry'
         if row["result"] not in {
             "no_transcript",
             "summary_format_error",
@@ -1304,3 +1506,14 @@ class Store:
                 "SELECT status FROM jobs WHERE job_key = ?", (key,)
             ).fetchone()
             return str(row["status"]) if row else None
+
+    def get_editorial_review(self, episode_id: str, cache_key: str) -> dict | None:
+        with self._connect() as db:
+            row = db.execute('SELECT decision_json FROM editorial_reviews WHERE episode_id=? AND cache_key=?',
+                             (episode_id, cache_key)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def save_editorial_review(self, episode_id: str, cache_key: str, decision: dict) -> None:
+        with self._connect() as db:
+            db.execute('INSERT OR IGNORE INTO editorial_reviews VALUES (?,?,?,?)',
+                       (episode_id, cache_key, json.dumps(decision, ensure_ascii=False), _now()))

@@ -68,6 +68,29 @@ class PodwiseTests(unittest.TestCase):
             "https://app.podwise.ai/api/open/v1/episodes/123/transcripts",
         )
 
+    def test_discovered_asset_reads_directly_and_never_submits_processing(self):
+        episode = replace(self.episode, id='podwise:123')
+        with patch.object(self.provider, '_get', side_effect=[{'result': self.meta},
+                {'episode': self.meta, 'result': self.segments}]) as get:
+            self.assertTrue(self.provider.fetch(episode).verified_complete)
+            self.assertEqual(get.call_args_list[0].args, ('/episodes/123',))
+        self.provider.auto_process = True
+        with patch.object(self.provider, '_get', return_value={'result': {**self.meta, 'transcribed': False}}), \
+                patch.object(self.provider, '_process') as process:
+            self.assertIsNone(self.provider.fetch(episode))
+            process.assert_not_called()
+        with patch.object(self.provider, '_get', side_effect=[{'result': self.meta},
+                {'episode': self.meta, 'result': self.segments[:20]}]):
+            self.assertIsNone(self.provider.fetch(episode))
+
+    def test_missing_provider_duration_uses_independent_rss_duration_only(self):
+        meta = {**self.meta, 'duration': None}
+        self.assertIsNone(self.fetch(meta=meta))
+        self.episode = replace(self.episode, metadata={'rss_feed_url': 'https://example.org/rss'})
+        self.assertTrue(self.fetch(meta=meta).verified_complete)
+        self.assertIsNone(self.fetch(meta=meta, segments=self.segments[:20]))
+        self.assertIsNone(self.fetch(meta={**meta, 'link': 'https://other.example/episode', 'title': 'Wrong'}))
+
     def test_search_miss_falls_back_to_dated_podcast_catalog(self):
         with patch.object(self.provider, "_get", side_effect=[
             {"result": []}, {"result": [{"seq": 778}]}, {"result": [self.meta]},

@@ -18,6 +18,14 @@ class IncomingMessage:
     thread_id: str = ""
     parent_message_id: str = ""
 
+    @property
+    def conversation_key(self) -> str:
+        if self.thread_id:
+            return f"thread:{self.chat_id}:{self.thread_id}:{self.sender_open_id or 'anonymous'}"
+        if self.chat_type.strip().lower() == "p2p":
+            return f"p2p:{self.sender_open_id or self.chat_id}"
+        return f"group:{self.chat_id}:{self.sender_open_id or 'anonymous'}"
+
 
 @dataclass(frozen=True)
 class Job:

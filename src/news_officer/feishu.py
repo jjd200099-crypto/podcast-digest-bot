@@ -166,6 +166,62 @@ def delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[str, str, 
     ]
 
 
+def encoded_message_payload(payload: dict) -> bytes:
+    """UTF-8 on the wire avoids inflating Chinese text into ASCII escapes."""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def combined_delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[str, str, str]]:
+    """Prefer one post; measure the serialized request, not visible characters.
+
+    Feishu permits 30 KB for posts and 150 KB for text. A long answer falls
+    back to a single text message before resorting to lossless overflow parts.
+    Keep legacy delivery_parts unchanged for backwards-compatible daily jobs.
+    """
+    body = markdown.strip()
+    if body.startswith(BRAND_HEADER):
+        body = body[len(BRAND_HEADER):].lstrip()
+
+    def fits(kind, content, limit):
+        envelope = {"receive_id": "x" * 128, "msg_type": kind, "content": content,
+                    "uuid": "x" * 36, "reply_in_thread": False}
+        return len(encoded_message_payload(envelope)) <= limit
+
+    post = _post_content(body, BRAND_HEADER)
+    if fits("post", post, 29_000):
+        return [("post", post, idempotency_uuid(idempotency_key, 1))]
+    text = json.dumps({"text": brand_message(body)}, ensure_ascii=False)
+    if fits("text", text, 145_000):
+        return [("text", text, idempotency_uuid(idempotency_key, 1))]
+    # Exceptional overflow: fill each message close to the real limit. Measure
+    # escaped JSON too, and keep newline boundaries when reasonably close.
+    chunks = []
+    remaining = body
+    while remaining:
+        low, high = 1, len(remaining)
+        while low < high:
+            middle = (low + high + 1) // 2
+            trial = json.dumps({"text": f"{BRAND_HEADER}（第 999999/999999 段）\n\n{remaining[:middle]}"}, ensure_ascii=False)
+            if fits("text", trial, 145_000):
+                low = middle
+            else:
+                high = middle - 1
+        end = low
+        if end < len(remaining):
+            newline = remaining.rfind("\n", 0, end) + 1
+            if newline >= end // 2:
+                end = newline
+        chunks.append(remaining[:end])
+        remaining = remaining[end:]
+    parts = []
+    for index, chunk in enumerate(chunks, 1):
+        content = json.dumps({"text": f"{BRAND_HEADER}（第 {index}/{len(chunks)} 段）\n\n{chunk}"}, ensure_ascii=False)
+        if not fits("text", content, 145_000):
+            raise ValueError("Message exceeds safe Feishu payload size")
+        parts.append(("text", content, idempotency_uuid(idempotency_key, index)))
+    return parts
+
+
 def _retry_delay(response: requests.Response, attempt: int) -> float:
     value = str(response.headers.get("Retry-After", "") or "").strip()
     if value:
@@ -278,7 +334,7 @@ class FeishuMessenger:
         raise RuntimeError("Feishu file upload did not complete")
 
     def reply(self, markdown: str, message_id: str, idempotency_key: str) -> None:
-        parts = delivery_parts(markdown, idempotency_key)
+        parts = combined_delivery_parts(markdown, idempotency_key)
         for index, (msg_type, content, item_uuid) in enumerate(parts, start=1):
             self.deliver(
                 OutboxItem(
@@ -301,7 +357,7 @@ class FeishuMessenger:
     def send(
         self, markdown: str, receive_id: str, receive_id_type: str, idempotency_key: str
     ) -> None:
-        parts = delivery_parts(markdown, idempotency_key)
+        parts = combined_delivery_parts(markdown, idempotency_key)
         for index, (msg_type, content, item_uuid) in enumerate(parts, start=1):
             self.deliver(
                 OutboxItem(
@@ -354,7 +410,7 @@ class FeishuMessenger:
                 url,
                 params=params,
                 headers=headers,
-                json=payload,
+                data=encoded_message_payload(payload),
                 timeout=30,
             )
             if response.status_code == 401 and not refreshed:

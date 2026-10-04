@@ -555,7 +555,7 @@ class SourceFailureTests(unittest.TestCase):
                                  podwise_api_token="test-token")
         self.assertEqual(service.transcript_resolver.providers[0].name,
                          "previously verified archive")
-        self.assertEqual(service.transcript_resolver.providers[-1].name,
+        self.assertEqual(service.transcript_resolver.providers[-2].name,
                          "Podwise verified transcript")
         with patch.object(service.transcript_resolver.providers[-1], "fetch") as podwise:
             self.assertEqual(service.transcript_resolver.fetch(episode), transcript)
