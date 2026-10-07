@@ -31,7 +31,7 @@ class PodwiseDiscovery:
         if not (1 <= pages <= 10 and 1 <= popular_limit <= 100
                 and 1 <= catalog_limit <= 200 and 1 <= candidate_limit <= 1000):
             raise ValueError('Invalid Podwise discovery limits')
-        self.api = PodwiseTranscriptProvider(token, timeout=15)
+        self.api = PodwiseTranscriptProvider(token, timeout=15, processing_store=store)
         self.store = store
         self.topics, self.podcast_topics = tuple(topics), tuple(podcast_topics)
         self.pages, self.popular_limit = pages, popular_limit

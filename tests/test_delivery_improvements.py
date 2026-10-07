@@ -14,6 +14,7 @@ from news_officer.daily_archive import read_daily_digest
 from news_officer.models import Episode, Transcript
 from news_officer.operations import business_snapshot
 from news_officer.podcast import PodcastService
+from news_officer.provider_guard import PodwiseRateLimited
 from news_officer.store import Store
 
 
@@ -45,6 +46,29 @@ class DeliveryImprovements(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first[0].message, second[0].message)
         self.assertEqual(summarizer.summarize.call_count, 1)
         self.assertFalse(self.store.episode_is_delivered(self.episode))
+
+    def test_rate_limit_keeps_fulltext_pending_and_never_summarizes(self):
+        service, resolver, summarizer = self.service()
+        retry = datetime.now(UTC) + timedelta(hours=2)
+        resolver.fetch.side_effect = PodwiseRateLimited(retry.timestamp())
+        result = service.build_daily(self.now)
+        self.assertEqual(result[0].status, 'no_transcript')
+        self.assertIn('限流', result[0].message)
+        self.assertFalse(self.store.episode_is_delivered(self.episode))
+        self.assertEqual(self.store.due_daily_transcripts(), [])
+        summarizer.summarize.assert_not_called()
+
+    def test_backlog_is_bounded_without_dropping_remaining_items(self):
+        service, _, _ = self.service()
+        with self.store._connect() as db:
+            for i in range(15):
+                episode = Episode(f'rss:{i}', 'AI interview', f'https://example.org/{i}', 'Show', published_at=self.now)
+                db.execute('INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, 1)',
+                    (episode.id, json.dumps(episode.to_persisted_dict()), 'pending', '2026-01-01', '2026-01-01'))
+        service.build_daily = Mock(return_value=[])
+        service.build_pending()
+        self.assertEqual(len(service.build_daily.call_args.kwargs['pending']), 12)
+        self.assertEqual(len(self.store.due_daily_transcripts()), 15)
 
     def test_source_model_and_digest_tampering_invalidate_cache(self):
         service, resolver, summarizer = self.service()

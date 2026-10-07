@@ -12,14 +12,11 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 
 from .models import Episode, Transcript
+from .provider_guard import PodwiseAPIError, PodwiseRateLimited, podwise_guard
 from .rss import _strict_timeline_coverage, _valid_plain_transcript
 
 API_BASE = "https://app.podwise.ai/api/open/v1"
 MAX_BYTES = 4_000_000
-
-
-class PodwiseAPIError(RuntimeError):
-    """Credential-free diagnostic; do not include response bodies or requests."""
 
 
 def _url_key(value: str) -> str:
@@ -162,22 +159,28 @@ def _start(segment: dict, scale: float = 1.0) -> float | None:
 class PodwiseTranscriptProvider:
     name = "Podwise verified transcript"
 
-    def __init__(self, token: str, timeout: int = 30, *, processing_store=None, auto_process: bool = False):
+    def __init__(self, token: str, timeout: int = 30, *, processing_store=None, auto_process: bool = False,
+                 request_guard=None):
         self._token = token
         self.timeout = timeout
         self.processing_store = processing_store
         self.auto_process = auto_process
+        self.request_guard = request_guard or podwise_guard(token, processing_store)
         self.diagnostics: dict[str, str] = {}
 
     def _process(self, seq: int) -> dict:
         # No POST retries or redirects: after an uncertain result, poll status.
         try:
-            response = requests.post(API_BASE + f'/episodes/{seq}/process',
-                headers={'Authorization': f'Bearer {self._token}'},
-                timeout=self.timeout, allow_redirects=False)
-            if response.status_code != 200:
-                raise PodwiseAPIError(f'Podwise processing HTTP {response.status_code}')
-            data = response.json()
+            with self.request_guard.request():
+                response = requests.post(API_BASE + f'/episodes/{seq}/process',
+                    headers={'Authorization': f'Bearer {self._token}'},
+                    timeout=self.timeout, allow_redirects=False)
+                if response.status_code == 429:
+                    self.request_guard.limited(response.headers.get('Retry-After'))
+                if response.status_code != 200:
+                    raise PodwiseAPIError(f'Podwise processing HTTP {response.status_code}')
+                data = response.json()
+                self.request_guard.succeeded()
         except (requests.RequestException, ValueError):
             raise PodwiseAPIError('Podwise processing response uncertain') from None
         if not isinstance(data, dict) or data.get('success') is not True:
@@ -223,13 +226,13 @@ class PodwiseTranscriptProvider:
             self.processing_store.set_podwise_processing_state(seq, state)
             self.diagnostics[episode.id] = '已向 Podwise 提交转写，完成后补充摘要。'
             return state == 'done'
-        except PodwiseAPIError:
+        except (PodwiseAPIError, PodwiseRateLimited):
             self.processing_store.set_podwise_processing_state(seq, 'uncertain')
             self.diagnostics[episode.id] = '转写提交结果未确认，待查询处理状态；不会重复提交扣费。'
 
     def _get(self, path: str, params: dict | None = None) -> dict | None:
         try:
-            with requests.get(
+            with self.request_guard.request(), requests.get(
                 API_BASE + path,
                 params=params,
                 headers={"Authorization": f"Bearer {self._token}"},
@@ -239,6 +242,8 @@ class PodwiseTranscriptProvider:
             ) as response:
                 if response.status_code == 404:
                     return None
+                if response.status_code == 429:
+                    self.request_guard.limited(response.headers.get('Retry-After'))
                 if response.status_code != 200:
                     # Never print the response body, Authorization, or token.
                     raise PodwiseAPIError(f"Podwise HTTP {response.status_code}")
@@ -248,6 +253,7 @@ class PodwiseTranscriptProvider:
                     if len(body) > MAX_BYTES:
                         raise PodwiseAPIError("Podwise response exceeded size limit")
                 data = json.loads(body)
+                self.request_guard.succeeded()
         except (requests.RequestException, ValueError):
             raise PodwiseAPIError("Podwise network or response error") from None
         if not isinstance(data, dict) or data.get("success") is not True:
