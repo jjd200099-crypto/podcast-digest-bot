@@ -556,6 +556,8 @@ class NewsOfficerRuntime:
         start = when - timedelta(hours=getattr(settings, "lookback_hours", 24))
         title = "全文已补齐｜补充摘要" if catchup or bundles else "情报官日报"
         blocks = [f"{title}｜{when:%Y-%m-%d}｜{len(summaries)} 期"]
+        if job.payload.get('recovery_window_end'):
+            blocks.append('停机补发：以下按原定日期的 24 小时时间窗整理，不是今天的新节目；已送达内容不重复发送。')
         feature_updates = ""
         if not catchup and not bundles:
             from .release_notes import RELEASE_NOTES, render_release_notes
@@ -723,7 +725,13 @@ class NewsOfficerRuntime:
         try:
             build = (self.podcast_service.build_pending if job.payload.get('transcript_catchup')
                      else self.podcast_service.build_daily)
-            results = await asyncio.to_thread(build)
+            if job.payload.get('recovery_window_end'):
+                window_end = datetime.fromisoformat(job.payload['recovery_window_end'])
+                if window_end.tzinfo is None or window_end > datetime.now(window_end.tzinfo):
+                    raise ValueError('Invalid recovery window')
+                results = await asyncio.to_thread(build, now=window_end)
+            else:
+                results = await asyncio.to_thread(build)
         except Exception:
             # A broken source scan is not an empty digest. Persist and deliver a
             # single idempotent warning while leaving the job retryable.

@@ -37,6 +37,14 @@ python -m news_officer.operations --db /data/news-officer.sqlite3
 
 2026-10-08 恢复检查确认：Railway 拒绝重新部署，返回 `Your trial has expired. Please select a plan to continue using Railway.` 此阻塞必须由账户所有人选择套餐解决；不能通过重启脚本绕过，也不自动购买。恢复时先核验原持久卷与版本，再看 outbox 回执；未接收的群消息需通过历史记录明确补查，不能声称 WebSocket 会自动补齐停机期间事件。
 
+### 经授权补发与消息恢复
+
+`python -m news_officer.recovery daily --date YYYY-MM-DD` 默认只预览。明确要补发时，在子命令前加 `--execute`。只接受最近七天内的过去日期，复用原 `daily:日期` 去重键；已有任务不会另造重复日报。任务使用原定 08:30 截止的 24 小时窗口，而不是拿当前新节目冒充旧日报，正文标记“停机补发”。
+
+`python -m news_officer.recovery mentions --chat CHAT --start 带时区的ISO时间 --end 带时区的ISO时间` 同样默认预览。它只扫描既有研究群白名单，以机器人真实 open_id 精确识别 @，并保留同事身份、原消息 ID 和引用线程。加 `--execute` 后才把遗漏消息交给正常 Agent worker；已有任务不重复创建，历史失败任务列出供复核，不盲目重放。扫描近七天根消息及其线程，不能保证找出更老根消息下的新回复；权限失败或分页超限时不部分提交。
+
+飞书接口可能把旧的 `im:message.history:readonly` 列为可用权限，但开发者后台未必提供。后台可申请的 `im:message:readonly`（应用身份，获取单聊、群组消息）也能支持历史读取；由所有者确认开通并发布，不能把用户身份授权当作应用身份授权。
+
 ## 对话验收
 
 CI 覆盖引用归属、公司/嘉宾检索、会话隔离、同事群聊准入、不可编造操作和丢回执重试。另运行：
