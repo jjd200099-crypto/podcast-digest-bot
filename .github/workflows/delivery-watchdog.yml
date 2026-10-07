@@ -1,0 +1,48 @@
+name: Independent daily delivery watchdog
+
+on:
+  schedule:
+    - cron: '17 1 * * *' # 09:17 Asia/Shanghai; GitHub schedules may be delayed.
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Optional YYYY-MM-DD for read-only historical validation'
+        default: ''
+        type: string
+      notify:
+        description: 'Send one private failure alert to the configured owner (today only)'
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: independent-delivery-watchdog
+  cancel-in-progress: false
+
+jobs:
+  receipt-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: pip install 'requests>=2.32.3,<3'
+      - name: Check actual Feishu receipt independently of Railway
+        env:
+          PYTHONPATH: src
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          NEWS_OFFICER_WATCH_CHAT_ID: ${{ vars.NEWS_OFFICER_WATCH_CHAT_ID }}
+          NEWS_OFFICER_ALERT_OPEN_ID: ${{ vars.NEWS_OFFICER_ALERT_OPEN_ID }}
+          WATCH_DATE: ${{ inputs.date }}
+          SEND_ALERT: ${{ (github.event_name == 'schedule' || inputs.notify == true) && github.run_attempt == 1 }}
+        run: |
+          if [ "$SEND_ALERT" = "true" ]; then
+            python -m news_officer.delivery_watchdog --notify
+          else
+            python -m news_officer.delivery_watchdog
+          fi

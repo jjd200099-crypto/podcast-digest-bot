@@ -11,11 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from news_officer.models import Episode
 from news_officer.podwise import PodwiseAPIError, PodwiseTranscriptProvider
+from news_officer.provider_guard import RequestGuard
 
 
 class PodwiseTests(unittest.TestCase):
     def setUp(self):
-        self.provider = PodwiseTranscriptProvider("test-secret-not-real")
+        self.provider = PodwiseTranscriptProvider("test-secret-not-real",
+            request_guard=RequestGuard('test', interval=0))
         self.episode = Episode(
             "rss:1",
             "A precise episode",
@@ -208,6 +210,7 @@ class PodwiseTests(unittest.TestCase):
 
     def test_http_errors_are_sanitized_and_redirects_disabled(self):
         for status in (301, 401, 402, 429, 500):
+            self.provider.request_guard = RequestGuard('test', interval=0)
             response = MagicMock(status_code=status)
             response.__enter__.return_value = response
             with patch(

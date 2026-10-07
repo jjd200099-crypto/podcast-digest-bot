@@ -4,6 +4,14 @@
 # meaningful deployed feature. Never advertise unimplemented plans or secrets.
 RELEASE_NOTES = (
     {
+        "id": "2026-10-08-podwise-rate-limit-recovery",
+        "date": "2026-10-08",
+        "text": (
+            "Podwise 限流时会共享冷却并保存待办，不再连续重复请求；其他可用全文仍可整理。"
+            "历史补抓分批处理，正式日报优先。另增加了运行在 GitHub 的独立日报送达检查。"
+        ),
+    },
+    {
         "id": "2026-10-04-editorial-and-reliability",
         "date": "2026-10-04",
         "text": (

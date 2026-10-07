@@ -79,6 +79,11 @@ class Store:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS provider_cooldowns (
+                    provider_key TEXT PRIMARY KEY,
+                    retry_at REAL NOT NULL,
+                    failures INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS daily_transcript_backlog (
                     episode_id TEXT PRIMARY KEY,
                     episode_json TEXT NOT NULL,
@@ -467,7 +472,9 @@ class Store:
                       AND (older.status='processing' OR
                         (older.status='pending' AND (older.created_at<j.created_at OR
                          (older.created_at=j.created_at AND older.rowid<j.rowid))))))
-                ORDER BY CASE j.kind WHEN 'message' THEN 0 ELSE 1 END,j.created_at,j.rowid
+                ORDER BY CASE WHEN j.kind='message' THEN 0
+                    WHEN j.kind='daily' AND j.job_key LIKE 'daily:____-__-__' THEN 1
+                    ELSE 2 END,j.created_at,j.rowid
                 LIMIT 1""", (now, kind, kind)).fetchone()
             if row is None:
                 return None
@@ -1364,7 +1371,24 @@ class Store:
             connection.execute('UPDATE podwise_process_requests SET state=?, updated_at=? WHERE seq=?',
                                (state, _now(), seq))
 
-    def defer_daily_transcript(self, episode: Episode, state: str) -> None:
+    def provider_cooldown(self, key: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute('SELECT retry_at, failures FROM provider_cooldowns WHERE provider_key=?',
+                                     (key,)).fetchone()
+        return dict(row) if row else None
+
+    def has_unfinished_transcript_catchup(self) -> bool:
+        with self._connect() as connection:
+            return connection.execute("SELECT 1 FROM jobs WHERE kind='daily' "
+                "AND job_key LIKE 'daily:transcript-catchup:%' AND status IN ('pending','processing') LIMIT 1").fetchone() is not None
+
+    def save_provider_cooldown(self, key: str, retry_at: float, failures: int) -> None:
+        with self._connect() as connection:
+            connection.execute('INSERT INTO provider_cooldowns VALUES (?, ?, ?) '
+                'ON CONFLICT(provider_key) DO UPDATE SET retry_at=excluded.retry_at, failures=excluded.failures',
+                (key, retry_at, failures))
+
+    def defer_daily_transcript(self, episode: Episode, state: str, *, retry_at: datetime | None = None) -> None:
         """Keep original publisher identity after the daily 24h window closes."""
         value = episode.to_persisted_dict()
         value['metadata'] = episode.metadata
@@ -1375,12 +1399,13 @@ class Store:
             # Pending transcription is checked promptly, persistently unavailable
             # material backs off after a day instead of hammering paid APIs forever.
             delay = timedelta(hours=6) if prior and prior['attempts'] >= 48 else timedelta(minutes=30)
+            next_check = max(now + delay, retry_at) if retry_at else now + delay
             connection.execute(
                 'INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, 1) '
                 'ON CONFLICT(episode_id) DO UPDATE SET state=excluded.state, '
                 'next_check_at=excluded.next_check_at, attempts=attempts+1',
                 (episode.id, json.dumps(value, ensure_ascii=False), state, now.isoformat(),
-                 (now + delay).isoformat()),
+                 next_check.isoformat()),
             )
 
     def due_daily_transcripts(self, limit: int = 50) -> list[Episode]:

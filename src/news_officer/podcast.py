@@ -27,6 +27,7 @@ from .models import (
 from .official import DwarkeshOfficialTranscriptProvider
 from .podwise import PodwiseTranscriptProvider
 from .podwise_discovery import PodwiseDiscovery
+from .provider_guard import PodwiseRateLimited
 from .rss import (
     RSSDeclaredTranscriptProvider,
     SubstackApprovedTranscriptProvider,
@@ -103,6 +104,9 @@ class TranscriptResolver:
             if transcript and transcript.verified_complete:
                 return transcript
         if errors:
+            limited = [error for _, error in errors if isinstance(error, PodwiseRateLimited)]
+            if limited:
+                raise max(limited, key=lambda error: error.retry_at)
             sources = ", ".join(name for name, _error in errors)
             raise TranscriptLookupError(
                 f"Transcript lookup had transient source errors: {sources}"
@@ -373,7 +377,7 @@ class PodcastService:
                 DwarkeshOfficialTranscriptProvider(),
                 SequoiaOfficialTranscriptProvider(),
                 ColossusOfficialTranscriptProvider(),
-                *([PodwiseTranscriptProvider(podwise_api_token)] if podwise_api_token else []),
+                *([PodwiseTranscriptProvider(podwise_api_token, processing_store=store)] if podwise_api_token else []),
                 YouTubeTranscriptProvider(),
             ]
         )
@@ -782,7 +786,7 @@ class PodcastService:
 
     def build_pending(self) -> list[DailyItem]:
         pending = []
-        for episode in self.store.due_daily_transcripts():
+        for episode in self.store.due_daily_transcripts(limit=12):
             if self.store.episode_is_delivered(episode):
                 self.store.complete_daily_transcript(episode.id)
             else:
@@ -927,6 +931,11 @@ class PodcastService:
                     priority_b_summaries += 1
                 if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                     break
+            except PodwiseRateLimited as error:
+                reason = 'Podwise 暂时限流，全文已列入待办，冷却后继续核验；本次不根据简介生成摘要。'
+                self.store.defer_daily_transcript(episode, reason,
+                    retry_at=datetime.fromtimestamp(error.retry_at, UTC))
+                results.append(DailyItem(episode, 'no_transcript', reason))
             except SummaryFormatError as error:
                 logger.warning("Podcast summary format failed for %s: %s", episode.url, error)
                 results.append(DailyItem(episode, "summary_format_error", str(error)))

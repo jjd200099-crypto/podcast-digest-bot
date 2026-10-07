@@ -921,7 +921,8 @@ class NewsOfficerRuntime:
                     if inserted:
                         logger.info("Queued daily digest %s", key)
                         self._wake_worker("daily")
-            if has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1):
+            if (has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1)
+                    and not await asyncio.to_thread(self.store.has_unfinished_transcript_catchup)):
                 slot = int(local_now.timestamp()) // 1800
                 inserted = await asyncio.to_thread(self.store.enqueue,
                     f'daily:transcript-catchup:{slot}', 'daily',
