@@ -22,6 +22,8 @@ def read_daily_digest(store, day: str) -> dict:
     matching = []
     feature_updates = []
     items = {}
+    reader_mode = False
+    documents = []
     for job in jobs:
         payload = json.loads(job["payload_json"])
         if payload.get('prepare_only'):
@@ -33,9 +35,11 @@ def read_daily_digest(store, day: str) -> dict:
             continue
         matching.append(job)
         for bundle in store.list_job_results(job["job_key"], "daily_bundle"):
+            reader_mode = reader_mode or bundle.get('reader_mode', False)
             update = bundle.get("feature_updates", "")
             if update and update not in feature_updates:
                 feature_updates.append(update)
+        documents.extend((store.get_job_result(job['job_key'], 'daily:inline-documents') or {}).get('documents', []))
         for value in store.list_job_results(job["job_key"], "daily_item"):
             item = DailyItem.from_persisted_dict(value)
             previous = items.get(item.episode.id)
@@ -63,7 +67,7 @@ def read_daily_digest(store, day: str) -> dict:
         # The raw source stays in the archive, not as an inaccessible API link.
         summaries.append(render_daily_summary(
             re.sub(r"^\*{0,2}文字稿来源：.*\n?", "", item.message, flags=re.MULTILINE),
-            discovered=item.episode.id.startswith('podwise:')))
+            discovered=item.episode.id.startswith('podwise:'), reader_mode=reader_mode))
     blocks = [f"# 情报官日报｜{day}",
               *feature_updates,
               f"已归档 {len(summaries)} 期摘要。以下与每日推送共用正式资料库；不附全文。",
@@ -75,5 +79,10 @@ def read_daily_digest(store, day: str) -> dict:
         blocks.append(f"另有 {stale} 期摘要与当前文字稿版本不一致，本次未展示，需重新生成。")
     if not all(job["analysis_complete"] for job in matching):
         blocks.append("当日仍有扫描或处理任务未完成，以上是已归档结果，不代表完整更新清单。")
+    if reader_mode:
+        blocks = list(summaries) or ['今天暂无可推送的播客摘要。']
+        blocks += [f"精读文档：[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
+                   for d in documents]
+        blocks += feature_updates
     return {"status": "ready", "date": day, "count": len(summaries),
-            "markdown": "\n\n---\n\n".join(blocks)}
+            "markdown": ("\n\n" if reader_mode else "\n\n---\n\n").join(blocks)}

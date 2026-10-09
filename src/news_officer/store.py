@@ -1408,15 +1408,16 @@ class Store:
                  next_check.isoformat()),
             )
 
-    def due_daily_transcripts(self, limit: int = 50) -> list[Episode]:
+    def due_daily_transcripts(self, limit: int = 50, *, include_discovery: bool = True) -> list[Episode]:
         from dataclasses import replace
 
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT episode_json FROM daily_transcript_backlog "
                 "WHERE state != 'delivered' AND next_check_at<=? "
+                "AND (? OR episode_id NOT LIKE 'podwise:%') "
                 "ORDER BY CASE WHEN episode_id LIKE 'podwise:%' THEN 1 ELSE 0 END, next_check_at, created_at LIMIT ?",
-                (_now(), limit),
+                (_now(), include_discovery, limit),
             ).fetchall()
         result = []
         for row in rows:

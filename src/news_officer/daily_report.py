@@ -6,11 +6,13 @@ from collections import Counter
 from .models import DailyItem
 
 
-def render_daily_summary(markdown: str, *, discovered: bool = False) -> str:
+def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode: bool = False) -> str:
     """Presentation migration only; never rewrite an immutable archived digest."""
     # The generator's structural marker is not a useful reader-facing heading.
     marker = '发现渠道：Podwise 扩展发现\n\n'
-    if discovered and not markdown.startswith(marker):
+    if reader_mode:
+        markdown = markdown.removeprefix(marker)
+    elif discovered and not markdown.startswith(marker):
         markdown = marker + markdown
     markdown = markdown.replace('\n## 内容解读\n', '\n')
     markdown = re.sub(

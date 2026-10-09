@@ -48,6 +48,7 @@ class Settings:
     podwise_api_token: str = ""
     daily_transcript_attachments: bool = False
     daily_combined_message: bool = True
+    daily_reader_mode: bool = True
     podcast_memory_path: Path | None = None
     agent_backend: str = "agents_sdk"
     hermes_python: str = ""
@@ -198,6 +199,7 @@ class Settings:
             knowledge_mode=knowledge_mode,
             podwise_api_token=os.environ.get("PODWISE_API_TOKEN", "").strip(),
             daily_combined_message=os.environ.get("NEWS_OFFICER_DAILY_COMBINED_MESSAGE", "true").lower() == "true",
+            daily_reader_mode=os.environ.get("NEWS_OFFICER_DAILY_READER_MODE", "true").lower() == "true",
             daily_transcript_attachments=os.environ.get(
                 "NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS", "false"
             ).lower() == "true",
