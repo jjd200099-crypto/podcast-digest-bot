@@ -71,7 +71,8 @@ def is_daily_receipt(message, app_id, day, start, end):
         return False
     if not start <= created <= end:
         return False
-    marker = rf'^情报官日报｜{re.escape(day.isoformat())}｜\d+ 期(?:\s|$)'
+    marker = (rf'^(?:情报官日报｜{re.escape(day.isoformat())}｜\d+ 期'
+              rf'|🎧 播客精选 · {re.escape(day.isoformat())})(?:\s|$)')
     return any(re.match(marker, value.strip().lstrip('#* ')) for value in text_values(body))
 
 

@@ -4,6 +4,11 @@
 # meaningful deployed feature. Never advertise unimplemented plans or secrets.
 RELEASE_NOTES = (
     {
+        "id": "2026-10-10-single-reader-edition",
+        "date": "2026-10-10",
+        "text": "日报改为一条消息，正文只保留推荐内容和精读链接；补齐的旧节目并入后续日报。",
+    },
+    {
         "id": "2026-10-08-podwise-rate-limit-recovery",
         "date": "2026-10-08",
         "text": (

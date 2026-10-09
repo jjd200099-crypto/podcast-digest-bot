@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import test_daily_document as fixtures
 
 from news_officer.episode_document import SelectedEpisodeCompiler, stars
+from news_officer.models import Job
 from news_officer.shownotes import render_episode, transcript_evidence, validate_notes
 
 
@@ -58,6 +59,21 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(before, f.store.list_job_results(f.base, 'daily_item'))
         self.assertEqual(self.compiler.publish(job), result)
         self.assertEqual(f.api.creates, 2)
+
+    def test_inline_daily_document_reuses_daily_job_and_suppresses_later_notice(self):
+        f = self.fixture
+        revision, selected, _ = self.compiler.snapshot(f.base)
+        self.assertTrue(selected)
+        job = Job(f.base, 'daily', {'mode': 'selected_episodes', 'day': '2026-09-21',
+            'base_job': f.base, 'revision': revision, 'targets': [('chat_id', 'oc_test')]}, 1)
+        result = self.compiler.publish(job)
+        self.assertEqual(result['count'], 1)
+        f.store.save_job_result(f.base, 'daily:inline-documents', 'inline_documents',
+                               {'documents': result['documents']})
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21', requested_only=True), 0)
+        self.assertEqual(self.compiler.publish(job), result)
+        self.assertEqual(f.api.creates, 1)
 
     def test_no_high_rating_means_no_extra_message_or_document(self):
         self.rate('one', 2)

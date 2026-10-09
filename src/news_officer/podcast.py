@@ -784,9 +784,11 @@ class PodcastService:
         ))
         return candidates[: self.max_daily_candidates] if self.max_daily_candidates else candidates
 
-    def build_pending(self) -> list[DailyItem]:
+    def build_pending(self, *, exclude_ids=()) -> list[DailyItem]:
         pending = []
-        for episode in self.store.due_daily_transcripts(limit=12):
+        for episode in self.store.due_daily_transcripts(limit=12, include_discovery=self.discovery is not None):
+            if episode.id in exclude_ids:
+                continue
             if self.store.episode_is_delivered(episode):
                 self.store.complete_daily_transcript(episode.id)
             else:

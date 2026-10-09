@@ -58,7 +58,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         revision = hashlib.sha256(json.dumps([VERSION, self.min_stars, manifest]).encode()).hexdigest()
         return revision, selected, []
 
-    def enqueue_ready(self, today):
+    def enqueue_ready(self, today, *, requested_only=False):
         oldest = (date.fromisoformat(today) - timedelta(days=7)).isoformat()
         cutoff = max(self.start_date or oldest, oldest)
         with self.store._connect() as db:
@@ -74,10 +74,14 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                               "WHERE o.job_key=jobs.job_key AND o.status='sent') ORDER BY job_key").fetchall()
         retried = sum(int(self.store.enqueue(r[0], 'document', json.loads(r[1]))) for r in requested
                       if self.request_allowed(json.loads(r[1])))
+        if requested_only:
+            return retried
         if pending:
             return retried + int(self.store.enqueue(pending[0], 'document', json.loads(pending[1])))
         active, count = set(self.store.list_subscriptions()), retried
         for row in jobs:
+            if self.store.get_job_result(row[0], 'daily:inline-documents') is not None:
+                continue
             match = re.fullmatch(r'daily:(\d{4}-\d{2}-\d{2})', row[0])
             if not match or not cutoff <= match[1] <= today:
                 continue

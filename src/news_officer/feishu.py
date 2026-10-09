@@ -171,7 +171,7 @@ def encoded_message_payload(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def combined_delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[str, str, str]]:
+def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str = BRAND_HEADER) -> list[tuple[str, str, str]]:
     """Prefer one post; measure the serialized request, not visible characters.
 
     Feishu permits 30 KB for posts and 150 KB for text. A long answer falls
@@ -187,10 +187,10 @@ def combined_delivery_parts(markdown: str, idempotency_key: str) -> list[tuple[s
                     "uuid": "x" * 36, "reply_in_thread": False}
         return len(encoded_message_payload(envelope)) <= limit
 
-    post = _post_content(body, BRAND_HEADER)
+    post = _post_content(body, title)
     if fits("post", post, 29_000):
         return [("post", post, idempotency_uuid(idempotency_key, 1))]
-    text = json.dumps({"text": brand_message(body)}, ensure_ascii=False)
+    text = json.dumps({"text": f"{title}\n\n{body}"}, ensure_ascii=False)
     if fits("text", text, 145_000):
         return [("text", text, idempotency_uuid(idempotency_key, 1))]
     # Exceptional overflow: fill each message close to the real limit. Measure
