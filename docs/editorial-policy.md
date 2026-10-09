@@ -1,9 +1,10 @@
 # Daily editorial policy: relevance-density-priority-v4
 
-All configured sources are scanned inside the existing 24-hour window. Rating
-happens only after a complete transcript has been obtained and archived. Every
-verified episode continues to receive a summary, including low-star episodes,
-ordered by stars descending. This preserves the all-updates coverage contract;
+All configured sources are scanned inside the configured discovery window
+(`NEWS_OFFICER_LOOKBACK_HOURS=24` for a 24-hour window; code default: 72). Rating
+happens only after a complete transcript has been obtained and archived.
+Verified episodes below the recommendation tier are archived without a summary
+in the daily body. Recommended episodes receive summaries ordered by stars descending;
 `selected` denotes the recommended tier, not a discovery or transcript filter.
 Already delivered messages are not rewritten.
 
@@ -68,13 +69,15 @@ disables the grounded rating pass, not complete-transcript validation.
 The brief retains coherent Chinese paragraphs and a short recommendation reason.
 The archived summary retains its internal five-star encoding for ordering, audit
 and compilation gates. Delivery replaces that line with only the reader action:
-值得编译 / 值得看全文 / 看摘要 / 无关. No stars or numeric subscores are displayed,
+值得编译 / 值得看全文 / 看摘要 for recommended daily content. No stars or numeric subscores are displayed,
 including document-link notifications. Here 无关 means not recommended for this
 research brief: relevance OR information density is insufficient and no priority rule applies. A missing or
 unverified transcript remains pending/unrated, never automatically 无关.
 
 `NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **5**. Production should also
 set it to 5 explicitly, since an older environment override of 3 wins over code
-defaults. Automatic compilation happens after the brief is delivered. Frozen
+defaults. In default reader mode, automatic compilation happens before the daily message
+is frozen; verified document links are included in that same message. Legacy
+non-reader mode compiles after delivery and sends a separate link notice. Frozen
 older document batches cannot bypass the current threshold. A user's explicit
 request for a detailed episode document still bypasses the star threshold.
