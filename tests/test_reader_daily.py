@@ -93,7 +93,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         compiler = Mock()
         compiler.snapshot.return_value = ('revision', ['selected'], [])
         compiler.publish.side_effect = [TimeoutError('retry'),
-            {'documents': [{'title': 'Selected', 'url': 'https://example.test/doc'}]}]
+            {'documents': [{'title': 'Selected', 'episode_id': 'selected', 'url': 'https://example.test/doc'}]}]
         instance.document_compiler = compiler
         with self.assertRaises(TimeoutError):
             await instance._handle_daily_job(job)
@@ -144,3 +144,11 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
                    'body': {'content': json.dumps({'zh_cn': {'title': '🎧 播客精选 · 2026-10-09'}})}}
         self.assertTrue(is_daily_receipt(message, 'bot', now.date(), now.timestamp()-1, now.timestamp()+1))
         self.assertFalse(is_daily_receipt(message, 'bot', (now-timedelta(days=1)).date(), 0, now.timestamp()+1))
+
+    async def test_reader_omits_release_updates_without_claiming_them(self):
+        instance, job, _ = self.setup_job([self.item('selected')], payload={
+            'scheduled_for': '2026-10-11T08:30:00+08:00'})
+        await instance._handle_daily_job(job)
+        self.assertNotIn('功能更新', body(self.messenger.attempts[0]))
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM daily_release_announcements').fetchone()[0], 0)

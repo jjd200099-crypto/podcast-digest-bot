@@ -230,6 +230,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 notified = db.execute('SELECT notification_job FROM daily_documents WHERE day=?', (document['key'],)).fetchone()[0]
             if requested or job.kind == 'daily' or notified == job.key:
                 links.append({'title': document['title'], 'stars': document['stars'],
+                              'episode_id': document['key'].removeprefix('episode:'),
                               'url': f'https://www.feishu.cn/docx/{token}'})
         result = {'title': '播客重点总结已整理成文档' if requested else f'{day} 重点播客精读',
                   'documents': links, 'count': len(links), 'notify': bool(links), 'targets': targets}

@@ -515,7 +515,11 @@ class NewsOfficerRuntime:
             )
 
     def _prepare_combined_daily(self, job, *, finalize=False):
-        from .daily_report import render_daily_summary
+        from .daily_report import (
+            episode_document_url,
+            reader_episode,
+            render_daily_summary,
+        )
 
         items = self._persisted_daily_items(job)
         bundles = self.store.list_job_results(job.key, "daily_bundle")
@@ -564,7 +568,7 @@ class NewsOfficerRuntime:
         if job.payload.get('recovery_window_end'):
             blocks.append('停机补发：以下按原定日期的 24 小时时间窗整理，不是今天的新节目；已送达内容不重复发送。')
         feature_updates = ""
-        if not catchup and not bundles:
+        if not reader_mode and not catchup and not bundles:
             from .release_notes import RELEASE_NOTES, render_release_notes
             feature_updates = render_release_notes(self.store.claim_daily_release_notes(
                 job.key, when.date().isoformat(), RELEASE_NOTES))
@@ -586,20 +590,15 @@ class NewsOfficerRuntime:
             blocks = []
             if job.payload.get('recovery_window_end'):
                 blocks.append(f'补发 {when:%m月%d日} 的播客。')
+            documents = self._inline_daily_documents(job, when)
             for item in summaries:
-                content = render_daily_summary(item.message, reader_mode=True)
+                content = reader_episode(item.message, episode_document_url(item.episode, documents))
                 published = item.episode.published_at
                 if published and published < start:
                     content = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n' + content
                 blocks.append(content)
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')
-            documents = self._inline_daily_documents(job, when)
-            for document in documents:
-                title = document['title'].replace('[', '（').replace(']', '）')
-                blocks.append(f"精读文档：[{title}]({document['url']})")
-            if feature_updates:
-                blocks.append(feature_updates)
         markdown = ("\n\n" if reader_mode else "\n\n---\n\n").join(blocks)
         group = "daily:bundle:" + hashlib.sha256(markdown.encode()).hexdigest()[:20]
         deliveries = []
