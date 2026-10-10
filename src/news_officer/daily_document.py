@@ -128,12 +128,12 @@ class DailyDocumentCompiler:
                                          'targets': audience})
         return count
 
-    def _notes(self, record, digest):
+    def _notes(self, record, digest, *, fulltext_attached=False):
         identity = note_identity(record)
         with self.store._connect() as db:
             row = db.execute('SELECT notes_json FROM episode_shownotes WHERE identity=?', (identity,)).fetchone()
         notes = json.loads(row[0]) if row else self.writer.generate(record)
-        nodes, markdown = render_episode(record, notes, digest)
+        nodes, markdown = render_episode(record, notes, digest, fulltext_attached=fulltext_attached)
         if not row:
             with self.store._connect() as db:
                 db.execute('INSERT OR IGNORE INTO episode_shownotes VALUES (?,?,?)',

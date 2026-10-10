@@ -73,8 +73,17 @@ including document-link notifications. Here 无关 means not recommended for thi
 research brief: relevance OR information density is insufficient and no priority rule applies. A missing or
 unverified transcript remains pending/unrated, never automatically 无关.
 
-`NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **5**. Production should also
-set it to 5 explicitly, since an older environment override of 3 wins over code
-defaults. Automatic compilation happens after the brief is delivered. Frozen
+`NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **4**: both worth-reading
+and exceptional episodes get a document. Production should also set it to 4
+explicitly, since older environment overrides win over code defaults. In reader
+mode, compilation finishes before the single brief is frozen; document links
+are included in that same message. Frozen
 older document batches cannot bypass the current threshold. A user's explicit
 request for a detailed episode document still bypasses the star threshold.
+
+After the operator confirms full-text publication rights for the configured
+audience, `NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT=true` appends the complete verified
+archive to each selected/requested document. This is a lossless original-language
+appendix, not a new translation. It uses no additional Podwise quota. A separate
+content hash makes appends resumable and deduplicated; existing document edits
+are never overwritten. No broader sharing permissions or chat attachments are added.

@@ -185,7 +185,7 @@ def table_node(rows):
                          for row in rows for cell in row]}
 
 
-def render_episode(record, notes, digest=''):
+def render_episode(record, notes, digest='', *, fulltext_attached=False):
     evidence = transcript_evidence(record.transcript.text)
     notes = validate_notes(notes, evidence)
     ep = record.episode
@@ -196,7 +196,8 @@ def render_episode(record, notes, digest=''):
                 f'[收听本期]({ep.url})',
                 ('章节沿节目说明中的时间标记整理。' if chapter_outline(ep) else '未取得官方章节，按原对谈话题分章。')
                 + '时间戳取自所引原文段落，无时间戳时明确标注。']
-    metadata.append('观点、数字与预测归属节目嘉宾；本文为主题精读，不附整期实录。')
+    metadata.append('观点、数字与预测归属节目嘉宾；' + (
+        '精读之后附完整归档文字稿。' if fulltext_attached else '本文为主题精读，不附整期实录。'))
     for line in digest.splitlines():
         if line.startswith(('推荐理由：', '推荐星级：')):
             metadata.append(line)

@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 from .daily_document import DailyDocumentCompiler
+from .document_transcript import fulltext_identity, render_fulltext
 from .models import IncomingMessage
 from .shownotes import VERSION, note_identity, text_node
 
@@ -17,12 +18,19 @@ def stars(markdown):
 
 
 class SelectedEpisodeCompiler(DailyDocumentCompiler):
-    def __init__(self, *args, min_stars=5, request_authorizer=None, **kwargs):
+    def __init__(self, *args, min_stars=4, request_authorizer=None, include_fulltext=False, **kwargs):
         super().__init__(*args, **kwargs)
         if min_stars not in range(1, 6):
             raise ValueError('Document minimum stars must be 1–5')
         self.min_stars = min_stars
         self.request_authorizer = request_authorizer
+        self.include_fulltext = include_fulltext
+
+    def document_identity(self, record):
+        components = [note_identity(record)]
+        if self.include_fulltext:
+            components.append(fulltext_identity(record))
+        return hashlib.sha256(json.dumps(components).encode()).hexdigest()
 
     def request_allowed(self, payload):
         return bool(self.request_authorizer and self.request_authorizer(
@@ -54,7 +62,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             if stars(digest) >= self.min_stars:
                 selected.append((item, record))
         selected.sort(key=lambda pair: -stars(self.store.get_transcript_digest(pair[1].episode.id) or pair[0].message))
-        manifest = [(r.episode.id, note_identity(r)) for _, r in selected]
+        manifest = [(r.episode.id, self.document_identity(r)) for _, r in selected]
         revision = hashlib.sha256(json.dumps([VERSION, self.min_stars, manifest]).encode()).hexdigest()
         return revision, selected, []
 
@@ -112,7 +120,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 raise ValueError('请求的完整文字稿已不可用')
             day = record.episode.published_at.isoformat()[:10] if record.episode.published_at else ''
             targets = [('open_id', job.payload['sender_open_id'])] if job.payload['chat_type'] == 'p2p' else [('chat_id', job.payload['chat_id'])]
-            revision, records = note_identity(record), [(SimpleNamespace(message=''), record)]
+            revision, records = self.document_identity(record), [(SimpleNamespace(message=''), record)]
         else:
             day = job.payload['day']
             date.fromisoformat(day)
@@ -139,10 +147,18 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 if identity not in entries:
                     if nodes:
                         nodes.append(text_node('补充精读（原稿版本更新）', 'heading1'))
-                    nodes.extend(self._notes(record, digest))
+                    nodes.extend(self._notes(record, digest, fulltext_attached=self.include_fulltext))
                     entries.append(identity)
+                if self.include_fulltext:
+                    appendix_id = fulltext_identity(record)
+                    if appendix_id not in entries:
+                        nodes.extend(render_fulltext(record))
+                        entries.append(appendix_id)
+                    # Store a lossless local export alongside the derived notes.
+                    (self.root / (appendix_id.replace(':', '-') + '.txt')).write_text(
+                        record.transcript.text, encoding='utf-8')
                 documents.append({'key': key, 'title': title, 'nodes': nodes, 'entries': entries,
-                                  'revision': identity, 'stars': stars(digest)})
+                                  'revision': self.document_identity(record), 'stars': stars(digest)})
             if not requested and self.snapshot(job.payload['base_job'])[0] != revision:
                 return None
             bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
@@ -152,6 +168,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             # An older pending batch must not bypass a newly raised threshold.
             if not requested and document['stars'] < self.min_stars:
                 continue
+            if not self.include_fulltext and any(e.startswith('fulltext:') for e in document['entries']):
+                raise ValueError('全文发布授权已关闭，停止写入冻结的全文文档')
             row = self._document(document['key'], document['title'])
             token = row['document_id']
             self._write(token, document['nodes'])
@@ -166,7 +184,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     (json.dumps(document['nodes'], ensure_ascii=False), json.dumps(document['entries']),
                      document['revision'], '' if requested else job.key, document['key']))
                 notified = db.execute('SELECT notification_job FROM daily_documents WHERE day=?', (document['key'],)).fetchone()[0]
-            if requested or notified == job.key:
+            if requested or job.kind == 'daily' or notified == job.key:
                 links.append({'title': document['title'], 'stars': document['stars'],
                               'url': f'https://www.feishu.cn/docx/{token}'})
         result = {'title': '播客重点总结已整理成文档' if requested else f'{day} 重点播客精读',
