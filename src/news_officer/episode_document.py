@@ -6,8 +6,9 @@ import re
 from datetime import date, timedelta
 from types import SimpleNamespace
 
-from .daily_document import DailyDocumentCompiler
+from .daily_document import DailyDocumentCompiler, read_tree, tree_signature
 from .document_transcript import fulltext_identity, render_fulltext
+from .library import LibraryError
 from .models import IncomingMessage
 from .shownotes import VERSION, note_identity, text_node
 
@@ -18,13 +19,35 @@ def stars(markdown):
 
 
 class SelectedEpisodeCompiler(DailyDocumentCompiler):
-    def __init__(self, *args, min_stars=4, request_authorizer=None, include_fulltext=False, **kwargs):
+    def __init__(self, *args, min_stars=4, request_authorizer=None, include_fulltext=False,
+                 transcript_writer=None, **kwargs):
         super().__init__(*args, **kwargs)
         if min_stars not in range(1, 6):
             raise ValueError('Document minimum stars must be 1–5')
         self.min_stars = min_stars
         self.request_authorizer = request_authorizer
         self.include_fulltext = include_fulltext
+        self.transcript_writer = transcript_writer
+
+    def _replace_legacy_appendix(self, token, document):
+        base = document.get('replacement_base')
+        if not base:
+            return
+        # Optimistic revision prevents deleting a range changed after readback.
+        meta = self.api.request('GET', f'/docx/v1/documents/{token}')
+        revision = meta['document']['revision_id']
+        actual = [tree_signature(n) for n in read_tree(self.api.blocks(token), token)]
+        expected = [tree_signature(n) for n in document['nodes']]
+        if actual == expected[:len(actual)] and len(actual) <= len(expected):
+            return  # Already removed; resume an interrupted append normally.
+        if actual != [tree_signature(n) for n in base]:
+            raise LibraryError('旧附录或精读存在人工修改，停止替换以保护内容')
+        start = document['replacement_start']
+        # Frozen base is the recoverable backup, only the known generated tail
+        # is removed; front notes, media and their block IDs remain untouched.
+        self.api.request('DELETE', f'/docx/v1/documents/{token}/blocks/{token}/children/batch_delete',
+                         params={'document_revision_id': revision},
+                         data={'start_index': start, 'end_index': len(base)})
 
     def document_identity(self, record):
         components = [note_identity(record)]
@@ -144,6 +167,18 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     previous = db.execute('SELECT nodes_json,entries_json FROM daily_documents WHERE day=?', (key,)).fetchone()
                 entries = json.loads(previous['entries_json']) if previous else []
                 nodes = json.loads(previous['nodes_json']) if previous else []
+                replacement = {}
+                if self.include_fulltext:
+                    legacy = [i for i, n in enumerate(nodes) if ''.join(
+                        e.get('text_run', {}).get('content', '') for e in n.get('heading2', {}).get('elements', [])
+                    ).startswith('完整文字稿（归档原文')]
+                    if legacy:
+                        start = legacy[0]
+                        if len(legacy) != 1 or any(n['block_type'] != 2 for n in nodes[start + 1:]):
+                            raise LibraryError('旧全文不是独立的纯文本尾部，需人工核对')
+                        replacement = {'replacement_base': nodes, 'replacement_start': start}
+                        nodes = nodes[:start]
+                        entries = [e for e in entries if not e.startswith('fulltext:')]
                 if identity not in entries:
                     if nodes:
                         nodes.append(text_node('补充精读（原稿版本更新）', 'heading1'))
@@ -152,13 +187,18 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 if self.include_fulltext:
                     appendix_id = fulltext_identity(record)
                     if appendix_id not in entries:
-                        nodes.extend(render_fulltext(record))
+                        if self.transcript_writer is None:
+                            raise ValueError('未配置中文全文翻译器，停止发布原文替代品')
+                        translation = self.transcript_writer.generate(record)
+                        nodes.extend(render_fulltext(record, translation))
+                        (self.root / (appendix_id.replace(':', '-') + '.zh.json')).write_text(
+                            json.dumps(translation, ensure_ascii=False), encoding='utf-8')
                         entries.append(appendix_id)
                     # Store a lossless local export alongside the derived notes.
                     (self.root / (appendix_id.replace(':', '-') + '.txt')).write_text(
                         record.transcript.text, encoding='utf-8')
                 documents.append({'key': key, 'title': title, 'nodes': nodes, 'entries': entries,
-                                  'revision': self.document_identity(record), 'stars': stars(digest)})
+                                  'revision': self.document_identity(record), 'stars': stars(digest), **replacement})
             if not requested and self.snapshot(job.payload['base_job'])[0] != revision:
                 return None
             bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
@@ -170,8 +210,11 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 continue
             if not self.include_fulltext and any(e.startswith('fulltext:') for e in document['entries']):
                 raise ValueError('全文发布授权已关闭，停止写入冻结的全文文档')
+            if any('完整文字稿（归档原文' in str(n.get('heading2', {})) for n in document['nodes']):
+                raise ValueError('旧任务冻结了未翻译原文，请使用新的中文全文任务')
             row = self._document(document['key'], document['title'])
             token = row['document_id']
+            self._replace_legacy_appendix(token, document)
             self._write(token, document['nodes'])
             for kind, identity in targets:
                 self.api.request('POST', f'/drive/v1/permissions/{token}/members',

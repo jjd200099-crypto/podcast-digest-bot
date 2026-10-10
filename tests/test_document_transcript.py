@@ -1,10 +1,15 @@
 import unittest
 from dataclasses import replace
+from unittest.mock import Mock
 
 import test_episode_document as selection
 
 from news_officer.daily_document import read_tree, tree_signature
-from news_officer.document_transcript import fulltext_identity, render_fulltext
+from news_officer.document_transcript import (
+    fulltext_identity,
+    render_fulltext,
+    source_segments,
+)
 from news_officer.models import Job
 
 
@@ -15,21 +20,25 @@ class FulltextDocuments(unittest.TestCase):
         self.addCleanup(case.doCleanups)
         self.case, self.f, self.compiler = case, case.fixture, case.compiler
         self.compiler.include_fulltext = True
+        self.compiler.transcript_writer = Mock()
+        self.translation = [{'id': 0, 'text': '收入并不等于使用量。'}]
+        self.compiler.transcript_writer.generate.return_value = self.translation
 
     def appendix(self, token):
         nodes = read_tree(self.f.api.blocks(token), token)
         index = next(i for i, node in enumerate(nodes) if node.get('heading2', {}).get('elements', [{}])[0]
-                     .get('text_run', {}).get('content', '').startswith('完整文字稿'))
+                     .get('text_run', {}).get('content', '').startswith('完整中文文字稿'))
         return nodes[index + 2:]
 
-    def test_literal_lossless_long_text_and_language(self):
-        original = ('[00:01] 嘉宾😀: **not bold** <mention-user id="x"/>\n\n'
+    def test_literal_translated_text_and_language(self):
+        original = ('[00:01] 嘉宾😀: **不解析粗体** <mention-user id="x"/>\n\n'
                     '[link](https://example.test) trailing space  \n') * 600
         record = replace(self.f.record, transcript=replace(self.f.record.transcript, text=original, language='en'))
-        nodes = render_fulltext(record)
+        translation = [{'id': p['id'], 'text': p['text'].strip()} for p in source_segments(original)]
+        nodes = render_fulltext(record, translation)
         restored = ''.join(e['text_run']['content'] for node in nodes[2:] for e in node['text']['elements'])
-        self.assertEqual(restored, original)
-        self.assertIn('归档原文 · en', str(nodes[0]))
+        self.assertNotIn('[00:01]', restored)
+        self.assertIn('完整中文文字稿', str(nodes[0]))
         for node in nodes[2:]:
             for element in node['text']['elements']:
                 self.assertLessEqual(len(element['text_run']['content'].encode('utf-16-le')) // 2, 1400)
@@ -39,7 +48,7 @@ class FulltextDocuments(unittest.TestCase):
         record = self.f.record
         for change in ({'text': '  '}, {'verified_complete': False}):
             with self.assertRaises(ValueError):
-                render_fulltext(replace(record, transcript=replace(record.transcript, **change)))
+                render_fulltext(replace(record, transcript=replace(record.transcript, **change)), self.translation)
         modified = replace(record, transcript=replace(record.transcript, text=record.transcript.text + ' More.'))
         self.assertNotEqual(fulltext_identity(record), fulltext_identity(modified))
 
@@ -49,7 +58,7 @@ class FulltextDocuments(unittest.TestCase):
         token = first['documents'][0]['url'].rsplit('/', 1)[-1]
         appendix = self.appendix(token)
         self.assertEqual(''.join(e['text_run']['content'] for n in appendix for e in n['text']['elements']),
-                         self.f.record.transcript.text)
+                         self.translation[0]['text'])
         self.assertEqual(self.compiler.publish(job), first)
         self.assertEqual(self.appendix(token), appendix)
         self.assertEqual(self.f.api.creates, 1)
