@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import test_episode_document as selection
 
-from news_officer.daily_document import read_tree
+from news_officer.daily_document import read_tree, tree_signature
 from news_officer.document_transcript import fulltext_identity, render_fulltext
 from news_officer.models import Job
 
@@ -116,3 +116,39 @@ class FulltextDocuments(unittest.TestCase):
         self.assertEqual(result['targets'], [('open_id', 'owner')])
         token = result['documents'][0]['url'].rsplit('/', 1)[-1]
         self.assertTrue(self.appendix(token))
+
+    def test_server_split_runs_are_equivalent_but_missing_text_and_links_are_not(self):
+        def node(parts):
+            return {'block_type': 2, 'text': {'elements': [
+                {'text_run': {'content': text, 'text_element_style': {'link': {'url': link}}}}
+                for text, link in parts]}}
+        expected = node([('First line.\nSecond line. ', '')])
+        server = node([('First ', ''), ('line.\nSecond ', ''), ('line. ', '')])
+        self.assertEqual(tree_signature(expected), tree_signature(server))
+        for changed in (node([('First line.\nSecond line.', '')]),
+                        node([('First line.\nSecond line. ', 'https://unexpected.test')])):
+            self.assertNotEqual(tree_signature(expected), tree_signature(changed))
+
+    def test_realistic_server_run_splitting_passes_publish_and_retry(self):
+        request = self.f.api.request
+
+        def split_runs(*args, **kwargs):
+            result = request(*args, **kwargs)
+            for blocks in self.f.api.data.values():
+                for block in blocks:
+                    payload = block.get('text')
+                    if not payload:
+                        continue
+                    elements = []
+                    for element in payload['elements']:
+                        run = element['text_run']
+                        for i in range(0, len(run['content']), 11):
+                            elements.append({'text_run': {**run, 'content': run['content'][i:i + 11]}})
+                    payload['elements'] = elements
+            return result
+
+        self.f.api.request = split_runs
+        job = self.case.job()
+        first = self.compiler.publish(job)
+        self.assertEqual(self.compiler.publish(job), first)
+        self.assertEqual(self.f.api.creates, 1)
