@@ -197,7 +197,7 @@ def render_episode(record, notes, digest='', *, fulltext_attached=False):
                 ('章节沿节目说明中的时间标记整理。' if chapter_outline(ep) else '未取得官方章节，按原对谈话题分章。')
                 + '时间戳取自所引原文段落，无时间戳时明确标注。']
     metadata.append('观点、数字与预测归属节目嘉宾；' + (
-        '精读之后附完整归档文字稿。' if fulltext_attached else '本文为主题精读，不附整期实录。'))
+        '精读之后附去除时间戳的完整中文文字稿。' if fulltext_attached else '本文为主题精读，不附整期实录。'))
     for line in digest.splitlines():
         if line.startswith(('推荐理由：', '推荐星级：')):
             metadata.append(line)
