@@ -49,7 +49,9 @@ python -m news_officer.operations --db /data/news-officer.sqlite3
 
 `python -m news_officer.recovery mentions --chat CHAT --start 带时区的ISO时间 --end 带时区的ISO时间` 同样默认预览。它只扫描既有研究群白名单，以机器人真实 open_id 精确识别 @，并保留同事身份、原消息 ID 和引用线程。加 `--execute` 后才把遗漏消息交给正常 Agent worker；已有任务不重复创建，历史失败任务列出供复核，不盲目重放。扫描近七天根消息及其线程，不能保证找出更老根消息下的新回复；权限失败或分页超限时不部分提交。
 
-飞书接口可能把旧的 `im:message.history:readonly` 列为可用权限，但开发者后台未必提供。后台可申请的 `im:message:readonly`（应用身份，获取单聊、群组消息）也能支持历史读取；由所有者确认开通并发布，不能把用户身份授权当作应用身份授权。
+飞书接口可能把旧的 `im:message.history:readonly` 列为可用权限，但开发者后台未必提供。后台可申请的 `im:message:readonly`（应用身份，获取单聊、群组消息）满足基础读取权限。**读取群历史还必须额外开通 `im:message.group_msg`（获取群组中所有消息，敏感权限）**；只开前一项会继续返回 `230027`。`im:message.group_at_msg` 只允许接收群内 @ 事件，不能替代历史读取权限。所有者必须了解较宽的数据范围并确认开通，必要时发布；不能用用户身份授权代替应用身份授权，也不需要额外申请 `.include_bot:read`。恢复工具仍只扫描已配置群和指定停机窗口，仅重放精确 @ 当前机器人的用户消息。
+
+验收必须使用云端应用身份实际调用群历史接口，再检查已发送消息的回执；后台显示已开通、健康检查成功都不能代替该验收。权限要求参见[飞书获取历史消息文档](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list)。
 
 ## 对话验收
 
