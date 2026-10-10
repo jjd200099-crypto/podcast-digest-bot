@@ -4,6 +4,7 @@ import re
 from collections import Counter
 
 from .models import DailyItem
+from .summarizer import remove_editorial_leadins
 
 
 def reader_episode(markdown: str, document_url: str = '') -> str:
@@ -43,6 +44,7 @@ def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode
     marker = '发现渠道：Podwise 扩展发现\n\n'
     if reader_mode:
         markdown = markdown.removeprefix(marker)
+        markdown = remove_editorial_leadins(markdown)
     elif discovered and not markdown.startswith(marker):
         markdown = marker + markdown
     markdown = markdown.replace('\n## 内容解读\n', '\n')

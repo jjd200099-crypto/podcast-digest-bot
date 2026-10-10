@@ -9,10 +9,11 @@ from news_officer.summarizer import (
     TranscriptSummarizer,
     _valid_editorial_summary,
     _valid_narrative_summary,
+    remove_editorial_leadins,
 )
 
 PARAGRAPH_ONE = (
-    '这期访谈的核心判断是，模型表现的改善只有转化为客户回报，才能推动商业增长。'
+    '模型表现的改善只有转化为客户回报，才能推动商业增长。'
     '受访者以广告投放为例解释其中的因果：预测更准确，广告主获得的订单更多，'
     '才会愿意扩大预算。因此，值得跟踪的不是模型更新次数，而是客户实际得到的价值。'
 )
@@ -65,9 +66,34 @@ class SummarizerTests(unittest.TestCase):
         self.assertIn('禁止“嘉宾观点：”', call['instructions'])
         self.assertIn('他预计', call['instructions'])
         self.assertIn('不能假装读过别期', call['instructions'])
+        self.assertIn('不写“这期最重要的判断是”', call['instructions'])
+        self.assertIn('不要套“某某的核心判断是”', call['instructions'])
         self.assertIn('BEGIN UNTRUSTED TRANSCRIPT', call['input'])
         self.assertNotIn(TRANSCRIPT.text, call['instructions'])
         self.assertFalse(call['store'])
+
+    def test_generated_stock_intro_removed_before_validation(self):
+        padded = VALID_SUMMARY.replace(PARAGRAPH_ONE, '这期最重要的判断是：' + PARAGRAPH_ONE)
+        self.assertEqual(summarizer_for(padded).summarize(EPISODE, TRANSCRIPT), VALID_SUMMARY)
+
+    def test_reader_removes_stock_intros_without_rewriting_archive(self):
+        for prefix in ('这期最重要的判断是：', '这期最重要的判断是，',
+                       '本期节目的核心观点是', '这期访谈的核心判断是，'):
+            source = VALID_SUMMARY.replace(PARAGRAPH_ONE, prefix + PARAGRAPH_ONE)
+            self.assertIn(PARAGRAPH_ONE, render_daily_summary(source, reader_mode=True))
+            self.assertNotIn(prefix, render_daily_summary(source, reader_mode=True))
+            self.assertIn(prefix, source)
+            self.assertIn(prefix, render_daily_summary(source))
+
+    def test_attribution_quotes_and_qualifiers_remain(self):
+        text = ('Brown 的核心判断是，模型可能改善。\n\n'
+                '他预计需求增长；公司称收入增加。\n\n'
+                '“这期最重要的判断是”：这是对原话的引用。\n\n'
+                '节目：这期最重要的判断是\n\n'
+                '这期最重要的判断是，他预计需求可能增加。')
+        cleaned = remove_editorial_leadins(text)
+        self.assertEqual(cleaned, text.replace('这期最重要的判断是，他预计', '他预计'))
+        self.assertEqual(remove_editorial_leadins(cleaned), cleaned)
 
     def test_unverified_transcript_never_reaches_model(self):
         instance = summarizer_for(VALID_SUMMARY)
