@@ -23,9 +23,12 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
             Settings.from_env()
 
-    def test_automatic_compilation_defaults_to_exceptional_five_stars(self):
+    def test_automatic_compilation_defaults_to_worth_reading_and_above(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
-            self.assertEqual(Settings.from_env().daily_document_min_stars, 5)
+            self.assertEqual(Settings.from_env().daily_document_min_stars, 4)
+            self.assertFalse(Settings.from_env().daily_document_fulltext)
+            with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT': 'true'}):
+                self.assertTrue(Settings.from_env().daily_document_fulltext)
 
     def base_environment(self):
         return {

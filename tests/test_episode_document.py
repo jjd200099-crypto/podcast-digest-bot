@@ -81,12 +81,16 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(self.fixture.api.creates, 0)
         self.assertEqual(stars('没有评级'), 0)
 
-    def test_only_five_stars_is_automatically_compiled(self):
-        for rating in (3, 4):
+    def test_four_and_five_stars_are_automatically_compiled(self):
+        for rating in (1, 2, 3):
             self.rate('one', rating)
             self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
-        self.rate('one', 5)
-        self.assertEqual(self.compiler.publish(self.job())['count'], 1)
+        self.rate('one', 4)
+        self.fixture.add_episode('five')
+        self.rate('five', 5)
+        result = self.compiler.publish(self.job())
+        self.assertEqual(result['count'], 2)
+        self.assertEqual([d['stars'] for d in result['documents']], [5, 4])
 
     def test_daily_must_finish_delivery_before_document_enqueue(self):
         f = self.fixture
@@ -101,6 +105,7 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
 
     def test_frozen_old_batch_cannot_bypass_raised_threshold(self):
+        self.compiler.min_stars = 5
         job = self.job()
         self.fixture.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
                                            {'documents': [{'stars': 4}]})

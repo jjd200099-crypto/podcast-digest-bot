@@ -4,6 +4,11 @@
 # meaningful deployed feature. Never advertise unimplemented plans or secrets.
 RELEASE_NOTES = (
     {
+        "id": "2026-10-11-full-reading-documents",
+        "date": "2026-10-11",
+        "text": "“值得看全文”和“值得编译”的节目都会附飞书精读文档链接；已授权的完整归档稿可自动附在文末，日报仍合为一条消息。",
+    },
+    {
         "id": "2026-10-10-single-reader-edition",
         "date": "2026-10-10",
         "text": "日报改为一条消息，正文只保留推荐内容和精读链接；补齐的旧节目并入后续日报。",
