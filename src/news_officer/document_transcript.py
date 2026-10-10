@@ -4,12 +4,14 @@ import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
+from itertools import groupby
 
 from pydantic import BaseModel
 
 from .shownotes import text_node
 
-VERSION = 'authorized-chinese-appendix-v2'
+VERSION = 'chinese-dialogue-layout-v3'
+TRANSLATION_VERSION = 'authorized-chinese-appendix-v2'
 CUE = r'\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{3})?'
 BRACKET_CUE = re.compile(r'[\[(]' + CUE + r'[\])]')
 LEADING_CUE = re.compile(r'(?m)^[ \t]*' + CUE + r'(?:[ \t]*-->[ \t]*' + CUE + r')?[ \t]*(?:\n|(?=\S)|$)')
@@ -29,10 +31,15 @@ class TranslatedBatch(BaseModel):
 
 
 def fulltext_identity(record):
+    identity = translation_identity(record)
+    return 'fulltext:' + hashlib.sha256(json.dumps([VERSION, identity]).encode()).hexdigest()
+
+
+def translation_identity(record):
     transcript = record.transcript
     if not transcript.verified_complete or not transcript.text.strip():
         raise ValueError('全文附录必须使用已核验的完整文字稿')
-    content = [VERSION, record.episode.id, transcript.text, transcript.language,
+    content = [TRANSLATION_VERSION, record.episode.id, transcript.text, transcript.language,
                transcript.source, transcript.source_url]
     return 'fulltext:' + hashlib.sha256(json.dumps(content, ensure_ascii=False).encode()).hexdigest()
 
@@ -79,13 +86,41 @@ def numeric_tokens(value):
     return set(re.findall(r'(?<![A-Za-z0-9])\d+(?:[,\.]\d+)*(?![A-Za-z0-9])', value))
 
 
+def source_labels(text):
+    labels = re.findall(r'(?m)^[ \t]*([^\n:：]{1,60})[:：][ \t]*', clean_timestamps(text))
+    return [label.strip() for label in labels if re.fullmatch(r"[A-Za-z\u3400-\u9fff][A-Za-z\u3400-\u9fff\d .’'\-]{0,59}", label.strip())
+            and label.strip().lower() not in {'http', 'https', 'ftp'}]
+
+
+def speaker_aliases(names):
+    aliases = {name: name for name in names}
+    for name in names:
+        short = name.split()[0]
+        if sum(n.split()[0] == short for n in names) == 1:
+            aliases[short] = name
+    if 'Unknown Speaker' in names:
+        aliases['未知说话人'] = 'Unknown Speaker'
+    return aliases
+
+
+def validate_speakers(source, translated, aliases):
+    for original, output in zip(source, translated, strict=True):
+        expected = [k for k, _ in groupby(source_labels(original['text']))]
+        seen = [aliases[m[1].strip()] for m in re.finditer(r'(?m)^[ \t]*([^:：\n]{1,60})[:：]', output['text'])
+                if m[1].strip() in aliases]
+        if expected != [k for k, _ in groupby(seen)]:
+            raise ValueError(f"分段 {original['id']} 说话人轮次与原稿不符；姓名须照录，不自行重分发言")
+    return translated
+
+
 class ChineseTranscriptWriter:
     def __init__(self, store, client, model):
         self.store, self.client, self.model = store, client, model
 
     def generate(self, record):
-        identity = fulltext_identity(record)
+        identity = translation_identity(record)
         segments = source_segments(record.transcript.text)
+        aliases = speaker_aliases(set(source_labels(record.transcript.text)))
         with self.store._connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS transcript_translations '
                        '(cache_key TEXT PRIMARY KEY, segments_json TEXT NOT NULL)')
@@ -96,11 +131,20 @@ class ChineseTranscriptWriter:
             with self.store._connect() as db:
                 row = db.execute('SELECT segments_json FROM transcript_translations WHERE cache_key=?', (key,)).fetchone()
             if row:
-                return validate_translation(batch, json.loads(row[0]))
+                try:
+                    return validate_speakers(batch, validate_translation(batch, json.loads(row[0])), aliases)
+                except ValueError:
+                    # Preserve the original translation; repair only this batch
+                    # under a separate immutable cache key.
+                    key = hashlib.sha256(('speaker-repair-v1:' + key).encode()).hexdigest()
+                    with self.store._connect() as db:
+                        repaired = db.execute('SELECT segments_json FROM transcript_translations WHERE cache_key=?', (key,)).fetchone()
+                    if repaired:
+                        return validate_speakers(batch, validate_translation(batch, json.loads(repaired[0])), aliases)
             prompt = json.dumps({'title': record.episode.title, 'show': record.episode.show,
                                  'previous_context': segments[start - 1]['text'][-500:] if start else '',
                                  'segments': batch}, ensure_ascii=False)
-            repair = ''
+            repair = '\n严格照录每段原稿的说话人及其顺序，不凭上下文修正或增加说话人；Unknown Speaker 可译为未知说话人。'
             for _ in range(3):
                 response = self.client.responses.parse(
                     model=self.model, instructions=INSTRUCTIONS + repair, input=prompt,
@@ -109,11 +153,12 @@ class ChineseTranscriptWriter:
                     if response.output_parsed is None:
                         raise ValueError('翻译响应不完整')
                     output = validate_translation(batch, response.output_parsed.model_dump()['segments'])
+                    validate_speakers(batch, output, aliases)
                     with self.store._connect() as db:
                         db.execute('INSERT OR IGNORE INTO transcript_translations VALUES (?,?)',
                                    (key, json.dumps(output, ensure_ascii=False)))
                         saved = db.execute('SELECT segments_json FROM transcript_translations WHERE cache_key=?', (key,)).fetchone()
-                    return validate_translation(batch, json.loads(saved[0]))
+                    return validate_speakers(batch, validate_translation(batch, json.loads(saved[0])), aliases)
                 except ValueError as error:
                     repair = '\n上次校验未通过，请完整重译本批：' + str(error)
             raise ValueError('中文全文翻译校验失败，保留已完成分段，下次续传')
@@ -123,16 +168,65 @@ class ChineseTranscriptWriter:
         return validate_translation(segments, [part for batch in batches for part in batch])
 
 
+def dialogue_turns(record, translation):
+    """Regroup complete translated turns, never summarize or invent a speaker."""
+    labels = source_labels(record.transcript.text)
+    names = set(labels)
+    aliases = speaker_aliases(names)
+    # A short first name is allowed only when it identifies exactly one source
+    # speaker, never when two participants share it.
+    turns, seen = [], []
+    for segment in translation:
+        for paragraph in segment['text'].strip().splitlines():
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            match = re.match(r'^([^:：\n]{1,60})[:：]\s*', paragraph)
+            name = aliases.get(match[1].strip()) if match else None
+            if name:
+                seen.append(name)
+                body = paragraph[match.end():]
+            else:
+                name = turns[-1][0] if turns else ''
+                body = paragraph
+            if turns and name and turns[-1][0] == name:
+                turns[-1] = (name, turns[-1][1] + ' ' + body)
+            else:
+                turns.append((name, body))
+    if labels and [k for k, _ in groupby(labels)] != [k for k, _ in groupby(seen)]:
+        raise ValueError('译稿的说话人轮次与原稿不符，停止发布以免错归发言')
+    return turns
+
+
+def prose_chunks(body):
+    """Keep ordinary turns whole; split exceptional long turns at sentences."""
+    while len(body) > 1400:
+        boundary = max(body.rfind(c, 0, 1400) for c in ('。', '！', '？', '. ', '? ', '! ', '; ', '；'))
+        if boundary < 700:
+            boundary = body.rfind(' ', 0, 1400)
+        end = boundary + 1 if boundary >= 700 else 1400
+        yield body[:end]
+        body = body[end:]
+    if body:
+        yield body
+
+
 def render_fulltext(record, translation):
     fulltext_identity(record)
     validate_translation(source_segments(record.transcript.text), translation)
-    nodes = [text_node('完整中文文字稿', 'heading2'),
-             text_node('按原文顺序完整翻译，已去除时间戳。')]
-    for segment in translation:
-        for paragraph in re.split(r'\n\s*\n', segment['text'].strip()):
-            for start in range(0, len(paragraph), 1400):
-                text = paragraph[start:start + 1400]
-                # Literal text: no source-controlled links, mentions or instructions.
-                nodes.append({'block_type': 2, 'text': {'elements': [
-                    {'text_run': {'content': text[i:i + 700]}} for i in range(0, len(text), 700)]}})
+    nodes = [text_node('完整对谈实录', 'heading2')]
+    turns = dialogue_turns(record, translation)
+    names = {name for name, _ in turns if name}
+    for name, body in turns:
+        if name == 'Unknown Speaker':
+            name = '未知说话人'
+        elif name and sum(n.split()[0] == name.split()[0] for n in names) == 1:
+            name = name.split()[0]
+        for index, paragraph in enumerate(prose_chunks(body)):
+            elements = ([{'text_run': {'content': name + '：', 'text_element_style': {'bold': True}}}]
+                        if name and index == 0 else [])
+            text = (' ' if elements else '') + paragraph
+            # Only the verified speaker label is styled; source text is inert.
+            elements.extend({'text_run': {'content': text[i:i + 700]}} for i in range(0, len(text), 700))
+            nodes.append({'block_type': 2, 'text': {'elements': elements}})
     return nodes

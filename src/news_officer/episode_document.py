@@ -168,10 +168,10 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 entries = json.loads(previous['entries_json']) if previous else []
                 nodes = json.loads(previous['nodes_json']) if previous else []
                 replacement = {}
-                if self.include_fulltext:
+                if self.include_fulltext and fulltext_identity(record) not in entries:
                     legacy = [i for i, n in enumerate(nodes) if ''.join(
                         e.get('text_run', {}).get('content', '') for e in n.get('heading2', {}).get('elements', [])
-                    ).startswith('完整文字稿（归档原文')]
+                    ).startswith(('完整文字稿（归档原文', '完整中文文字稿', '完整对谈实录'))]
                     if legacy:
                         start = legacy[0]
                         if len(legacy) != 1 or any(n['block_type'] != 2 for n in nodes[start + 1:]):
@@ -216,6 +216,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             token = row['document_id']
             self._replace_legacy_appendix(token, document)
             self._write(token, document['nodes'])
+            self._verify_speaker_labels(token, document['nodes'])
             for kind, identity in targets:
                 self.api.request('POST', f'/drive/v1/permissions/{token}/members',
                     params={'type': 'docx', 'need_notification': False},
@@ -236,3 +237,27 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             result['reply_to'] = job.payload['message_id']
             result['reply_in_thread'] = job.payload['reply_in_thread']
         return result
+
+    def _verify_speaker_labels(self, token, expected):
+        """Feishu readback must retain the reference's bold speaker labels."""
+        start = next((i for i, node in enumerate(expected) if ''.join(
+            e.get('text_run', {}).get('content', '') for e in node.get('heading2', {}).get('elements', [])
+        ) == '完整对谈实录'), None)
+        if start is None:
+            return
+        actual = read_tree(self.api.blocks(token), token)
+        for original, remote in zip(expected[start + 1:], actual[start + 1:], strict=True):
+            first = original.get('text', {}).get('elements', [{}])[0].get('text_run', {})
+            if not first.get('text_element_style', {}).get('bold'):
+                continue
+            remaining = first['content']
+            for element in remote.get('text', {}).get('elements', []):
+                run = element.get('text_run', {})
+                text = run.get('content', '')[:len(remaining)]
+                if text and (not run.get('text_element_style', {}).get('bold') or not remaining.startswith(text)):
+                    raise LibraryError('对谈实录姓名加粗回读不符，暂不交付链接')
+                remaining = remaining[len(text):]
+                if not remaining:
+                    break
+            if remaining:
+                raise LibraryError('对谈实录姓名回读缺失，暂不交付链接')
