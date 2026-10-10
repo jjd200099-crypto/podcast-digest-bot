@@ -127,7 +127,7 @@ class LegacyMigration(unittest.TestCase):
         actual = read_tree(self.f.api.blocks(self.token), self.token)
         self.assertEqual([tree_signature(n) for n in actual[:len(prefix)]], prefix)
         self.assertNotIn('归档原文', str(actual))
-        self.assertIn('完整中文文字稿', str(actual))
+        self.assertIn('完整对谈实录', str(actual))
         self.assertEqual(self.c.publish(self.job), result)
 
     def test_manual_edit_aborts_without_deletion(self):

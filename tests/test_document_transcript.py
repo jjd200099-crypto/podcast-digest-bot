@@ -27,8 +27,8 @@ class FulltextDocuments(unittest.TestCase):
     def appendix(self, token):
         nodes = read_tree(self.f.api.blocks(token), token)
         index = next(i for i, node in enumerate(nodes) if node.get('heading2', {}).get('elements', [{}])[0]
-                     .get('text_run', {}).get('content', '').startswith('完整中文文字稿'))
-        return nodes[index + 2:]
+                     .get('text_run', {}).get('content', '').startswith('完整对谈实录'))
+        return nodes[index + 1:]
 
     def test_literal_translated_text_and_language(self):
         original = ('[00:01] 嘉宾😀: **不解析粗体** <mention-user id="x"/>\n\n'
@@ -36,10 +36,10 @@ class FulltextDocuments(unittest.TestCase):
         record = replace(self.f.record, transcript=replace(self.f.record.transcript, text=original, language='en'))
         translation = [{'id': p['id'], 'text': p['text'].strip()} for p in source_segments(original)]
         nodes = render_fulltext(record, translation)
-        restored = ''.join(e['text_run']['content'] for node in nodes[2:] for e in node['text']['elements'])
+        restored = ''.join(e['text_run']['content'] for node in nodes[1:] for e in node['text']['elements'])
         self.assertNotIn('[00:01]', restored)
-        self.assertIn('完整中文文字稿', str(nodes[0]))
-        for node in nodes[2:]:
+        self.assertIn('完整对谈实录', str(nodes[0]))
+        for node in nodes[1:]:
             for element in node['text']['elements']:
                 self.assertLessEqual(len(element['text_run']['content'].encode('utf-16-le')) // 2, 1400)
                 self.assertNotIn('text_element_style', element['text_run'])
