@@ -1113,6 +1113,20 @@ class NewsOfficerRuntime:
                                     datetime.fromisoformat(job.payload['scheduled_for']))
             if self.store.get_job_result(base.key, 'daily:inline-documents') is None:
                 raise RuntimeError('Daily documents pending retry')
+            documents = self.store.get_job_result(base.key, 'daily:inline-documents')['documents']
+            if documents:
+                content = '\n\n'.join(
+                    f"[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
+                    for d in documents)
+                for kind, target in self._daily_targets(base):
+                    key = f"{base.key}:inline-document-link:{kind}:{target}"
+                    parts = combined_delivery_parts(content, key)
+                    if len(parts) != 1:
+                        raise ValueError('Daily document links exceed single-message capacity')
+                    self.store.ensure_outbox(job_key=job.key, group_key='document:link',
+                        delivery_key=key, operation='send', target_id=target, target_type=kind,
+                        reply_in_thread=False, parts=parts)
+                await self._drain_outbox(job)
             return
         if (getattr(self.settings, 'daily_reader_mode', False)
                 and job.payload.get('mode') != 'requested_episode'):

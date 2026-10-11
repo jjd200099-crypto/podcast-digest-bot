@@ -281,3 +281,50 @@ class DocumentAllowlist(unittest.TestCase):
         self.fixture.store.fail('inline-retry', 'ValueError', 5, failed_daily_requeue_seconds=0)
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21', requested_only=True), 1)
         self.assertEqual(self.fixture.store.claim_next('document').key, 'inline-retry')
+
+
+class InlineFollowup(unittest.IsolatedAsyncioTestCase):
+    async def test_followup_is_durable_links_only_and_revalidates_frozen_targets(self):
+        from types import SimpleNamespace
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_test',), daily_require_chat_ids=True)
+        with f.store._connect() as db:
+            db.execute("UPDATE job_results SET payload_json=? WHERE job_key=? AND result_key='daily:recipients'",
+                       (json.dumps({'targets': [['chat_id', 'oc_test'], ['chat_id', 'oc_removed']]}), f.base))
+        documents = [{'title': 'one', 'url': 'https://www.feishu.cn/docx/one'}]
+        owner.document_compiler = test.compiler
+        test.compiler.audience_filter = owner._document_audience
+        job = Job(f.base + ':inline-document-retry', 'document',
+                  {'mode': 'inline_daily_retry', 'base_job': f.base,
+                   'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1)
+        await owner._handle_document_job(job)
+        await owner._handle_document_job(job)
+        self.assertEqual(len(messenger.delivered), 1)
+        rows = f.store.outbox_items(job.key)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].target_id, 'oc_test')
+        self.assertNotIn('早间', rows[0].content)
+        self.assertIn(documents[0]['title'], rows[0].content)
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_other',), daily_require_chat_ids=True)
+        await owner._handle_document_job(job)
+        self.assertEqual(len(messenger.delivered), 1)
+
+    async def test_no_documents_no_followup(self):
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        f.store.save_job_result(f.base, 'daily:inline-documents', 'inline_documents', {'documents': []})
+        await owner._handle_document_job(Job('retry', 'document',
+            {'mode': 'inline_daily_retry', 'base_job': f.base,
+             'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1))
+        self.assertEqual(messenger.delivered, [])

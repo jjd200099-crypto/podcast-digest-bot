@@ -389,4 +389,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         await instance._handle_document_job(retry)
         self.assertEqual(f.api.creates, 2)
         self.assertEqual(len(self.store.get_job_result(job.key, 'daily:inline-documents')['documents']), 2)
-        self.assertEqual(len(self.messenger.attempts), 1)
+        self.assertEqual(len(self.messenger.attempts), 2)
+        self.assertEqual(self.messenger.attempts[-1].content.count('https://www.feishu.cn/docx/'), 2)
+        await instance._handle_document_job(retry)
+        self.assertEqual(len(self.messenger.attempts), 2)
