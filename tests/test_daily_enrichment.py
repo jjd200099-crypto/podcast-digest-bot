@@ -85,6 +85,21 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 1)
         self.assertEqual(len(self.messenger.attempts), 1)
 
+    async def test_three_fulltext_recommendations_without_caches_all_enqueue_automatically(self):
+        # A missing translation cache is ordinary work, not a new approval gate.
+        instance, job, _ = self.setup_job(
+            [self.item('first', 5), self.item('second', 4), self.item('third', 4)],
+            key='daily:2026-10-11', payload={'scheduled_for': '2026-10-11T08:30:00+08:00'})
+        instance.document_compiler = Mock(min_stars=4)
+        await instance._handle_daily_job(job)
+        self.store.complete(job.key)
+        instance.document_compiler.publish.assert_not_called()
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 3)
+        jobs = [self.store.claim_next('document') for _ in range(3)]
+        self.assertEqual({j.payload['episode_id'] for j in jobs}, {'first', 'second', 'third'})
+        self.assertTrue(all('authorization_pending' not in j.payload for j in jobs))
+        self.assertEqual(len(self.messenger.attempts), 1)
+
     async def test_partial_failure_does_not_block_other_episode_and_only_edits_original(self):
         instance, base = await self.prepare()
         enqueue_enrichment(self.store, '2026-10-11')
