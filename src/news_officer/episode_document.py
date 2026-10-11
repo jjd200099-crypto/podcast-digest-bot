@@ -133,7 +133,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         # A deployment may inherit a pending combined-edition job. Retire that
         # obsolete workflow without deleting or rewriting its historical doc.
         requested = job.payload.get('mode') == 'requested_episode'
-        if job.payload.get('mode') not in {'selected_episodes', 'requested_episode'}:
+        enrichment = job.payload.get('mode') == 'daily_episode'
+        if job.payload.get('mode') not in {'selected_episodes', 'requested_episode', 'daily_episode'}:
             return None
         if requested:
             if not self.request_allowed(job.payload):
@@ -150,11 +151,24 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             active = set(self.store.list_subscriptions())
             targets = [t for t in job.payload['targets'] if tuple(t) in active]
             revision, records, _ = self.snapshot(job.payload['base_job'])
+            if enrichment:
+                from .daily_enrichment import enrichment_bundle
+                edition = enrichment_bundle(self.store, job.payload['base_job'])
+                if not edition or job.payload['episode_id'] not in edition['enrichment']['eligible']:
+                    return None
+                audience = {(d['target_type'], d['target_id']) for d in edition['deliveries']}
+                targets = [t for t in targets if tuple(t) in audience]
+                records = [(i, r) for i, r in records if r.episode.id == job.payload['episode_id']]
+                if len(records) != 1:
+                    raise LibraryError('日报文档对应的已核验原稿不可用')
+                if records[0][1].record_revision_sha256 != job.payload['record_revision']:
+                    raise LibraryError('日报文档原稿版本已变化，停止替换旧日报')
+                revision = self.document_identity(records[0][1])
         if not targets:
             return None
         bundle = self.store.get_job_result(job.key, 'episodes:content')
         if bundle is None:
-            if not requested and revision != job.payload['revision']:
+            if not requested and not enrichment and revision != job.payload['revision']:
                 return None
             documents = []
             for item, record in records:
@@ -199,7 +213,11 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                         record.transcript.text, encoding='utf-8')
                 documents.append({'key': key, 'title': title, 'nodes': nodes, 'entries': entries,
                                   'revision': self.document_identity(record), 'stars': stars(digest), **replacement})
-            if not requested and self.snapshot(job.payload['base_job'])[0] != revision:
+            if enrichment:
+                current = self.store.get_verified_transcript(job.payload['episode_id'])
+                if current is None or self.document_identity(current) != revision:
+                    raise LibraryError('日报文档原稿版本在编译期间发生变化')
+            elif not requested and self.snapshot(job.payload['base_job'])[0] != revision:
                 return None
             bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
                                                 {'documents': documents})
@@ -228,7 +246,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     (json.dumps(document['nodes'], ensure_ascii=False), json.dumps(document['entries']),
                      document['revision'], '' if requested else job.key, document['key']))
                 notified = db.execute('SELECT notification_job FROM daily_documents WHERE day=?', (document['key'],)).fetchone()[0]
-            if requested or job.kind == 'daily' or notified == job.key:
+            if requested or enrichment or job.kind == 'daily' or notified == job.key:
                 links.append({'title': document['title'], 'stars': document['stars'],
                               'episode_id': document['key'].removeprefix('episode:'),
                               'url': f'https://www.feishu.cn/docx/{token}'})

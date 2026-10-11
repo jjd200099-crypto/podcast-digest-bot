@@ -13,6 +13,43 @@ from news_officer.shownotes import render_episode, transcript_evidence, validate
 
 
 class SelectedDocuments(unittest.TestCase):
+    def enrichment_job(self, identity):
+        f = self.fixture
+        record = f.store.get_verified_transcript(identity)
+        job = Job('enrich:' + identity, 'document', {'mode': 'daily_episode',
+                   'base_job': f.base, 'day': '2026-09-21', 'episode_id': identity,
+                   'record_revision': record.record_revision_sha256,
+                   'targets': [('chat_id', 'oc_test')]}, 1)
+        f.store.enqueue(job.key, job.kind, job.payload)
+        return job
+
+    def test_enrichment_compiles_one_episode_and_reuses_already_published_links(self):
+        f = self.fixture
+        f.add_episode('two')
+        self.rate('two', 4)
+        f.store.save_job_result(f.base, 'bundle', 'daily_bundle', {
+            'enrichment': {'version': 1, 'eligible': ['one', 'two']},
+            'deliveries': [{'target_type': 'chat_id', 'target_id': 'oc_test'}]})
+        # A legacy published doc still needs to be linked in the new edition.
+        self.compiler.publish(self.job())
+        before = f.api.creates
+        result = self.compiler.publish(self.enrichment_job('two'))
+        self.assertEqual([d['episode_id'] for d in result['documents']], ['two'])
+        self.assertEqual(f.api.creates, before)
+
+    def test_enrichment_rejects_changed_transcript_or_ineligible_episode(self):
+        f = self.fixture
+        f.store.save_job_result(f.base, 'bundle', 'daily_bundle', {
+            'enrichment': {'version': 1, 'eligible': ['one']},
+            'deliveries': [{'target_type': 'chat_id', 'target_id': 'oc_test'}]})
+        job = self.enrichment_job('one')
+        job.payload['record_revision'] = 'stale'
+        with self.assertRaisesRegex(Exception, '版本'):
+            self.compiler.publish(job)
+        f.add_episode('low')
+        self.assertIsNone(self.compiler.publish(self.enrichment_job('low')))
+        self.assertEqual(f.api.creates, 0)
+
     def setUp(self):
         self.fixture = fixtures.DailyDocuments()
         self.fixture.setUp()

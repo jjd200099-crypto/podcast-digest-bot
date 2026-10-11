@@ -30,6 +30,15 @@ class TranslatedBatch(BaseModel):
     segments: list[TranslatedSegment]
 
 
+class TranslationFailure(ValueError):
+    """Safe operational context; never includes source text or API responses."""
+
+    def __init__(self, episode_id, start, end, reason):
+        self.episode_id, self.start, self.end, self.reason = episode_id, start, end, reason
+        super().__init__(f'Chinese translation failed: episode={episode_id} '
+                         f'segments={start}-{end} reason={reason}')
+
+
 def fulltext_identity(record):
     identity = translation_identity(record)
     return 'fulltext:' + hashlib.sha256(json.dumps([VERSION, identity]).encode()).hexdigest()
@@ -77,8 +86,14 @@ def validate_translation(source, translated):
         source_letters = len(re.findall(r'[A-Za-z\u3400-\u9fff]', original['text']))
         if source_letters > 40 and (han < 8 or len(text) < source_letters * 0.22):
             raise ValueError('译稿疑似未翻译或被缩写')
-        if not numeric_tokens(original['text']) <= numeric_tokens(text):
-            raise ValueError('译稿缺少原文数字')
+        source = original['text']
+        # "Catch-22" names a dilemma, not a reported quantity. Accept its
+        # established Chinese rendering while still requiring any actual 22
+        # occurring elsewhere in the same source segment.
+        if re.search(r'两难|困境|悖论|第二十二条军规', text):
+            source = re.sub(r'\bcatch[- ]22\b', '', source, flags=re.IGNORECASE)
+        if not numeric_tokens(source) <= numeric_tokens(text):
+            raise ValueError(f"分段 {original['id']} 译稿缺少原文数字")
     return translated
 
 
@@ -143,11 +158,18 @@ class ChineseTranscriptWriter:
                         return validate_speakers(batch, validate_translation(batch, json.loads(repaired[0])), aliases)
             prompt = json.dumps({'title': record.episode.title, 'show': record.episode.show,
                                  'previous_context': segments[start - 1]['text'][-500:] if start else '',
+                                 'required_numbers': {p['id']: sorted(numeric_tokens(p['text'])) for p in batch},
+                                 'speaker_turns': {p['id']: [k for k, _ in groupby(source_labels(p['text']))]
+                                                   for p in batch},
                                  'segments': batch}, ensure_ascii=False)
-            repair = '\n严格照录每段原稿的说话人及其顺序，不凭上下文修正或增加说话人；Unknown Speaker 可译为未知说话人。'
+            rules = ('\n严格照录 speaker_turns 中每段的说话人姓名及顺序，不自行增加说话人；'
+                     'Unknown Speaker 可译为未知说话人。required_numbers 中的数字必须逐字保留在对应分段；'
+                     '若汉语金额单位换算或成语翻译改变了数字写法，请在正确中文译法后括注原文表达，'
+                     '例如两难困境（catch-22）、430 亿欧元（43 billion euros），不要为了保留数字而改变原意。')
+            repair, reason = '', 'validation_failed'
             for _ in range(3):
                 response = self.client.responses.parse(
-                    model=self.model, instructions=INSTRUCTIONS + repair, input=prompt,
+                    model=self.model, instructions=INSTRUCTIONS + rules + repair, input=prompt,
                     text_format=TranslatedBatch, store=False, max_output_tokens=12000)
                 try:
                     if response.output_parsed is None:
@@ -161,7 +183,10 @@ class ChineseTranscriptWriter:
                     return validate_speakers(batch, validate_translation(batch, json.loads(saved[0])), aliases)
                 except ValueError as error:
                     repair = '\n上次校验未通过，请完整重译本批：' + str(error)
-            raise ValueError('中文全文翻译校验失败，保留已完成分段，下次续传')
+                    reason = ('missing_numbers' if '数字' in str(error) else
+                              'speaker_turns' if '说话人' in str(error) else
+                              'incomplete_response' if '响应不完整' in str(error) else 'validation_failed')
+            raise TranslationFailure(record.episode.id, start, batch[-1]['id'], reason)
 
         with ThreadPoolExecutor(max_workers=3) as pool:
             batches = list(pool.map(translate, range(0, len(segments), 5)))

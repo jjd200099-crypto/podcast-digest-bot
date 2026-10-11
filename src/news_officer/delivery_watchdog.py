@@ -35,12 +35,16 @@ def api(session, method, path, **kwargs):
         if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
             time.sleep(2 ** attempt)
             continue
-        if response.status_code != 200:
-            raise CheckError(f'Feishu HTTP {response.status_code}')
         try:
             body = response.json()
         except ValueError:
+            if response.status_code != 200:
+                raise CheckError(f'Feishu HTTP {response.status_code}') from None
             raise CheckError('Feishu invalid response') from None
+        if response.status_code != 200:
+            code = body.get('code') if isinstance(body, dict) else None
+            suffix = f'; API code {code}' if isinstance(code, int) else ''
+            raise CheckError(f'Feishu HTTP {response.status_code}{suffix}')
         if not isinstance(body, dict) or body.get('code') != 0:
             code = body.get('code') if isinstance(body, dict) else None
             raise CheckError(f'Feishu API code {code if isinstance(code, int) else "unknown"}')

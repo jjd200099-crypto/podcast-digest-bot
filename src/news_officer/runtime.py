@@ -516,7 +516,6 @@ class NewsOfficerRuntime:
 
     def _prepare_combined_daily(self, job, *, finalize=False):
         from .daily_report import (
-            episode_document_url,
             reader_episode,
             render_daily_summary,
         )
@@ -590,12 +589,21 @@ class NewsOfficerRuntime:
             blocks = []
             if job.payload.get('recovery_window_end'):
                 blocks.append(f'补发 {when:%m月%d日} 的播客。')
-            documents = self._inline_daily_documents(job, when)
+            # Publication must not wait for translation or document APIs.
+            # Freeze the prose now; independent jobs enrich this same message.
+            from .daily_enrichment import DOCUMENT_PLACEHOLDER
+            from .episode_document import stars
+            sections, eligible = [], []
             for item in summaries:
-                content = reader_episode(item.message, episode_document_url(item.episode, documents))
+                content = reader_episode(item.message)
+                template = reader_episode(item.message, DOCUMENT_PLACEHOLDER)
                 published = item.episode.published_at
                 if published and published < start:
-                    content = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n' + content
+                    prefix = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n'
+                    content, template = prefix + content, prefix + template
+                sections.append({'episode_id': item.episode.id, 'body': content, 'template': template})
+                if stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4):
+                    eligible.append(item.episode.id)
                 blocks.append(content)
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')
@@ -617,30 +625,13 @@ class NewsOfficerRuntime:
             "feature_updates": feature_updates,
             "reader_mode": reader_mode,
             "deliveries": deliveries,
+            "enrichment": {'version': 1, 'day': when.date().isoformat(),
+                           'title': f'🎧 播客精选 · {when:%Y-%m-%d}',
+                           'prefix': blocks[:-len(sections)] if sections else blocks,
+                           'sections': sections, 'eligible': eligible} if reader_mode else None,
         })
         self._restore_daily_bundle(job, bundle)
         return items
-
-    def _inline_daily_documents(self, job, when):
-        """Compile selected documents before freezing the one morning message."""
-        saved = self.store.get_job_result(job.key, 'daily:inline-documents')
-        if saved is not None:
-            return saved['documents']
-        compiler = getattr(self, 'document_compiler', None)
-        documents = []
-        if compiler is not None:
-            revision, selected, _ = compiler.snapshot(job.key)
-            if selected:
-                result = compiler.publish(Job(job.key, 'daily', {
-                    'mode': 'selected_episodes', 'day': when.date().isoformat(),
-                    'base_job': job.key, 'revision': revision,
-                    'targets': self._daily_targets(job)}, job.attempts))
-                if result is None:
-                    raise RuntimeError('Daily document snapshot changed; retry required')
-                documents = result['documents']
-        saved = self.store.save_job_result(job.key, 'daily:inline-documents',
-                                           'inline_documents', {'documents': documents})
-        return saved['documents']
 
     def _prepare_daily_outbox_and_terminal_states(self, job: Job, *, finalize=False) -> list[DailyItem]:
         if self._combined_daily(job):
@@ -892,6 +883,8 @@ class NewsOfficerRuntime:
                 work.cancel()
 
     async def _failure_notice(self, job, terminal):
+        if job.kind == 'document' and job.payload.get('mode') == 'daily_episode':
+            return  # Background enrichment never adds group status messages.
         if job.kind == 'document' and terminal:
             try:
                 if job.payload.get('mode') == 'requested_episode':
@@ -956,11 +949,16 @@ class NewsOfficerRuntime:
                 else:
                     raise ValueError(f"Unknown job kind: {job.kind}")
             except Exception as error:  # noqa: BLE001 - durable worker retry boundary
-                logger.error("Job %s failed: %s", job.key, type(error).__name__)
+                from .document_transcript import TranslationFailure
+                from .library import LibraryError
+                detail = (str(error) if isinstance(error, TranslationFailure)
+                          or (job.payload.get('mode') == 'daily_episode' and isinstance(error, LibraryError))
+                          else type(error).__name__)
+                logger.error("Job %s failed: %s", job.key, detail)
                 if not isinstance(error, ResearchContinuationPending) or job.attempts >= 5:
                     await self._failure_notice(job, terminal=job.attempts >= 5)
                 await asyncio.to_thread(
-                    self.store.fail, job.key, type(error).__name__, job.attempts
+                    self.store.fail, job.key, detail, job.attempts
                 )
             else:
                 await asyncio.to_thread(self.store.complete, job.key)
@@ -1025,9 +1023,18 @@ class NewsOfficerRuntime:
                     and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat(),
                         **({'requested_only': True} if getattr(self.settings, 'daily_reader_mode', False) else {}))):
                 self._wake_worker('document')
+            if (getattr(self, 'document_compiler', None)
+                    and getattr(self.settings, 'daily_reader_mode', False)):
+                from .daily_enrichment import enqueue_enrichment
+                if await asyncio.to_thread(enqueue_enrichment, self.store, local_now.date().isoformat()):
+                    self._wake_worker('document')
             await asyncio.sleep(30)
 
     async def _handle_document_job(self, job):
+        if job.payload.get('mode') == 'daily_episode':
+            from .daily_enrichment import publish_enrichment
+            await asyncio.to_thread(publish_enrichment, self.store, self.document_compiler, job)
+            return  # Edit the original receipt; never send a second notification.
         if (getattr(self.settings, 'daily_reader_mode', False)
                 and job.payload.get('mode') != 'requested_episode'):
             return  # Retire old automatic notification jobs without deleting data.
