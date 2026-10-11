@@ -76,6 +76,53 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.store.save_job_result(base, 'daily:document:' + episode, 'daily_document_ready', value)
         return value
 
+    async def test_bad_target_isolated_without_document_retry(self):
+        from news_officer.operations import business_snapshot
+        self.store.add_subscription('chat_id', 'oc_bad')
+        instance, base = await self.prepare()
+        with self.store._connect() as db:
+            db.execute("UPDATE outbox SET remote_message_id=target_id WHERE job_key=?", (base.key,))
+            rows = db.execute('SELECT * FROM outbox WHERE job_key=?', (base.key,)).fetchall()
+        self.api = MessageAPI(rows)
+        original = self.api.request
+        error = ValueError('secret oc_bad')
+        error.__cause__ = RuntimeError('secret chain')
+        def request(method, path, **kwargs):
+            if self.api.messages[path.rsplit('/', 1)[-1]]['chat_id'] == 'oc_bad':
+                raise error
+            return original(method, path, **kwargs)
+        self.api.request = request
+        enqueue_enrichment(self.store, '2026-10-11')
+        job = self.store.claim_next('document')
+        compiler = Mock(api=self.api, _audience=instance._document_audience)
+        compiler.publish.return_value = self.ready(base.key, job.payload['episode_id'])
+        instance.document_compiler = compiler
+        with self.assertLogs('news_officer.daily_enrichment', level='WARNING') as logs:
+            await instance._handle_document_job(job)
+        self.store.complete(job.key)
+        self.assertEqual(len(self.api.puts), 1)
+        self.assertIn('Traceback', '\n'.join(logs.output))
+        self.assertNotIn('secret', '\n'.join(logs.output))
+        warnings = business_snapshot(self.store.path)['warnings']
+        self.assertTrue(any('daily_enrichment_target_failed:day=2026-10-11:target=' in w for w in warnings))
+        self.assertNotIn('oc_bad', str(warnings))
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?', (job.key,)).fetchone()[0], 'completed')
+
+    async def test_bad_followup_data_does_not_block_other_target(self):
+        from news_officer.daily_enrichment import enqueue_followup
+        self.store.add_subscription('chat_id', 'oc_bad')
+        _, base = await self.prepare()
+        self.ready(base.key, 'one')
+        self.ready(base.key, 'two')
+        self.store.save_job_result(base.key, 'bad-target-data', 'daily_document_ready', {
+            'targets': [['chat_id', 'oc_bad']],
+            'documents': [{'episode_id': 'one', 'title': 'one'}]})
+        with self.assertLogs('news_officer.daily_enrichment', level='WARNING'):
+            self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 1)
+        job = self.store.claim_next('document')
+        self.assertEqual([d['target'] for d in job.payload['deliveries']], [['open_id', 'ou_test']])
+
     async def test_old_frozen_template_uses_current_label_without_mutating_archive(self):
         _, base = await self.prepare()
         bundle = enrichment_bundle(self.store, base.key)
@@ -151,7 +198,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         _, base = await self.prepare()
         self.ready(base.key, 'one')
         self.api.lose_response = True
-        with self.assertRaises(TimeoutError):
+        with self.assertLogs('news_officer.daily_enrichment', level='WARNING'):
             update_daily_message(self.store, self.api, base.key)
         update_daily_message(self.store, self.api, base.key)
         self.assertEqual(len(self.api.puts), 1)
@@ -172,7 +219,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         for modification in ({'deleted': True}, {'sender': {'id': 'other'}},
                              {'body': {'content': json.dumps({'title': 'manual', 'content': []})}}):
             self.api.messages['om_original'] = {**original, **modification}
-            with self.assertRaises(LibraryError):
+            with self.assertLogs('news_officer.daily_enrichment', level='WARNING'):
                 update_daily_message(self.store, self.api, base.key)
         self.assertEqual(self.api.puts, [])
 
@@ -191,7 +238,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         with self.store._connect() as db:
             db.execute("UPDATE outbox SET target_type='chat_id',target_id='expected'")
         self.api.messages['om_original']['chat_id'] = 'different'
-        with self.assertRaisesRegex(LibraryError, '身份或会话'):
+        with self.assertLogs('news_officer.daily_enrichment', level='WARNING'):
             update_daily_message(self.store, self.api, base.key)
         self.assertEqual(self.api.puts, [])
 
@@ -201,7 +248,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         with self.store._connect() as db:
             db.execute("UPDATE outbox SET status='pending'")
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 0)
-        with self.assertRaises(LibraryError):
+        with self.assertLogs('news_officer.daily_enrichment', level='WARNING'):
             update_daily_message(self.store, self.api, base.key)
         self.assertEqual(self.api.puts, [])
 

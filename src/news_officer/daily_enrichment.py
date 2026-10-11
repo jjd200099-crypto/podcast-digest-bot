@@ -7,11 +7,15 @@ Only the single document worker writes these edits (including recovery jobs).
 
 import hashlib
 import json
+import logging
 from datetime import date, timedelta
 
 from .feishu import combined_delivery_parts
 from .library import LibraryError
 from .models import DailyItem
+from .operations import record_warning
+
+logger = logging.getLogger(__name__)
 
 DOCUMENT_PLACEHOLDER = 'https://document.invalid/DAILY_DOCUMENT_LINK'
 
@@ -130,50 +134,60 @@ def update_daily_message(store, api, base, *, audience_filter=None):
         raise LibraryError('日报没有可编辑的冻结版本')
     ready = store.list_job_results(base, 'daily_document_ready')
     for delivery in bundle['deliveries']:
-        target = (delivery['target_type'], delivery['target_id'])
-        if not _audience(store, [target], audience_filter):
-            continue
-        documents = {d['episode_id']: d for result in ready if target in
-                     {tuple(t) for t in result['targets']} for d in result['documents']
-                     if d['episode_id'] in bundle['enrichment']['eligible']}
-        if not documents:
-            continue
-        with store._connect() as db:
-            rows = db.execute("SELECT * FROM outbox WHERE job_key=? AND delivery_key=?",
-                              (base, delivery['key'])).fetchall()
-        if len(rows) != 1 or rows[0]['status'] != 'sent' or not rows[0]['remote_message_id']:
-            raise LibraryError('日报原消息尚未确认送达，稍后重试链接更新')
-        row = rows[0]
-        kind, content = _content(bundle, documents, delivery)
-        desired = normalized_content(kind, content)
-        remote = _read_receipt(api, row)
-        intents = [v for v in store.list_job_results(base, 'daily_edit_intent')
-                   if v['message_id'] == row['remote_message_id']]
-        if remote != desired:
-            known = [normalized_content(row['msg_type'], row['content'])]
-            known.extend(normalized_content(v['msg_type'], v['content']) for v in intents)
-            if remote not in known:
-                raise LibraryError('日报存在外部修改，保留人工内容，不覆盖或重发')
-            # Feishu allows 20 edits. Reserve the last slot for all remaining
-            # documents rather than consuming it on another partial update.
-            if len(intents) >= 19 and set(documents) != set(bundle['enrichment']['eligible']):
-                return
-            identity = hashlib.sha256((row['remote_message_id'] + content).encode()).hexdigest()
-            existing = store.get_job_result(base, 'daily:edit:' + identity)
-            if len(intents) >= 20 and existing is None:
-                raise LibraryError('日报已用完安全编辑预算，保留已发送消息')
-            store.save_job_result(base, 'daily:edit:' + identity, 'daily_edit_intent', {
-                'message_id': row['remote_message_id'], 'msg_type': kind, 'content': content})
-            if not _audience(store, [target], audience_filter):
-                continue
-            api.request('PUT', f"/im/v1/messages/{row['remote_message_id']}",
-                        data={'msg_type': kind, 'content': content})
-            if _read_receipt(api, row) != desired:
-                raise LibraryError('日报链接更新回读不符，暂不标记完成')
-        digest = hashlib.sha256((row['remote_message_id'] + content).encode()).hexdigest()
-        store.save_job_result(base, 'daily:edit-receipt:' + digest, 'daily_edit_receipt', {
-            'message_id': row['remote_message_id'], 'episode_ids': sorted(documents)})
+        try:
+            _update_target(store, api, base, bundle, ready, delivery, audience_filter)
+        except Exception as error:
+            safe_error = RuntimeError(type(error).__name__)
+            logger.warning('Daily enrichment target failed',
+                           exc_info=(RuntimeError, safe_error, error.__traceback__))
+            record_warning(store, base, 'daily_enrichment_target_failed', bundle['enrichment']['day'],
+                           target=(delivery['target_type'], delivery['target_id']))
 
+
+def _update_target(store, api, base, bundle, ready, delivery, audience_filter):
+    target = (delivery['target_type'], delivery['target_id'])
+    if not _audience(store, [target], audience_filter):
+        return
+    documents = {d['episode_id']: d for result in ready if target in
+                 {tuple(t) for t in result['targets']} for d in result['documents']
+                 if d['episode_id'] in bundle['enrichment']['eligible']}
+    if not documents:
+        return
+    with store._connect() as db:
+        rows = db.execute("SELECT * FROM outbox WHERE job_key=? AND delivery_key=?",
+                          (base, delivery['key'])).fetchall()
+    if len(rows) != 1 or rows[0]['status'] != 'sent' or not rows[0]['remote_message_id']:
+        raise LibraryError('日报原消息尚未确认送达，稍后重试链接更新')
+    row = rows[0]
+    kind, content = _content(bundle, documents, delivery)
+    desired = normalized_content(kind, content)
+    remote = _read_receipt(api, row)
+    intents = [v for v in store.list_job_results(base, 'daily_edit_intent')
+               if v['message_id'] == row['remote_message_id']]
+    if remote != desired:
+        known = [normalized_content(row['msg_type'], row['content'])]
+        known.extend(normalized_content(v['msg_type'], v['content']) for v in intents)
+        if remote not in known:
+            raise LibraryError('日报存在外部修改，保留人工内容，不覆盖或重发')
+        # Feishu allows 20 edits. Reserve the last slot for all remaining
+        # documents rather than consuming it on another partial update.
+        if len(intents) >= 19 and set(documents) != set(bundle['enrichment']['eligible']):
+            return
+        identity = hashlib.sha256((row['remote_message_id'] + content).encode()).hexdigest()
+        existing = store.get_job_result(base, 'daily:edit:' + identity)
+        if len(intents) >= 20 and existing is None:
+            raise LibraryError('日报已用完安全编辑预算，保留已发送消息')
+        store.save_job_result(base, 'daily:edit:' + identity, 'daily_edit_intent', {
+            'message_id': row['remote_message_id'], 'msg_type': kind, 'content': content})
+        if not _audience(store, [target], audience_filter):
+            return
+        api.request('PUT', f"/im/v1/messages/{row['remote_message_id']}",
+                    data={'msg_type': kind, 'content': content})
+        if _read_receipt(api, row) != desired:
+            raise LibraryError('日报链接更新回读不符，暂不标记完成')
+    digest = hashlib.sha256((row['remote_message_id'] + content).encode()).hexdigest()
+    store.save_job_result(base, 'daily:edit-receipt:' + digest, 'daily_edit_receipt', {
+        'message_id': row['remote_message_id'], 'episode_ids': sorted(documents)})
 
 def publish_enrichment(store, compiler, job):
     base = job.payload['base_job']
@@ -221,13 +235,20 @@ def enqueue_followup(store, base, today, *, audience_filter=None):
     targets = _audience(store, [(d['target_type'], d['target_id']) for d in bundle['deliveries']], audience_filter)
     deliveries = []
     for target in targets:
-        links = {d['episode_id']: d for r in ready if target in {tuple(t) for t in r['targets']}
-                 for d in r['documents'] if d['episode_id'] in eligible}
-        if links:
-            content = '\n\n'.join(
-                f"[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
-                for _, d in sorted(links.items()))
-            deliveries.append({'target': target, 'content': content})
+        try:
+            links = {d['episode_id']: d for r in ready if target in {tuple(t) for t in r['targets']}
+                     for d in r['documents'] if d['episode_id'] in eligible}
+            if links:
+                content = '\n\n'.join(
+                    f"[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
+                    for _, d in sorted(links.items()))
+                deliveries.append({'target': target, 'content': content})
+        except Exception as error:
+            safe_error = RuntimeError(type(error).__name__)
+            logger.warning('Daily enrichment followup target failed',
+                           exc_info=(RuntimeError, safe_error, error.__traceback__))
+            record_warning(store, base, 'daily_enrichment_target_failed', bundle['enrichment']['day'],
+                           target=target)
     if not deliveries:
         return 0
     return int(store.enqueue(f'daily-document-followup:{today}', 'document', {

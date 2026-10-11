@@ -13,6 +13,21 @@ from .config import _clock, _csv
 from .daily_targets import allowlist_warnings
 
 
+def record_warning(store, job_key, code, day, *, target=None, used=None, limit=None):
+    """Persist safe fields without source text or recipient IDs."""
+    try:
+        day = datetime.strptime(str(day), '%Y-%m-%d').date().isoformat()
+    except ValueError:
+        day = 'unknown'
+    value = {'code': code, 'day': day}
+    if target is not None:
+        value['target'] = hashlib.sha256(repr(tuple(target)).encode()).hexdigest()[:12]
+    if used is not None:
+        value.update(used=int(used), limit=int(limit))
+    identity = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    store.save_job_result(job_key, 'warning:' + identity, 'operations_warning', value)
+
+
 def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/Shanghai") -> dict:
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
@@ -49,6 +64,8 @@ def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/S
             "UNION SELECT json_extract(payload_json,'$.episode_id'),json_extract(payload_json,'$.day') "
             "FROM jobs WHERE kind='document' AND status='failed' "
             "AND json_extract(payload_json,'$.mode')='daily_episode'").fetchall()
+        operational = db.execute(
+            "SELECT payload_json FROM job_results WHERE kind='operations_warning'").fetchall()
         rows = db.execute(
             "SELECT payload_json FROM job_results WHERE job_key=? AND kind='daily_item'", (key,)
         ).fetchall()
@@ -65,6 +82,11 @@ def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/S
         _csv(os.environ.get("NEWS_OFFICER_DAILY_CHAT_IDS", "")),
         os.environ.get("NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS", "false").strip().lower() == "true",
         os.environ.get("NEWS_OFFICER_WATCH_CHAT_ID", "").strip())
+    for row in operational:
+        value = json.loads(row[0])
+        warnings.append(':'.join([value['code'], 'day=' + value['day']]
+            + (['target=' + value['target']] if 'target' in value else [])
+            + ([f"used={value['used']}/{value['limit']}"] if 'used' in value else [])))
     if document_failures:
         warnings.append(f'episode_document_retry_stopped:{document_failures}')
     for episode, day in missing_documents:
