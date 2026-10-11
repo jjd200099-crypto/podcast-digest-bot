@@ -391,7 +391,8 @@ class NewsOfficerRuntime:
                             'uncertain_delivery_unreconciled',
                             job.payload.get('scheduled_for', '')[:10],
                             target=(item.target_type, item.target_id))
-                        self._log_scheduler_failure(error, site='receipt_reconcile', warning=True)
+                        self._log_scheduler_failure(error, site='receipt_reconcile', warning=True,
+                                                    message='Receipt reconcile pending/uncertain send')
                         raise ReceiptReconcilePending('Uncertain receipt unavailable') from error
                     # A complete scan confirms absence. Reuse the frozen UUID:
                     # any still-active deduplication can only prevent duplicates.
@@ -1138,7 +1139,7 @@ class NewsOfficerRuntime:
                 if hasattr(self, 'background_jobs'):
                     self.background_jobs.pop(job.key, None)
 
-    def _log_scheduler_failure(self, error, site='_scheduler', *, warning=False):
+    def _log_scheduler_failure(self, error, site='_scheduler', *, warning=False, message='Scheduler step failed'):
         now = getattr(self, '_scheduler_clock', time.monotonic)()
         if not hasattr(self, '_scheduler_failures'):
             self._scheduler_failures = {}
@@ -1154,7 +1155,7 @@ class NewsOfficerRuntime:
         # Preserve stack frames without exception text or chained secrets.
         safe_error = RuntimeError(type(error).__name__)
         log = logger.warning if warning else logger.error
-        log('Scheduler step failed: %s; 已抑制 %d 次', type(error).__name__, suppressed,
+        log(message + ': %s; 已抑制 %d 次', type(error).__name__, suppressed,
                      exc_info=(RuntimeError, safe_error, error.__traceback__))
 
     async def _scheduler(self) -> None:

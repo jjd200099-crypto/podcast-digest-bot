@@ -1,14 +1,16 @@
+import asyncio
 import copy
 import json
 import time
 import unittest
 from dataclasses import replace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import test_reader_daily as fixtures
 
 from news_officer.feishu import FeishuMessenger, SendRejected
 from news_officer.library import LibraryError
+from news_officer.runtime import ReceiptReconcilePending
 from news_officer.store import Store
 
 
@@ -77,6 +79,8 @@ class ReceiptRecoveryTests(unittest.IsolatedAsyncioTestCase):
               self.assertRaises(RuntimeError)):
             await instance._drain_outbox(job)
         self.assertEqual(logs.records[0].levelname, 'WARNING')
+        self.assertIn('Receipt reconcile pending/uncertain send', logs.output[0])
+        self.assertNotIn('Scheduler step failed', logs.output[0])
         with self.store._connect() as db:
             warning = json.loads(db.execute(
                 "SELECT payload_json FROM job_results WHERE kind='operations_warning'").fetchone()[0])
@@ -122,15 +126,72 @@ class ReceiptRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messenger.deliver.call_count, 2)
         self.assertEqual(messenger.deliver.call_args.args[0].uuid, frozen.uuid)
 
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM outbox WHERE id=?', (frozen.id,)).fetchone()[0], 'sent')
+
+    async def test_worker_receipt_pending_retries_without_error_or_notice(self):
+        instance, job, frozen, messenger = self.prepare()
+        self.store.mark_outbox_attempt(frozen.id)
+        instance.wake_workers = {'daily': asyncio.Event()}
+        instance._handle_daily_job = instance._drain_outbox
+        instance._failure_notice = AsyncMock()
+        claimed = replace(job, attempts=1)
+        with (patch.object(self.store, 'claim_next', side_effect=[claimed, asyncio.CancelledError()]),
+              patch.object(messenger, 'reconcile_delivery', side_effect=RuntimeError('unavailable')),
+              self.assertNoLogs('news_officer.runtime', level='ERROR'),
+              self.assertLogs('news_officer.runtime', level='WARNING') as logs,
+              self.assertRaises(asyncio.CancelledError)):
+            await instance._worker('daily')
+        self.assertEqual([r.levelname for r in logs.records], ['WARNING'])
+        instance._failure_notice.assert_not_awaited()
+        messenger.deliver.assert_not_called()
+        with self.store._connect() as db:
+            status, error = db.execute('SELECT status,last_error FROM jobs WHERE job_key=?', (job.key,)).fetchone()
+        self.assertEqual(status, 'pending')
+        self.assertEqual(error, ReceiptReconcilePending.__name__)
+        self.assertEqual(len(self.store.pending_outbox(job.key)), 1)
+
+    async def test_private_uncertain_after_window_uses_readback_before_replay(self):
+        for receipt in ('om_sent', ''):
+            with self.subTest(receipt=receipt):
+                self.tearDown()
+                self.setUp()
+                instance, job, frozen, messenger = self.prepare()
+                instance.settings.daily_chat_ids = ()
+                instance.settings.daily_require_chat_ids = False
+                with self.store._connect() as db:
+                    db.execute("UPDATE outbox SET target_type='open_id',target_id='ou_test' WHERE id=?", (frozen.id,))
+                messenger.deliver.side_effect = [ConnectionResetError('lost'), 'om_sent']
+                with self.assertRaises(RuntimeError):
+                    await instance._drain_outbox(job)
+                # An adapter with a resolved private conversation supplies the
+                # readback result; unresolved open_ids still fail closed.
+                with (patch('news_officer.feishu.time.time', return_value=time.time() + 7200),
+                      patch.object(messenger, 'reconcile_delivery', return_value=receipt) as read):
+                    await instance._drain_outbox(job)
+                    await instance._drain_outbox(job)
+                read.assert_called_once()
+                self.assertEqual(read.call_args.args[0].target_type, 'open_id')
+                self.assertEqual(messenger.deliver.call_count, 1 if receipt else 2)
+                self.assertEqual(messenger.deliver.call_args.args[0].uuid, frozen.uuid)
+                with self.store._connect() as db:
+                    self.assertEqual(db.execute('SELECT status FROM outbox WHERE id=?', (frozen.id,)).fetchone()[0], 'sent')
+
     def test_send_failure_classification(self):
         import requests
-        for status in (400, 500):
-            response = Mock()
+        for status in (400, 403, 404, 429, 500, 502, 503, 504):
+            response = Mock(status_code=status)
             response.raise_for_status.side_effect = requests.HTTPError(str(status))
-            with self.assertRaises(SendRejected) as caught:
+            with self.assertRaises(SendRejected if status < 500 else requests.HTTPError) as caught:
                 FeishuMessenger._check(response, 'send')
-            self.assertFalse(caught.exception.uncertain)
-        for body in ({'code': 123}, {'code': None}, []):
+            self.assertEqual(getattr(caught.exception, 'uncertain', True), status >= 500)
+        for error in (requests.Timeout('lost'), requests.ConnectionError('lost')):
+            response = Mock()
+            response.raise_for_status.side_effect = error
+            with self.assertRaises(type(error)) as caught:
+                FeishuMessenger._check(response, 'send')
+            self.assertTrue(getattr(caught.exception, 'uncertain', True))
+        for body in ({'code': 123}, {'code': None}, [], {}):
             response = Mock()
             response.json.return_value = body
             with self.assertRaises(Exception) as caught:

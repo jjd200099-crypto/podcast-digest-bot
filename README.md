@@ -170,4 +170,4 @@ python -m unittest discover -s tests -v
 
 完整开发流程、质量要求和 PR 清单见 [CONTRIBUTING.md](CONTRIBUTING.md)。漏洞或密钥泄露请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开创建 Issue。
 
-回读对账需要飞书应用具备读取消息历史的权限。明确拒绝发送的失败继续复用同一 uuid 正常重试，不受 50 分钟窗口限制。不确定发送在去重窗口外必须回读确认：已有消息则标记 sent，完整历史确认不存在才重发；私聊无法定位历史会话、缺权限或回读失败时，**宁缺毋滥：不确定且无法对账时不重发**。保留待发送状态并记录包含 day、掩码 target 的 operations warning，日志限频，不每小时刷 error。
+回读对账调用 [获取会话历史消息 API](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list)（`GET /im/v1/messages`）：应用身份读取单聊需 `im:message`（获取与发送单聊、群组消息）、`im:message:readonly`（获取单聊、群组消息）或旧版 `im:message.history:readonly` 任一权限；读取群聊还需 `im:message.group_msg`（获取群组中所有消息）。请在飞书开放平台为应用开通相应权限。机器人必须在被查询群内；私聊需已与用户有会话且能定位该会话 ID。明确拒绝发送的失败继续复用同一 uuid 正常重试，不受 50 分钟窗口限制。不确定发送在去重窗口外必须回读确认：已有消息则标记 sent，完整历史确认不存在才重发；私聊无法定位历史会话、缺权限或回读失败时，**宁缺毋滥：不确定且无法对账时不重发**。保留待发送状态并记录包含 day、掩码 target 的 operations warning，日志限频，不每小时刷 error。

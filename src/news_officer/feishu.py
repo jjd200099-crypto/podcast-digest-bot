@@ -263,13 +263,16 @@ class FeishuMessenger:
 
     @staticmethod
     def _check(response: requests.Response, operation: str) -> dict:
-        # HTTP rejection and a valid nonzero platform code are definite failures.
+        # Only HTTP 4xx (including 429) and explicit platform rejection codes
+        # are definite failures. HTTP 5xx may follow an accepted send.
         # Transport errors, malformed/missing codes and missing receipts remain
         # uncertain by default: the platform may already have accepted the send.
         try:
             response.raise_for_status()
         except requests.HTTPError as error:
-            raise SendRejected(f'Feishu {operation} HTTP rejection') from error
+            if 400 <= response.status_code < 500:
+                raise SendRejected(f'Feishu {operation} HTTP rejection') from error
+            raise
         body = response.json()
         if not isinstance(body, dict):
             raise TypeError(f'Feishu {operation} response is not an object')
