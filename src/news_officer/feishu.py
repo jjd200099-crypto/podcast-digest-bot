@@ -247,6 +247,12 @@ def _retry_delay(response: requests.Response, attempt: int) -> float:
     return min(8.0, 0.5 * (2**attempt))
 
 
+class SendRejected(RuntimeError):
+    """An explicit rejection means no message was sent."""
+
+    uncertain = False
+
+
 class FeishuMessenger:
     def __init__(self, app_id: str, app_secret: str):
         self.app_id = app_id
@@ -257,13 +263,21 @@ class FeishuMessenger:
 
     @staticmethod
     def _check(response: requests.Response, operation: str) -> dict:
-        response.raise_for_status()
+        # HTTP rejection and a valid nonzero platform code are definite failures.
+        # Transport errors, malformed/missing codes and missing receipts remain
+        # uncertain by default: the platform may already have accepted the send.
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as error:
+            raise SendRejected(f'Feishu {operation} HTTP rejection') from error
         body = response.json()
         if not isinstance(body, dict):
             raise TypeError(f'Feishu {operation} response is not an object')
         if body.get("code") != 0:
             code = body.get('code')
-            raise RuntimeError(f"Feishu {operation} error code: {code if isinstance(code, int) else 'unknown'}")
+            if isinstance(code, int) and not isinstance(code, bool):
+                raise SendRejected(f"Feishu {operation} error code: {code}")
+            raise RuntimeError(f"Feishu {operation} ambiguous error code")
         return body
 
     @staticmethod

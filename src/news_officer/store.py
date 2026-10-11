@@ -802,6 +802,13 @@ class Store:
             for row in rows
         ]
 
+    def outbox_send_uncertain(self, item_id: int) -> bool:
+        with self._connect() as connection:
+            error = connection.execute(
+                'SELECT last_error FROM outbox WHERE id=?', (item_id,)).fetchone()[0]
+        # Missing bookkeeping (including a crash) and legacy errors are uncertain.
+        return not str(error or '').startswith('definite:')
+
     def outbox_created_at(self, item_id: int) -> str:
         with self._connect() as connection:
             return str(connection.execute(

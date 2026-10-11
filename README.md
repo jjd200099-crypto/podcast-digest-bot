@@ -169,3 +169,5 @@ python -m unittest discover -s tests -v
 新增播客源时，PR 必须说明节目官方来源、完整文字稿的取得方式，以及文字稿不完整时的失败行为。任何 App Secret、API Key、用户或群聊 ID 都不得提交到仓库；本地配置放在未跟踪的 `.env`，云端密钥放在 Railway Variables。
 
 完整开发流程、质量要求和 PR 清单见 [CONTRIBUTING.md](CONTRIBUTING.md)。漏洞或密钥泄露请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开创建 Issue。
+
+回读对账需要飞书应用具备读取消息历史的权限。明确拒绝发送的失败继续复用同一 uuid 正常重试，不受 50 分钟窗口限制。不确定发送在去重窗口外必须回读确认：已有消息则标记 sent，完整历史确认不存在才重发；私聊无法定位历史会话、缺权限或回读失败时，**宁缺毋滥：不确定且无法对账时不重发**。保留待发送状态并记录包含 day、掩码 target 的 operations warning，日志限频，不每小时刷 error。

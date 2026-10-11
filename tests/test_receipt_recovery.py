@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import test_reader_daily as fixtures
 
-from news_officer.feishu import FeishuMessenger
+from news_officer.feishu import FeishuMessenger, SendRejected
 from news_officer.library import LibraryError
 from news_officer.store import Store
 
@@ -71,11 +71,71 @@ class ReceiptRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_unreadable_receipt_never_resends(self):
         instance, job, frozen, messenger = self.prepare()
         self.store.mark_outbox_attempt(frozen.id)
-        with (patch('news_officer.library.FeishuLibraryAPI.request', side_effect=LibraryError('offline')),
+        with (patch('news_officer.feishu.time.time', return_value=time.time() + 7200),
+              patch('news_officer.library.FeishuLibraryAPI.request', side_effect=LibraryError('offline')),
+              self.assertLogs('news_officer.runtime', level='WARNING') as logs,
               self.assertRaises(RuntimeError)):
             await instance._drain_outbox(job)
+        self.assertEqual(logs.records[0].levelname, 'WARNING')
+        with self.store._connect() as db:
+            warning = json.loads(db.execute(
+                "SELECT payload_json FROM job_results WHERE kind='operations_warning'").fetchone()[0])
+        self.assertEqual(warning['day'], job.payload['scheduled_for'][:10])
+        self.assertNotEqual(warning['target'], frozen.target_id)
         messenger.deliver.assert_not_called()
         self.assertEqual(len(self.store.pending_outbox(job.key)), 1)
+
+    async def test_definite_rejections_retry_private_and_group_after_window(self):
+        for target_type in ('open_id', 'chat_id'):
+            for age in (51 * 60, 3 * 3600):
+                with self.subTest(target_type=target_type, age=age):
+                    self.tearDown()
+                    self.setUp()
+                    instance, job, frozen, messenger = self.prepare()
+                    if target_type == 'open_id':
+                        instance.settings.daily_chat_ids = ()
+                        instance.settings.daily_require_chat_ids = False
+                    with self.store._connect() as db:
+                        db.execute('UPDATE outbox SET target_type=?, target_id=? WHERE id=?',
+                                   (target_type, 'ou_test' if target_type == 'open_id' else 'oc_test', frozen.id))
+                    messenger.deliver.side_effect = [SendRejected('rejected'), 'om_sent']
+                    with self.assertRaises(RuntimeError):
+                        await instance._drain_outbox(job)
+                    with (patch('news_officer.feishu.time.time', return_value=time.time() + age),
+                          patch.object(messenger, 'reconcile_delivery') as read):
+                        await instance._drain_outbox(job)
+                    read.assert_not_called()
+                    self.assertEqual([c.args[0].uuid for c in messenger.deliver.call_args_list],
+                                     [frozen.uuid, frozen.uuid])
+                    self.assertEqual(self.store.pending_outbox(job.key), [])
+
+    async def test_uncertain_absent_receipt_after_window_resends_once(self):
+        instance, job, frozen, messenger = self.prepare()
+        messenger.deliver.side_effect = [ConnectionResetError('lost'), 'om_sent']
+        with self.assertRaises(RuntimeError):
+            await instance._drain_outbox(job)
+        with (patch('news_officer.feishu.time.time', return_value=time.time() + 7200),
+              patch('news_officer.library.FeishuLibraryAPI.request',
+                    return_value={'items': [], 'has_more': False}) as read):
+            await instance._drain_outbox(job)
+        read.assert_called_once()
+        self.assertEqual(messenger.deliver.call_count, 2)
+        self.assertEqual(messenger.deliver.call_args.args[0].uuid, frozen.uuid)
+
+    def test_send_failure_classification(self):
+        import requests
+        for status in (400, 500):
+            response = Mock()
+            response.raise_for_status.side_effect = requests.HTTPError(str(status))
+            with self.assertRaises(SendRejected) as caught:
+                FeishuMessenger._check(response, 'send')
+            self.assertFalse(caught.exception.uncertain)
+        for body in ({'code': 123}, {'code': None}, []):
+            response = Mock()
+            response.json.return_value = body
+            with self.assertRaises(Exception) as caught:
+                FeishuMessenger._check(response, 'send')
+            self.assertEqual(getattr(caught.exception, 'uncertain', True), body != {'code': 123})
 
     def test_history_requires_exact_identity_content_and_time(self):
         _, _, item, messenger = self.prepare()

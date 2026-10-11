@@ -41,6 +41,10 @@ from .transcript_view import RENDERER_VERSION
 logger = logging.getLogger(__name__)
 
 
+class ReceiptReconcilePending(RuntimeError):
+    """Keep delivery pending without noisy worker error logs or failure notices."""
+
+
 class NewsOfficerRuntime:
     def __init__(
         self,
@@ -372,13 +376,25 @@ class NewsOfficerRuntime:
             # recipient to never block every other user/group in the broadcast.
             if item.delivery_key in blocked_deliveries:
                 continue
+            uncertain = await asyncio.to_thread(self.store.outbox_send_uncertain, item.id)
             await asyncio.to_thread(self.store.mark_outbox_attempt, item.id)
             try:
                 remote_message_id = ''
                 reconcile = getattr(self.messenger, 'reconcile_delivery', None)
-                if item.attempts and callable(reconcile):
+                if item.attempts and uncertain and callable(reconcile):
                     created_at = await asyncio.to_thread(self.store.outbox_created_at, item.id)
-                    remote_message_id = await asyncio.to_thread(reconcile, item, created_at)
+                    try:
+                        remote_message_id = await asyncio.to_thread(reconcile, item, created_at)
+                    except Exception as error:  # Absence must be confirmed.
+                        from .operations import record_warning
+                        await asyncio.to_thread(record_warning, self.store, job.key,
+                            'uncertain_delivery_unreconciled',
+                            job.payload.get('scheduled_for', '')[:10],
+                            target=(item.target_type, item.target_id))
+                        self._log_scheduler_failure(error, site='receipt_reconcile', warning=True)
+                        raise ReceiptReconcilePending('Uncertain receipt unavailable') from error
+                    # A complete scan confirms absence. Reuse the frozen UUID:
+                    # any still-active deduplication can only prevent duplicates.
                 if not remote_message_id:
                     remote_message_id = await asyncio.to_thread(self.messenger.deliver, item)
                 if (job.kind == 'document'
@@ -387,7 +403,9 @@ class NewsOfficerRuntime:
                     raise RuntimeError('Followup delivery unconfirmed: missing message receipt')
             except Exception as error:  # noqa: BLE001 - isolate failures per recipient
                 await asyncio.to_thread(
-                    self.store.mark_outbox_error, item.id, str(error)
+                    self.store.mark_outbox_error, item.id,
+                    # An explicit rejection cannot erase an earlier possible send.
+                    ('uncertain:' if getattr(error, 'uncertain', True) or (item.attempts and uncertain) else 'definite:') + type(error).__name__
                 )
                 blocked_deliveries.add(item.delivery_key)
                 failures.append((item.delivery_key, error))
@@ -399,7 +417,9 @@ class NewsOfficerRuntime:
                 )
         if failures:
             delivery_key, error = failures[0]
-            raise RuntimeError(
+            failure_type = (ReceiptReconcilePending if all(
+                isinstance(e, ReceiptReconcilePending) for _, e in failures) else RuntimeError)
+            raise failure_type(
                 f"{len(failures)} outbox delivery group(s) failed; first={delivery_key}"
             ) from error
 
@@ -1101,9 +1121,10 @@ class NewsOfficerRuntime:
                 # Preserve stack frames without logging exception messages, which
                 # can contain request URLs, tokens or user content. Omit chains.
                 safe_error = RuntimeError(type(error).__name__)
-                logger.error("Job %s failed: %s", job.key, type(error).__name__,
-                             exc_info=(RuntimeError, safe_error, error.__traceback__))
-                if not isinstance(error, ResearchContinuationPending) or job.attempts >= 5:
+                if not isinstance(error, ReceiptReconcilePending):
+                    logger.error("Job %s failed: %s", job.key, type(error).__name__,
+                                 exc_info=(RuntimeError, safe_error, error.__traceback__))
+                if not isinstance(error, ReceiptReconcilePending) and (not isinstance(error, ResearchContinuationPending) or job.attempts >= 5):
                     await self._failure_notice(job, terminal=job.attempts >= 5 or isinstance(error, DocumentRetryStopped))
                 await asyncio.to_thread(
                     self.store.fail, job.key, type(error).__name__, job.attempts,
@@ -1117,11 +1138,11 @@ class NewsOfficerRuntime:
                 if hasattr(self, 'background_jobs'):
                     self.background_jobs.pop(job.key, None)
 
-    def _log_scheduler_failure(self, error):
+    def _log_scheduler_failure(self, error, site=None, *, warning=False):
         now = getattr(self, '_scheduler_clock', time.monotonic)()
         if not hasattr(self, '_scheduler_failures'):
             self._scheduler_failures = {}
-        key = (type(error), hashlib.sha256(str(error).encode()).digest())
+        key = (type(error), site or hashlib.sha256(str(error).encode()).digest())
         previous, suppressed = self._scheduler_failures.get(key, (None, 0))
         if previous is not None and now - previous < 600:
             self._scheduler_failures[key] = (previous, suppressed + 1)
@@ -1129,7 +1150,8 @@ class NewsOfficerRuntime:
         self._scheduler_failures[key] = (now, 0)
         # Preserve stack frames without exception text or chained secrets.
         safe_error = RuntimeError(type(error).__name__)
-        logger.error('Scheduler step failed: %s; 已抑制 %d 次', type(error).__name__, suppressed,
+        log = logger.warning if warning else logger.error
+        log('Scheduler step failed: %s; 已抑制 %d 次', type(error).__name__, suppressed,
                      exc_info=(RuntimeError, safe_error, error.__traceback__))
 
     async def _scheduler(self) -> None:
