@@ -82,6 +82,17 @@ def transcript_evidence(text):
     return result
 
 
+_CONTRAST_WORDS = frozenset(('but', 'not', 'however', 'although', 'though',
+                             'except', 'yet', 'unless', 'without', 'never', 'no'))
+_CHINESE_CONTRAST_WORDS = ('但是', '没有', '然而', '除非', '但', '不', '没', '却')
+
+
+def _contrast_word(word, *, following=False):
+    return (word.casefold() in _CONTRAST_WORDS
+            or any(word.startswith(marker) if following else word.endswith(marker)
+                   for marker in _CHINESE_CONTRAST_WORDS))
+
+
 def validate_notes(value, evidence):
     notes = EpisodeNotes.model_validate(value)
     if notes.participants != '原稿未明确标注' and not notes.participant_evidence_ids:
@@ -129,6 +140,20 @@ def validate_notes(value, evidence):
             boundaries = [match.end() for match in re.finditer(r'[.,;:!?。，；：！？]', quote.text[:limit])
                           if match.start() >= words[3].end()]
             end = boundaries[-1] if boundaries else words[remaining - 1].end()
+            kept = [word for word in words if word.end() <= end]
+            next_word = words[len(kept)]
+            if (_contrast_word(kept[-1].group())
+                    or _contrast_word(next_word.group(), following=True)):
+                # Retreat before the incomplete clause; never retain a hanging
+                # contrast/negation, including adjacent markers such as "but not".
+                safe_count = len(kept) - 1
+                while safe_count and _contrast_word(words[safe_count - 1].group()):
+                    safe_count -= 1
+                if safe_count < 4:
+                    continue
+                safe_end = words[safe_count - 1].end()
+                earlier = [boundary for boundary in boundaries if boundary <= safe_end]
+                end = earlier[-1] if earlier else safe_end
             quote.text = quote.text[:end].strip()
             if quote.text not in evidence[quote.evidence_id]['text']:
                 raise ValueError('Quote not found in cited transcript')

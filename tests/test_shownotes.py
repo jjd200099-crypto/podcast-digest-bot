@@ -103,6 +103,48 @@ class ShownotesValidation(unittest.TestCase):
         self.assertIn(quote['text'], text)
         self.assert_grounded_budget(result)
 
+    def test_contrastive_cut_retreats_to_earlier_clause(self):
+        for marker in ('but', 'not', 'however', 'although', 'though', 'except',
+                       'yet', 'unless', 'without', 'never', 'no',
+                       '但', '但是', '不', '没', '没有', '却', '然而', '除非'):
+            for offset in (0, 1):
+                with self.subTest(marker=marker, offset=offset):
+                    first = ' '.join(f'prior{i}' for i in range(17 - offset))
+                    second = f'We checked all figures. Sales are growing fast {marker} not profitable today.'
+                    self.evidence['C0001']['text'] = first
+                    self.evidence['C0002']['text'] = second
+                    self.value['quotes'] = [self.quote(first), self.quote(second, 'C0002')]
+                    result = validate_notes(self.value, self.evidence)
+                    self.assertEqual(result['quotes'][1]['text'], 'We checked all figures.')
+                    self.assert_grounded_budget(result)
+
+    def test_hanging_negation_chain_and_no_clause_fallback(self):
+        for budget, expected in ((7, 'Our sales are growing fast today'),
+                                 (8, 'Our sales are growing fast today rapidly'),
+                                 (9, 'Our sales are growing fast today rapidly')):
+            with self.subTest(budget=budget):
+                first = ' '.join(f'prior{i}' for i in range(25 - budget))
+                second = 'Our sales are growing fast today rapidly but not profitable now ever.'
+                self.evidence['C0001']['text'] = first
+                self.evidence['C0002']['text'] = second
+                self.value['quotes'] = [self.quote(first), self.quote(second, 'C0002')]
+                result = validate_notes(self.value, self.evidence)
+                # The hanging chain is removed without splitting or rewriting words.
+                self.assertEqual(result['quotes'][1]['text'], expected)
+                self.assert_grounded_budget(result)
+
+    def test_chinese_unspaced_markers_and_short_retreat_drop(self):
+        first = ' '.join(f'prior{i}' for i in range(21))
+        for second in ('市场 增长 很 快 但是没有盈利 仍需观察',
+                       '市场 增长 很快但是 没有 盈利 仍需观察'):
+            with self.subTest(second=second):
+                self.evidence['C0001']['text'] = first
+                self.evidence['C0002']['text'] = second
+                self.value['quotes'] = [self.quote(first), self.quote(second, 'C0002')]
+                result = validate_notes(self.value, self.evidence)
+                self.assertEqual(len(result['quotes']), 1)
+                self.assert_grounded_budget(result)
+
     def test_fabricated_tail_is_rejected_before_budget_trimming(self):
         text = ' '.join(f'word{i}' for i in range(25))
         self.evidence['C0001']['text'] = text
