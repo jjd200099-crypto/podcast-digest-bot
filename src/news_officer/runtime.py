@@ -351,7 +351,9 @@ class NewsOfficerRuntime:
         failures: list[tuple[str, Exception]] = []
         blocked_deliveries: set[str] = set()
         for item in await asyncio.to_thread(self.store.pending_outbox, job.key):
-            if (job.kind == "daily" and item.operation == "send"
+            if (item.operation == "send"
+                    and (job.kind == "daily" or (job.kind == "document"
+                         and job.payload.get("mode") != "requested_episode"))
                     and not self._valid_daily_targets([(item.target_type, item.target_id)])):
                 continue
             # Keep parts ordered within one recipient, while allowing a bad

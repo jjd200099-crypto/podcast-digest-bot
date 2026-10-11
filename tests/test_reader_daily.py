@@ -255,3 +255,16 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
                    'body': {'content': json.dumps({'zh_cn': {'title': '🎧 播客精选 · 2026-10-09'}})}}
         self.assertTrue(is_daily_receipt(message, 'bot', now.date(), now.timestamp()-1, now.timestamp()+1))
         self.assertFalse(is_daily_receipt(message, 'bot', (now-timedelta(days=1)).date(), 0, now.timestamp()+1))
+
+    async def test_allowlist_blocks_frozen_document_outbox(self):
+        instance, _, _ = self.setup_job([])
+        job = Job('document:old', 'document', {'mode': 'selected_episodes'}, 1)
+        self.store.enqueue(job.key, job.kind, job.payload)
+        for kind, target in [('open_id', 'ou_old'), ('chat_id', 'oc_other'), ('chat_id', 'oc_good')]:
+            self.store.ensure_outbox(job_key=job.key, group_key='document:link',
+                delivery_key=target, operation='send', target_id=target, target_type=kind,
+                reply_in_thread=False, parts=[('text', 'link', target)])
+        instance.settings.daily_chat_ids = ('oc_good',)
+        await instance._drain_outbox(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
