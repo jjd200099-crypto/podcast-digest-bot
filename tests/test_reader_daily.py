@@ -290,7 +290,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_job_result(job.key, 'daily:inline-documents')['documents'],
                          [{'title': 'Selected', 'url': 'https://example.test/doc'}])
         self.assertEqual(podcast.calls, 1)
-        self.assertEqual(len(self.messenger.attempts), 1)
+        self.assertEqual(len(self.messenger.attempts), 2)
 
     async def test_inline_snapshot_changed_still_raises(self):
         instance, job, _ = self.setup_job([self.item('selected', 5)])

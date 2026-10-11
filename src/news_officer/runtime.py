@@ -21,8 +21,8 @@ from lark_channel import (
 
 from .config import Settings
 from .daily_report import coverage_report
-from .episode_document import DocumentRetryStopped
 from .daily_targets import allowlist_warnings, filter_daily_targets, valid_allowlist
+from .episode_document import DocumentRetryStopped
 from .feishu import (
     FeishuMessenger,
     combined_delivery_parts,

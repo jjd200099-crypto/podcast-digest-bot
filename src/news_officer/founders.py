@@ -133,7 +133,7 @@ def _normalized_title(value: str) -> str:
 
 def _parse_datetime(value: str) -> datetime | None:
     try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)

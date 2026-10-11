@@ -125,7 +125,7 @@ class DwarkeshOfficialTranscriptProvider:
             if data.get("datePublished"):
                 try:
                     published_at = datetime.fromisoformat(
-                        str(data["datePublished"]).replace("Z", "+00:00")
+                        str(data["datePublished"])
                     )
                 except ValueError:
                     pass

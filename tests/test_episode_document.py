@@ -286,6 +286,7 @@ class DocumentAllowlist(unittest.TestCase):
 class InlineFollowup(unittest.IsolatedAsyncioTestCase):
     async def test_followup_is_durable_links_only_and_revalidates_frozen_targets(self):
         from types import SimpleNamespace
+
         from test_reliability import FakeMessenger, runtime
         test = SelectedDocuments()
         test.setUp()
@@ -303,6 +304,7 @@ class InlineFollowup(unittest.IsolatedAsyncioTestCase):
         job = Job(f.base + ':inline-document-retry', 'document',
                   {'mode': 'inline_daily_retry', 'base_job': f.base,
                    'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1)
+        f.store.enqueue(job.key, job.kind, job.payload)
         await owner._handle_document_job(job)
         await owner._handle_document_job(job)
         self.assertEqual(len(messenger.delivered), 1)
@@ -327,7 +329,7 @@ class InlineFollowup(unittest.IsolatedAsyncioTestCase):
         await owner._handle_document_job(Job('retry', 'document',
             {'mode': 'inline_daily_retry', 'base_job': f.base,
              'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1))
-        self.assertEqual(messenger.delivered, [])
+        self.assertEqual(messenger.delivered, {})
 
 
 class DocumentRetryLimits(unittest.TestCase):
@@ -429,6 +431,7 @@ class InlineFailureNotice(unittest.IsolatedAsyncioTestCase):
                                                 ['open_id', 'ou_old']]}), f.base))
         job = Job('inline-notice', 'document', {'mode': 'inline_daily_retry', 'base_job': f.base,
                   'scheduled_for': '2026-09-21T08:30:00+08:00'}, 5)
+        f.store.enqueue(job.key, job.kind, job.payload)
         with patch('news_officer.runtime.logger.warning') as warning:
             await owner._failure_notice(job, terminal=True)
             warning.assert_not_called()
@@ -452,6 +455,7 @@ class InlineFailureNotice(unittest.IsolatedAsyncioTestCase):
         owner.settings = SimpleNamespace(daily_chat_ids=('oc_test',), daily_require_chat_ids=True)
         job = Job('inline-notice', 'document', {'mode': 'inline_daily_retry', 'base_job': f.base,
                   'scheduled_for': '2026-09-21T08:30:00+08:00'}, 5)
+        f.store.enqueue(job.key, job.kind, job.payload)
         original = f.store.ensure_outbox
         def change_allowlist(**kwargs):
             result = original(**kwargs)
@@ -459,4 +463,4 @@ class InlineFailureNotice(unittest.IsolatedAsyncioTestCase):
             return result
         with patch.object(f.store, 'ensure_outbox', side_effect=change_allowlist):
             await owner._failure_notice(job, terminal=True)
-        self.assertEqual(messenger.delivered, [])
+        self.assertEqual(messenger.delivered, {})

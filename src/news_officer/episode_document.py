@@ -5,8 +5,8 @@ import json
 import logging
 import re
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from .daily_document import DailyDocumentCompiler
 from .models import IncomingMessage

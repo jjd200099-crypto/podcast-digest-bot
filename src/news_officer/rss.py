@@ -91,7 +91,7 @@ def _parse_date(value: str) -> datetime | None:
         parsed = parsedate_to_datetime(value.strip())
     except (TypeError, ValueError, OverflowError):
         try:
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value.strip())
         except ValueError:
             return None
     if parsed.tzinfo is None:
@@ -587,7 +587,7 @@ class SubstackApprovedTranscriptProvider:
         if post.get("post_date"):
             try:
                 published_at = datetime.fromisoformat(
-                    str(post["post_date"]).replace("Z", "+00:00")
+                    str(post["post_date"])
                 )
             except ValueError:
                 pass

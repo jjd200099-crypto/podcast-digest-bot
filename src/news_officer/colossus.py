@@ -348,7 +348,7 @@ class ColossusOfficialTranscriptProvider:
         if tag and tag.get("content"):
             try:
                 return datetime.fromisoformat(
-                    str(tag["content"]).strip().replace("Z", "+00:00")
+                    str(tag["content"]).strip()
                 )
             except ValueError:
                 pass
