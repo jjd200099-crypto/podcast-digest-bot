@@ -5,13 +5,16 @@ import json
 import time
 
 
-def health_snapshot(channel, active_jobs, *, now=None):
+def health_snapshot(channel, active_jobs, *, background_jobs=None, now=None):
     now = time.monotonic() if now is None else now
     connection = channel.connection_snapshot()
     stalled = sum(now - started > 1200 for started in active_jobs.values())
     connected = connection.ready and connection.state == 'connected'
-    return {'ok': bool(connected and not stalled), 'feishu_connected': bool(connected),
-            'active_requests': len(active_jobs), 'stalled_requests': stalled}
+    background_jobs = background_jobs or {}
+    background_stalled = sum(now - started > budget for started, budget in background_jobs.values())
+    return {'ok': bool(connected and not stalled and not background_stalled), 'feishu_connected': bool(connected),
+            'active_requests': len(active_jobs), 'stalled_requests': stalled,
+            'active_background_jobs': len(background_jobs), 'stalled_background_jobs': background_stalled}
 
 
 async def serve_health(port, snapshot):

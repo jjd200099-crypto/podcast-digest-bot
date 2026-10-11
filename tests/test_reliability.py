@@ -568,7 +568,8 @@ class FeishuDeliveryTests(unittest.TestCase):
                     body={"code": 0, "tenant_access_token": "fresh", "expire": 7200}
                 )
             send_count += 1
-            return FakeResponse(status_code=401 if send_count == 1 else 200)
+            return FakeResponse(status_code=401 if send_count == 1 else 200,
+                                body={'code': 0, 'data': {'message_id': 'om_received'}})
 
         post.side_effect = response
         messenger = FeishuMessenger("app", "secret")
@@ -597,7 +598,7 @@ class FeishuDeliveryTests(unittest.TestCase):
         post.side_effect = [
             FakeResponse(429, headers={"Retry-After": "2"}),
             FakeResponse(503),
-            FakeResponse(200),
+            FakeResponse(200, body={'code': 0, 'data': {'message_id': 'om_received'}}),
         ]
         messenger = FeishuMessenger("app", "secret")
         messenger._token = "token"

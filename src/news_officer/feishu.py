@@ -259,9 +259,20 @@ class FeishuMessenger:
     def _check(response: requests.Response, operation: str) -> dict:
         response.raise_for_status()
         body = response.json()
+        if not isinstance(body, dict):
+            raise TypeError(f'Feishu {operation} response is not an object')
         if body.get("code") != 0:
-            raise RuntimeError(f"Feishu {operation} error: {body}")
+            code = body.get('code')
+            raise RuntimeError(f"Feishu {operation} error code: {code if isinstance(code, int) else 'unknown'}")
         return body
+
+    @staticmethod
+    def _message_receipt(body):
+        data = body.get('data')
+        identity = data.get('message_id') if isinstance(data, dict) else None
+        if not isinstance(identity, str) or not identity.strip():
+            raise RuntimeError('Feishu message response missing message_id; delivery unconfirmed')
+        return identity
 
     def token(self) -> str:
         with self._token_lock:
@@ -427,10 +438,10 @@ class FeishuMessenger:
                 time.sleep(_retry_delay(response, attempt))
                 continue
             body = self._check(response, operation)
-            return str((body.get("data") or {}).get("message_id") or "")
+            return self._message_receipt(body)
         if response is not None:  # pragma: no cover - final branch returns or raises
             body = self._check(response, operation)
-            return str((body.get("data") or {}).get("message_id") or "")
+            return self._message_receipt(body)
         raise RuntimeError("Feishu message delivery did not run")
 
     def broadcast(

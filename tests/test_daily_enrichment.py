@@ -99,6 +99,16 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 1)
         self.assertEqual(len(self.messenger.attempts), 1)
 
+    async def test_existing_failed_document_is_not_abandoned_after_six_days(self):
+        await self.prepare()
+        enqueue_enrichment(self.store, '2026-10-11')
+        first = self.store.claim_next('document')
+        self.store.fail(first.key, 'temporary outage', 5, failed_daily_requeue_seconds=0)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-20'), 1)
+        recovered = self.store.claim_next('document')
+        self.assertEqual(recovered.key, first.key)
+        self.assertEqual(len(self.messenger.attempts), 1)
+
     async def test_three_fulltext_recommendations_without_caches_all_enqueue_automatically(self):
         # A missing translation cache is ordinary work, not a new approval gate.
         instance, job, _ = self.setup_job(
