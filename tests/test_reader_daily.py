@@ -319,3 +319,21 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(instance._inline_daily_documents(job, when), documents)
         self.assertEqual(instance._inline_daily_documents(job, when), documents)
         compiler.publish.assert_called_once()
+
+    async def test_worker_failure_logs_stack_without_sensitive_error_message(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        instance, job, _ = self.setup_job([])
+        instance.wake_workers = {'daily': asyncio.Event()}
+        instance._handle_daily_job = AsyncMock(side_effect=ValueError('secret-token-in-url'))
+        instance._failure_notice = AsyncMock()
+        with (patch.object(self.store, 'claim_next', side_effect=[job, asyncio.CancelledError()]),
+              self.assertLogs('news_officer.runtime', level='ERROR') as logs,
+              self.assertRaises(asyncio.CancelledError)):
+            await instance._worker('daily')
+        self.assertTrue(logs.records[0].exc_info)
+        output = '\n'.join(logs.output)
+        self.assertIn('Traceback', output)
+        self.assertIn('_worker', output)
+        self.assertNotIn('secret-token-in-url', output)

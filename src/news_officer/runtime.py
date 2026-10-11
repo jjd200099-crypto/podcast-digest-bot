@@ -1025,8 +1025,12 @@ class NewsOfficerRuntime:
                     await self._handle_document_job(job)
                 else:
                     raise ValueError(f"Unknown job kind: {job.kind}")
-            except Exception as error:  # noqa: BLE001 - durable worker retry boundary
-                logger.error("Job %s failed: %s", job.key, type(error).__name__)
+            except Exception as error:  # durable worker retry boundary
+                # Preserve stack frames without logging exception messages, which
+                # can contain request URLs, tokens or user content. Omit chains.
+                safe_error = RuntimeError(type(error).__name__)
+                logger.error("Job %s failed: %s", job.key, type(error).__name__,
+                             exc_info=(RuntimeError, safe_error, error.__traceback__))
                 if not isinstance(error, ResearchContinuationPending) or job.attempts >= 5:
                     await self._failure_notice(job, terminal=job.attempts >= 5)
                 await asyncio.to_thread(
