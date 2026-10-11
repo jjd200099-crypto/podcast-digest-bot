@@ -58,6 +58,7 @@ class NewsOfficerRuntime:
         self.podcast_service = podcast_service
         self.research_agent = research_agent
         self.active_jobs = {}
+        self.background_jobs = {}
         self.wake_workers = {
             "message": asyncio.Event(),
             "daily": asyncio.Event(),
@@ -1042,6 +1043,12 @@ class NewsOfficerRuntime:
             try:
                 if kind == 'message' and hasattr(self, 'active_jobs'):
                     self.active_jobs[job.key] = time.monotonic()
+                elif hasattr(self, 'background_jobs'):
+                    # Blocking tool threads cannot safely be cancelled and retried
+                    # in-process. Let the existing process watchdog recover the
+                    # durable job after a generous whole-job deadline instead.
+                    budget = 900 if job.payload.get('prepare_only') else 2700 if kind == 'daily' else 3600
+                    self.background_jobs[job.key] = (time.monotonic(), budget)
                 if kind == "message":
                     await self._handle_message_job(job)
                 elif kind == "daily":
@@ -1067,6 +1074,8 @@ class NewsOfficerRuntime:
             finally:
                 if hasattr(self, 'active_jobs'):
                     self.active_jobs.pop(job.key, None)
+                if hasattr(self, 'background_jobs'):
+                    self.background_jobs.pop(job.key, None)
 
     async def _scheduler(self) -> None:
         while True:
@@ -1292,7 +1301,7 @@ class NewsOfficerRuntime:
         ):
             tasks.append(asyncio.create_task(self._library_archiver(), name="library-archiver"))
         if getattr(self.settings, 'health_port', 0):
-            snapshot = lambda: health_snapshot(self.channel, self.active_jobs)
+            snapshot = lambda: health_snapshot(self.channel, self.active_jobs, background_jobs=self.background_jobs)
             tasks += [asyncio.create_task(serve_health(self.settings.health_port, snapshot), name='health-http'),
                       asyncio.create_task(watch_health(snapshot), name='health-watchdog')]
         try:

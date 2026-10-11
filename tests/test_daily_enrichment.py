@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import test_reader_daily as fixtures
 
 from news_officer.daily_enrichment import (
+    _content,
     enqueue_enrichment,
     enrichment_bundle,
     normalized_content,
@@ -75,6 +76,19 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.store.save_job_result(base, 'daily:document:' + episode, 'daily_document_ready', value)
         return value
 
+    async def test_old_frozen_template_uses_current_label_without_mutating_archive(self):
+        _, base = await self.prepare()
+        bundle = enrichment_bundle(self.store, base.key)
+        for section in bundle['enrichment']['sections']:
+            section['template'] = section['template'].replace('精读和完整中文对谈', '精读与完整中文对谈')
+        original = copy.deepcopy(bundle)
+        _, content = _content(bundle, {'one': {'url': 'https://www.feishu.cn/docx/one'}},
+                              bundle['deliveries'][0])
+        self.assertIn('精读和完整中文对谈', content)
+        self.assertNotIn('精读与完整中文对谈', content)
+        self.assertIn('https://www.feishu.cn/docx/one', content)
+        self.assertEqual(bundle, original)
+
     async def test_enqueue_independent_selected_episodes_after_original_delivery(self):
         await self.prepare()
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 2)
@@ -83,6 +97,31 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 0)
         self.store.fail(first.key, 'validation', 5, failed_daily_requeue_seconds=0)
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 1)
+        self.assertEqual(len(self.messenger.attempts), 1)
+
+    async def test_existing_failed_document_is_not_abandoned_after_six_days(self):
+        await self.prepare()
+        enqueue_enrichment(self.store, '2026-10-11')
+        first = self.store.claim_next('document')
+        self.store.fail(first.key, 'temporary outage', 5, failed_daily_requeue_seconds=0)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-20'), 1)
+        recovered = self.store.claim_next('document')
+        self.assertEqual(recovered.key, first.key)
+        self.assertEqual(len(self.messenger.attempts), 1)
+
+    async def test_three_fulltext_recommendations_without_caches_all_enqueue_automatically(self):
+        # A missing translation cache is ordinary work, not a new approval gate.
+        instance, job, _ = self.setup_job(
+            [self.item('first', 5), self.item('second', 4), self.item('third', 4)],
+            key='daily:2026-10-11', payload={'scheduled_for': '2026-10-11T08:30:00+08:00'})
+        instance.document_compiler = Mock(min_stars=4)
+        await instance._handle_daily_job(job)
+        self.store.complete(job.key)
+        instance.document_compiler.publish.assert_not_called()
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 3)
+        jobs = [self.store.claim_next('document') for _ in range(3)]
+        self.assertEqual({j.payload['episode_id'] for j in jobs}, {'first', 'second', 'third'})
+        self.assertTrue(all('authorization_pending' not in j.payload for j in jobs))
         self.assertEqual(len(self.messenger.attempts), 1)
 
     async def test_partial_failure_does_not_block_other_episode_and_only_edits_original(self):

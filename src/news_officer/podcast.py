@@ -824,6 +824,11 @@ class PodcastService:
             now = now.replace(tzinfo=UTC)
         cutoff = now.astimezone(UTC) - timedelta(hours=self.lookback_hours)
         candidates = self.discover_daily_candidates(now) if pending is None else pending
+        if not preparation and pending is None:
+            # A crash, slow provider or summary cap must not lose already-seen
+            # releases when they fall outside the next day's 24-hour window.
+            self.store.track_daily_candidates([e for e in candidates if e.published_at
+                and cutoff <= e.published_at.astimezone(UTC) <= now.astimezone(UTC)])
         if preparation:
             candidates = candidates[:12]
         results: list[DailyItem] = [

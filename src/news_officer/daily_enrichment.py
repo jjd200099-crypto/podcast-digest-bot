@@ -32,7 +32,11 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
                           "ON j.job_key=r.job_key WHERE r.kind='daily_bundle' "
                           "AND j.analysis_complete=1 AND j.kind='daily' "
                           "AND json_extract(r.payload_json,'$.enrichment.version')=1 "
-                          "AND json_extract(r.payload_json,'$.enrichment.day') BETWEEN ? AND ?",
+                          "AND (json_extract(r.payload_json,'$.enrichment.day') BETWEEN ? AND ? "
+                          "OR EXISTS (SELECT 1 FROM jobs d WHERE d.kind='document' "
+                          "AND d.status IN ('pending','processing','failed') "
+                          "AND json_extract(d.payload_json,'$.base_job')=r.job_key "
+                          "AND json_extract(d.payload_json,'$.mode')='daily_episode'))",
                           (cutoff, today)).fetchall()
     count = 0
     for row in rows:
@@ -89,7 +93,10 @@ def _content(bundle, documents, delivery):
     blocks = list(edition['prefix'])
     for section in edition['sections']:
         doc = documents.get(section['episode_id'])
-        blocks.append(section['template'].replace(DOCUMENT_PLACEHOLDER, doc['url'])
+        # Apply the display-label correction to older frozen templates too.
+        template = section['template'].replace(
+            '[精读与完整中文对谈](', '[精读和完整中文对谈](')
+        blocks.append(template.replace(DOCUMENT_PLACEHOLDER, doc['url'])
                       if doc else section['body'])
     parts = combined_delivery_parts('\n\n'.join(blocks), delivery['key'], title=edition['title'])
     if len(parts) != 1 or parts[0][0] != delivery['parts'][0][0]:
