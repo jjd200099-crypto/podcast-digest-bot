@@ -10,6 +10,7 @@ import test_document_transcript as documents
 from news_officer.daily_document import read_tree, tree_signature
 from news_officer.document_transcript import (
     ChineseTranscriptWriter,
+    TranslationFailure,
     clean_timestamps,
     source_segments,
     validate_translation,
@@ -20,6 +21,21 @@ from news_officer.shownotes import text_node
 
 
 class ChineseTranscript(unittest.TestCase):
+    def test_catch_22_is_not_a_quantity_but_real_22_must_survive(self):
+        source = [{'id': 70, 'text': 'This is a catch-22.'}]
+        translation = [{'id': 70, 'text': '这是一种两难困境。'}]
+        self.assertEqual(validate_translation(source, translation), translation)
+        for text in ('A catch-22 costs us 22 dollars.', 'There are 22 students.'):
+            with self.assertRaisesRegex(ValueError, '70.*数字'):
+                validate_translation([{'id': 70, 'text': text}], translation)
+        with self.assertRaises(ValueError):
+            validate_translation(source, [{'id': 70, 'text': '一切顺利。'}])
+
+    def test_safe_failure_context_does_not_contain_transcript(self):
+        error = TranslationFailure('rss:abc', 70, 74, 'missing_numbers')
+        self.assertIn('segments=70-74', str(error))
+        self.assertIn('missing_numbers', str(error))
+
     def test_cues_and_clock_times(self):
         self.assertEqual(clean_timestamps('[00:01] Alex: Meet at 10:30, ratio 10:1.\n01:23 Next.'),
                          'Alex: Meet at 10:30, ratio 10:1.\nNext.')

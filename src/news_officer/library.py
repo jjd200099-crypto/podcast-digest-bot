@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import requests
 
-from .feishu import FEISHU_API
+from .feishu import FEISHU_API, encoded_message_payload
 from .transcript_view import render_readable_transcript
 
 
@@ -30,12 +30,17 @@ class FeishuLibraryAPI:
         # Bound concurrency and rate across archive and interactive reads.
         with self._lock:
             for attempt in range(4):
+                headers = {"Authorization": "Bearer " + self.messenger.token()}
+                payload = {'json': data}
+                if method == 'PUT' and path.startswith('/im/v1/messages/'):
+                    headers['Content-Type'] = 'application/json; charset=utf-8'
+                    payload = {'data': encoded_message_payload(data)}
                 response = requests.request(
                     method,
                     FEISHU_API + path,
-                    headers={"Authorization": "Bearer " + self.messenger.token()},
+                    headers=headers,
                     params=params,
-                    json=data,
+                    **payload,
                     timeout=30,
                 )
                 body = response.json()

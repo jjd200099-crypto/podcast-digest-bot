@@ -88,22 +88,21 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.analysis_complete(job.key))
         self.assertEqual(self.messenger.attempts, [])
 
-    async def test_document_retry_does_not_rescan_or_send_early(self):
+    async def test_document_failure_cannot_block_original_daily_send(self):
         instance, job, podcast = self.setup_job([self.item('selected', 5)])
         compiler = Mock()
+        compiler.min_stars = 4
         compiler.snapshot.return_value = ('revision', ['selected'], [])
         compiler.publish.side_effect = [TimeoutError('retry'),
             {'documents': [{'title': 'Selected', 'episode_id': 'selected', 'url': 'https://example.test/doc'}]}]
         instance.document_compiler = compiler
-        with self.assertRaises(TimeoutError):
-            await instance._handle_daily_job(job)
-        self.assertEqual(self.messenger.attempts, [])
         await instance._handle_daily_job(job)
         self.assertEqual(podcast.calls, 1)
         self.assertEqual(len(self.messenger.attempts), 1)
-        self.assertIn('https://example.test/doc', self.messenger.attempts[0].content)
+        self.assertNotIn('https://example.test/doc', self.messenger.attempts[0].content)
         await instance._handle_daily_job(job)
-        self.assertEqual(compiler.publish.call_count, 2)
+        compiler.publish.assert_not_called()
+        compiler.snapshot.assert_not_called()
         self.assertEqual(len(self.messenger.attempts), 1)
 
     async def test_send_retry_preserves_exactly_one_frozen_bundle(self):
