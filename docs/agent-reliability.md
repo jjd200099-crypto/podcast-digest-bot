@@ -64,7 +64,7 @@ self-diagnosis, feature registration, its follow-up, and another group member.
 Production application release: `0fcb9db`, running on Railway with Agents SDK,
 four interactive workers, one replica, no sleep, ALWAYS restart and `/healthz`.
 The deployed runtime SHA-256 matched the release checkout. The daily schedule
-remains 08:30 Asia/Shanghai, a 24-hour window, with one active group recipient
+remained 08:30 Asia/Shanghai (the default; configurable via `NEWS_OFFICER_DAILY_TIME`), a 24-hour window, with one active group recipient
 and no active private daily recipients.
 
 | Gate | Observed evidence | Boundary |

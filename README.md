@@ -120,7 +120,7 @@ uv run scripts/bootstrap_railway.py --project-id <project-id> --apply
 
 脚本从 lark-cli 当前 profile 读取 App ID，并解密其系统钥匙串引用。两个 Secret 只通过子进程 stdin 写入 Railway，既不出现在命令参数中，也不会打印或写入仓库。`OPENAI_API_KEY` 优先从同名环境变量读取；没有时使用隐藏输入。管道场景可加 `--openai-key-stdin`。初始化成功后，再单独执行脚本提示的 `railway up` 命令部署，便于把“准备配置”和“实际上线”分成两个清晰动作。
 
-默认每天北京时间 08:30 扫描；代码默认追踪窗口为 72 小时，24 小时运行窗口需显式配置 `NEWS_OFFICER_LOOKBACK_HOURS=24`。默认候选和摘要数量均为 0，表示不设数量上限；全文核验和编辑筛选继续生效。生产窗口须以实际环境变量核验。日报发送目标来自持久订阅表；若仅向「每日播客情报」群发送，需确认表内只保留该群，私聊问答白名单与日报订阅分别配置。所有已检查节目、消息幂等键和任务状态都保存在 `/data/news-officer.sqlite3`。
+默认每天北京时间 08:30 扫描（默认值，可用 `NEWS_OFFICER_DAILY_TIME` 配置）；代码默认追踪窗口为 72 小时，24 小时运行窗口需显式配置 `NEWS_OFFICER_LOOKBACK_HOURS=24`。默认候选和摘要数量均为 0，表示不设数量上限；全文核验和编辑筛选继续生效。生产窗口须以实际环境变量核验。日报发送目标默认来自持久订阅表；若设置 `NEWS_OFFICER_DAILY_CHAT_IDS`（逗号分隔的 `oc_` 群 ID），则只发这些群，订阅表中的私聊 open_id 与其他群不会收到日报，也不会收到文档链接通知。设置 `NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS=true` 后，白名单为空或无有效 ID 时日报任务直接报错且不发送（不退回订阅表）。私聊问答白名单与日报收件人分别配置，详见 `docs/production-operations.md`。所有已检查节目、消息幂等键和任务状态都保存在 `/data/news-officer.sqlite3`。
 
 本地运行：
 

@@ -13,7 +13,19 @@ python scripts/release.py --project YOUR_RAILWAY_PROJECT --deploy
 
 ## 早报与监控
 
-`NEWS_OFFICER_DAILY_READER_MODE=true` 为当前默认：每个日报任务、每个收件人只冻结一条消息。正文保留节目介绍、摘要、推荐理由、阅读建议与已编译文档链接；不显示扫描统计、缺稿队列、过滤数量或重复免责声明，技术状态留在数据库和日志。日期只放在消息标题，独立送达监控同时兼容旧标题和新标题。功能更新仅首次用一句话列在末尾。
+`NEWS_OFFICER_DAILY_READER_MODE=true` 为当前默认：每个日报任务、每个收件人只冻结一条消息。正文保留节目介绍、摘要、推荐理由、阅读建议与已编译文档链接；不显示扫描统计、缺稿队列、过滤数量或重复免责声明，技术状态留在数据库和日志。日期只放在消息标题，独立送达监控同时兼容旧标题和新标题。功能更新默认不进入日报；仅在显式设置 `NEWS_OFFICER_DAILY_RELEASE_NOTES=true` 时，才于首份符合日期的早报末尾用一句话列出。
+
+### 日报收件人白名单
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `NEWS_OFFICER_DAILY_CHAT_IDS` | 空 | 逗号分隔的 `oc_` 群 ID。设置后只向这些群发送日报；订阅表中的私聊 open_id、`FEISHU_USER_OPEN_IDS` 种子、私聊 `subscribe` 命令写入的条目、不在名单内的群，以及已冻结在旧 `daily:recipients` 快照或 outbox 里的旧 open_id，都不会收到日报，也不会收到文档链接通知（文档任务发送前会按白名单重新校验）。为空时回退为全部有效订阅，并在每个日报任务记录一次 WARNING。 |
+| `NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS` | `false` | 设为 `true` 后，白名单为空或没有有效 `oc_` ID 时，日报任务抛出 `RuntimeError` 并且不发送，不回退订阅表。默认 `false`，因此在设置环境变量前先部署代码不会让日报静默。建议先设置 `NEWS_OFFICER_DAILY_CHAT_IDS`，确认后再打开此开关。 |
+| `NEWS_OFFICER_DAILY_RELEASE_NOTES` | `false` | 设为 `true` 才会在日报中附带功能更新句子。 |
+
+`NEWS_OFFICER_WATCH_CHAT_ID`（GitHub 独立送达检查读取的群）与 `NEWS_OFFICER_DAILY_CHAT_IDS`（日报实际发送的群）是两个互相独立的设置，不会自动同步；应让前者出现在后者之中。白名单未设置、必填却缺失，或监控群不在白名单内时，`python -m news_officer.operations` 的输出带 `warnings` 字段，服务日志以 WARNING 记录；GitHub 检查在把这三个变量以仓库变量镜像（可选）后，也会输出非致命 `::warning::` 注释与 JSON `warnings`，不改变退出码。注意 GitHub 检查读不到 Railway 环境变量，只能依据镜像值。
+
+独立送达检查同样遵循 `NEWS_OFFICER_DAILY_TIME`：工作流从仓库变量 `NEWS_OFFICER_DAILY_TIME` 读取（未设置时为 08:30），需与 Railway 保持一致。其 cron 固定在北京时间 09:17；若把日报时间改到约 08:30 之后太多，需同步调整 cron，否则检查会在 `not_due` 阶段直接通过。
 
 阅读版停用半小时一次的补充摘要广播。未取得全文的关注节目仍保留，每个早报处理新节目后，再按既有预算补抓最多 12 期到期旧节目，成功项并入同一条日报并注明旧节目发布日期。精选文档在日报冻结前编译，链接随正文一起发，不另发自动文档通知，因此文档生成较慢时会延后该日报；同事主动 @ 请求的文档仍回复原消息。来源失败时后台重试，不在群里叠加故障提示；独立异常私信监控继续工作。超出单条平台容量时拒绝发送多段并触发故障处理，不静默截断。
 
@@ -21,7 +33,7 @@ python scripts/release.py --project YOUR_RAILWAY_PROJECT --deploy
 
 `NEWS_OFFICER_DAILY_PREPARATION=true` 时，定时早报前两小时开始一轮最多 12 期的预处理，与日报共用单个处理 worker，避免共享 provider 状态并发冲突。获取/评级结果可缓存；模型、提示词或证据版本变化不复用预处理缓存，已经冻结的原稿摘要版本仍按原有不可变归档规则保存。每期开始前检查 8 分钟处理预算，但不能打断已在进行的外部请求；过时的准备任务不在早报前 30 分钟重新开始。准备任务不发消息、不创建文档、不消耗功能公告。
 
-这能减少早报时重复处理，不是严格 08:30 截止的独立采集/组装架构。早报仍需处理最新候选；完整架构拆分需另做持久化候选调度和截止时间测试。
+这能减少早报时重复处理，不是严格按 `NEWS_OFFICER_DAILY_TIME`（默认 08:30，可配置）截止的独立采集/组装架构。早报仍需处理最新候选；完整架构拆分需另做持久化候选调度和截止时间测试。
 
 ```sh
 python -m news_officer.operations --db /data/news-officer.sqlite3
@@ -45,7 +57,7 @@ python -m news_officer.operations --db /data/news-officer.sqlite3
 
 ### 经授权补发与消息恢复
 
-`python -m news_officer.recovery daily --date YYYY-MM-DD` 默认只预览。明确要补发时，在子命令前加 `--execute`。只接受最近七天内的过去日期，复用原 `daily:日期` 去重键；已有任务不会另造重复日报。任务使用原定 08:30 截止的 24 小时窗口，而不是拿当前新节目冒充旧日报，正文标记“停机补发”。
+`python -m news_officer.recovery daily --date YYYY-MM-DD` 默认只预览。明确要补发时，在子命令前加 `--execute`。只接受最近七天内的过去日期，复用原 `daily:日期` 去重键；已有任务不会另造重复日报。任务使用原定投递时间（`NEWS_OFFICER_DAILY_TIME`，默认 08:30）截止的 24 小时窗口，而不是拿当前新节目冒充旧日报，正文标记“停机补发”。
 
 `python -m news_officer.recovery mentions --chat CHAT --start 带时区的ISO时间 --end 带时区的ISO时间` 同样默认预览。它只扫描既有研究群白名单，以机器人真实 open_id 精确识别 @，并保留同事身份、原消息 ID 和引用线程。加 `--execute` 后才把遗漏消息交给正常 Agent worker；已有任务不重复创建，历史失败任务列出供复核，不盲目重放。扫描近七天根消息及其线程，不能保证找出更老根消息下的新回复；权限失败或分页超限时不部分提交。
 
