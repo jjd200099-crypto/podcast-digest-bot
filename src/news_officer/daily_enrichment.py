@@ -79,7 +79,10 @@ def _content(bundle, documents, delivery):
     blocks = list(edition['prefix'])
     for section in edition['sections']:
         doc = documents.get(section['episode_id'])
-        blocks.append(section['template'].replace(DOCUMENT_PLACEHOLDER, doc['url'])
+        # Apply the display-label correction to older frozen templates too.
+        template = section['template'].replace(
+            '[精读与完整中文对谈](', '[精读和完整中文对谈](')
+        blocks.append(template.replace(DOCUMENT_PLACEHOLDER, doc['url'])
                       if doc else section['body'])
     parts = combined_delivery_parts('\n\n'.join(blocks), delivery['key'], title=edition['title'])
     if len(parts) != 1 or parts[0][0] != delivery['parts'][0][0]:

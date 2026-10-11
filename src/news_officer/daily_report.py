@@ -21,7 +21,7 @@ def reader_episode(markdown: str, document_url: str = '') -> str:
             line = '**' + clean + '**'
         lines.append(line)
     if document_url:
-        lines.extend(['', f'[精读与完整中文对谈]({document_url})'])
+        lines.extend(['', f'[精读和完整中文对谈]({document_url})'])
     if links:
         lines.extend(['', *dict.fromkeys(links)])
     return '\n'.join(lines).strip()
