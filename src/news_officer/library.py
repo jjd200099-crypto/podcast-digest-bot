@@ -28,22 +28,41 @@ class FeishuLibraryAPI:
 
     def request(self, method, path, *, params=None, data=None):
         # Bound concurrency and rate across archive and interactive reads.
+        # Retry uncertain writes ONLY when this endpoint has a durable server
+        # idempotency token. Message edits must return to their readback journal;
+        # document creation must reconcile its title before another POST.
+        retry_safe = method == 'GET' or (method == 'POST' and path.endswith('/descendant')
+                                        and bool((params or {}).get('client_token')))
         with self._lock:
+            refreshed = False
             for attempt in range(4):
                 headers = {"Authorization": "Bearer " + self.messenger.token()}
                 payload = {'json': data}
                 if method == 'PUT' and path.startswith('/im/v1/messages/'):
                     headers['Content-Type'] = 'application/json; charset=utf-8'
                     payload = {'data': encoded_message_payload(data)}
-                response = requests.request(
-                    method,
-                    FEISHU_API + path,
-                    headers=headers,
-                    params=params,
-                    **payload,
-                    timeout=30,
-                )
-                body = response.json()
+                try:
+                    response = requests.request(
+                        method, FEISHU_API + path, headers=headers,
+                        params=params, **payload, timeout=30)
+                except requests.RequestException:
+                    if retry_safe and attempt < 3:
+                        time.sleep(2**attempt)
+                        continue
+                    raise LibraryError('飞书网络请求失败，交由持久化任务回读后重试') from None
+                if retry_safe and response.status_code in {500, 502, 503, 504} and attempt < 3:
+                    time.sleep(2**attempt)
+                    continue
+                if response.status_code == 401 and not refreshed and attempt < 3:
+                    self.messenger._invalidate_token()
+                    refreshed = True
+                    continue
+                try:
+                    body = response.json()
+                except ValueError:
+                    raise LibraryError(f'飞书响应不是有效 JSON，HTTP {response.status_code}') from None
+                if not isinstance(body, dict):
+                    raise LibraryError('飞书响应结构无效')
                 if body.get("code") == 0 and response.ok:
                     time.sleep(0.35)
                     return body.get("data", {})
@@ -51,9 +70,10 @@ class FeishuLibraryAPI:
                     time.sleep(2**attempt)
                     continue
                 # Do not print API response objects: they may contain authentication data.
+                error = body.get('error') or {}
                 scopes = [
                     v.get("subject", "")
-                    for v in body.get("error", {}).get("permission_violations", [])
+                    for v in error.get("permission_violations", [])
                 ]
                 suffix = ("，缺少权限：" + ", ".join(scopes)) if scopes else ""
                 raise LibraryError(

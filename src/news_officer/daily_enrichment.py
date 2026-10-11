@@ -32,7 +32,11 @@ def enqueue_enrichment(store, today):
                           "ON j.job_key=r.job_key WHERE r.kind='daily_bundle' "
                           "AND j.analysis_complete=1 AND j.kind='daily' "
                           "AND json_extract(r.payload_json,'$.enrichment.version')=1 "
-                          "AND json_extract(r.payload_json,'$.enrichment.day') BETWEEN ? AND ?",
+                          "AND (json_extract(r.payload_json,'$.enrichment.day') BETWEEN ? AND ? "
+                          "OR EXISTS (SELECT 1 FROM jobs d WHERE d.kind='document' "
+                          "AND d.status IN ('pending','processing','failed') "
+                          "AND json_extract(d.payload_json,'$.base_job')=r.job_key "
+                          "AND json_extract(d.payload_json,'$.mode')='daily_episode'))",
                           (cutoff, today)).fetchall()
     count, active = 0, set(store.list_subscriptions())
     for row in rows:

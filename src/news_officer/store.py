@@ -406,16 +406,31 @@ class Store:
             ).fetchone()
         return row is not None
 
+    def track_daily_candidates(self, episodes: list[Episode]) -> None:
+        """Checkpoint discovered work before model calls; preserve existing cooldowns."""
+        now = _now()
+        with self._connect() as db:
+            db.executemany('INSERT OR IGNORE INTO daily_transcript_backlog '
+                           '(episode_id,episode_json,state,next_check_at,created_at,attempts) VALUES (?,?,?,?,?,0)',
+                           [(e.id, json.dumps({**e.to_persisted_dict(), 'metadata': e.metadata}, ensure_ascii=False),
+                             '等待处理', now, now) for e in episodes])
+
     def recover_interrupted_jobs(self) -> int:
+        now = datetime.now(UTC)
         with self._connect() as connection:
             result = connection.execute(
                 """
                 UPDATE jobs
-                SET status = 'pending', available_at = ?, updated_at = ?,
+                SET status = CASE WHEN kind IN ('daily','document') AND attempts>=5
+                                  THEN 'failed' ELSE 'pending' END,
+                    available_at = CASE WHEN kind IN ('daily','document') AND attempts>=5 THEN ?
+                                        WHEN kind IN ('daily','document') AND attempts>=2 THEN ? ELSE ? END,
+                    updated_at = ?,
                     last_error = 'worker restarted while processing'
                 WHERE status = 'processing'
                 """,
-                (_now(), _now()),
+                ((now + timedelta(seconds=FAILED_DAILY_REQUEUE_SECONDS)).isoformat(),
+                 (now + timedelta(seconds=60)).isoformat(), now.isoformat(), now.isoformat()),
             )
             return result.rowcount
 
