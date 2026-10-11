@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from .config import _clock
+
 BASE = 'https://open.feishu.cn/open-apis'
 ZONE = ZoneInfo('Asia/Shanghai')
 
@@ -77,7 +79,8 @@ def is_daily_receipt(message, app_id, day, start, end):
 
 
 def check_receipt(session, app_id, chat_id, day, now):
-    start = datetime.combine(day, datetime.min.time(), ZONE).replace(hour=8, minute=30)
+    daily_time = _clock(os.environ.get("NEWS_OFFICER_DAILY_TIME", "08:30"))
+    start = datetime.combine(day, daily_time, ZONE)
     end = min(now, start.replace(hour=0, minute=0) + timedelta(days=1))
     if now < start + timedelta(minutes=47):
         return 'not_due'

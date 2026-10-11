@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -277,27 +278,51 @@ class NewsOfficerRuntime:
             return ""
         return str(canonical["file_key"])
 
+    def _daily_candidates(self) -> list[tuple[str, str]]:
+        chats = getattr(getattr(self, "settings", None), "daily_chat_ids", ())
+        return ([('chat_id', chat) for chat in dict.fromkeys(chats)]
+                if chats else self.store.list_subscriptions())
+
+    def _valid_daily_targets(self, targets) -> list[tuple[str, str]]:
+        valid = []
+        chats = getattr(getattr(self, "settings", None), "daily_chat_ids", ())
+        for kind, target in targets:
+            prefix = {"chat_id": "oc_", "open_id": "ou_"}.get(kind)
+            if not prefix or not re.fullmatch(prefix + r"[A-Za-z0-9_-]{1,125}", target):
+                logger.warning("Skipping daily recipient with invalid ID format (type=%s)", kind)
+                continue
+            if chats and (kind != "chat_id" or target not in chats):
+                continue
+            valid.append((kind, target))
+        return valid
+
+    def _has_daily_recipients(self) -> bool:
+        return bool(self._valid_daily_targets(self._daily_candidates()))
+
     def _daily_targets(self, job: Job) -> list[tuple[str, str]]:
         """Freeze one DB-backed recipient snapshot for the whole daily job."""
 
         persisted = self.store.get_job_result(job.key, "daily:recipients")
         if persisted is None:
-            targets = self.store.list_subscriptions()
+            targets = self._valid_daily_targets(self._daily_candidates())
             persisted = self.store.save_job_result(
                 job.key,
                 "daily:recipients",
                 "delivery_targets",
                 {"targets": [list(target) for target in targets]},
             )
-        return [
+        return self._valid_daily_targets([
             (str(target[0]), str(target[1]))
             for target in persisted.get("targets", ())
-        ]
+        ])
 
     async def _drain_outbox(self, job: Job) -> None:
         failures: list[tuple[str, Exception]] = []
         blocked_deliveries: set[str] = set()
         for item in await asyncio.to_thread(self.store.pending_outbox, job.key):
+            if (job.kind == "daily" and item.operation == "send"
+                    and not self._valid_daily_targets([(item.target_type, item.target_id)])):
+                continue
             # Keep parts ordered within one recipient, while allowing a bad
             # recipient to never block every other user/group in the broadcast.
             if item.delivery_key in blocked_deliveries:
@@ -564,7 +589,7 @@ class NewsOfficerRuntime:
         if job.payload.get('recovery_window_end'):
             blocks.append('停机补发：以下按原定日期的 24 小时时间窗整理，不是今天的新节目；已送达内容不重复发送。')
         feature_updates = ""
-        if not catchup and not bundles:
+        if not catchup and not bundles and getattr(settings, "daily_release_notes", False):
             from .release_notes import RELEASE_NOTES, render_release_notes
             feature_updates = render_release_notes(self.store.claim_daily_release_notes(
                 job.key, when.date().isoformat(), RELEASE_NOTES))
@@ -752,7 +777,7 @@ class NewsOfficerRuntime:
             local_now = datetime.now(self.settings.timezone)
             scheduled = datetime.fromisoformat(job.payload['scheduled_for'])
             # Do not let a retry/restart start an old warm-up at delivery time.
-            if local_now >= scheduled - timedelta(minutes=30) or not self.store.has_subscriptions():
+            if local_now >= scheduled - timedelta(minutes=30) or not self._has_daily_recipients():
                 self.store.mark_analysis_complete(job.key)
                 return
             results = await asyncio.to_thread(self.podcast_service.build_daily, preparation=True)
@@ -972,7 +997,7 @@ class NewsOfficerRuntime:
     async def _scheduler(self) -> None:
         while True:
             local_now = datetime.now(self.settings.timezone)
-            has_subscribers = await asyncio.to_thread(self.store.has_subscriptions)
+            has_subscribers = await asyncio.to_thread(self._has_daily_recipients)
             scheduled = local_now.replace(hour=self.settings.daily_time.hour,
                 minute=self.settings.daily_time.minute, second=0, microsecond=0)
             if (has_subscribers and getattr(self.settings, 'daily_preparation_enabled', False)

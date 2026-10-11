@@ -1,10 +1,11 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from test_editorial import SUMMARY
@@ -28,6 +29,17 @@ class DeliveryImprovements(unittest.IsolatedAsyncioTestCase):
         self.now = datetime(2026, 10, 4, 0, 30, tzinfo=UTC)
         self.episode = Episode('rss:one', 'An AI interview', 'https://example.org/one', 'Show',
                                published_at=self.now - timedelta(hours=1))
+
+    def test_operations_environment_time_and_explicit_override(self):
+        self.store.add_subscription('chat_id', 'oc_test')
+        now = self.now + timedelta(minutes=16)
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_TIME': '08:00'}):
+            self.assertTrue(business_snapshot(self.store.path, now=now)['daily_overdue'])
+            self.assertFalse(business_snapshot(self.store.path, now=now,
+                daily_time='08:30')['daily_overdue'])
+        self.store.remove_subscription('chat_id', 'oc_test')
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_test'}):
+            self.assertNotEqual(business_snapshot(self.store.path, now=now)['daily_state'], 'not_subscribed')
 
     def service(self):
         resolver = Mock()

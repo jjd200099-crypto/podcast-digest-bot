@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from datetime import UTC, date, datetime
 from unittest.mock import Mock, patch
@@ -39,6 +40,17 @@ class WatchdogTests(unittest.TestCase):
             self.assertEqual(check_receipt(Mock(), 'cli_bot', 'chat', self.day,
                                           datetime(2026, 10, 8, 0, 45, tzinfo=UTC)), 'not_due')
             api.assert_not_called()
+
+    def test_configured_early_window_counts_receipt_and_moves_grace_period(self):
+        message = {**self.message, 'create_time': str(int(
+            datetime(2026, 10, 8, 0, 15, tzinfo=UTC).timestamp() * 1000))}
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_TIME': '08:00'}), patch(
+                'news_officer.delivery_watchdog.api',
+                return_value={'data': {'items': [message], 'has_more': False}}) as api:
+            self.assertEqual(check_receipt(Mock(), 'cli_bot', 'chat', self.day,
+                datetime(2026, 10, 8, 0, 48, tzinfo=UTC)), 'delivered')
+            self.assertEqual(api.call_args.kwargs['params']['start_time'], str(int(
+                datetime(2026, 10, 8, 0, tzinfo=UTC).timestamp())))
 
     def test_missing_is_not_confused_with_check_failure(self):
         with patch('news_officer.delivery_watchdog.api', return_value={'data': {'items': [], 'has_more': False}}):

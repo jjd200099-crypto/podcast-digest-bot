@@ -47,6 +47,47 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Podwise', archived)
         self.assertNotIn('播客追踪状态', archived)
 
+    async def test_release_notes_default_off_and_opt_in(self):
+        from news_officer.daily_archive import read_daily_digest
+
+        for enabled in (False, True):
+            day = '2026-10-04' if not enabled else '2026-10-05'
+            instance, job, _ = self.setup_job([self.item(day)], key=f'daily:{day}',
+                payload={'scheduled_for': f'{day}T08:30:00+08:00'})
+            instance.settings.daily_release_notes = enabled
+            await instance._handle_daily_job(job)
+            self.assertEqual('功能更新' in body(self.messenger.attempts[-1]), enabled)
+            self.assertEqual('功能更新' in read_daily_digest(self.store, day)['markdown'], enabled)
+            self.store.complete(job.key)
+
+    async def test_chat_allowlist_skips_invalid_ids_and_private_subscriptions(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance.settings.daily_chat_ids = ('oc_good', 'bad', 'ou_private', 'oc_bad space', 'oc_good')
+        with self.assertLogs('news_officer.runtime', level='WARNING'):
+            await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
+        self.assertEqual(instance._daily_targets(job), [('chat_id', 'oc_good')])
+        self.store.remove_subscription('open_id', 'ou_test')
+        self.assertTrue(instance._has_daily_recipients())
+
+    async def test_unconfigured_allowlist_preserves_valid_subscriptions(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        self.store.add_subscription('chat_id', 'oc_other')
+        self.store.add_subscription('open_id', 'invalid')
+        with self.assertLogs('news_officer.runtime', level='WARNING'):
+            await instance._handle_daily_job(job)
+        self.assertEqual({(i.target_type, i.target_id) for i in self.messenger.attempts},
+                         {('open_id', 'ou_test'), ('chat_id', 'oc_other')})
+
+    async def test_allowlist_blocks_previously_frozen_private_outbox(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance._persist_daily_items(job, [self.item('selected')])
+        instance._prepare_daily_outbox_and_terminal_states(job)
+        instance.settings.daily_chat_ids = ('oc_good',)
+        await instance._drain_outbox(job)
+        self.assertEqual(self.messenger.attempts, [])
+
     async def test_later_arrivals_wait_for_next_edition(self):
         instance, job, podcast = self.setup_job([self.item('current')])
         podcast.build_pending.return_value = [self.item('previous')]

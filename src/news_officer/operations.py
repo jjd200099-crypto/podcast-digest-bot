@@ -2,23 +2,28 @@
 
 import argparse
 import json
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .config import _clock, _csv
 
-def business_snapshot(path: Path, *, now=None, daily_time="08:30", timezone="Asia/Shanghai") -> dict:
+
+def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/Shanghai") -> dict:
     now = now or datetime.now(UTC)
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     local = now.astimezone(ZoneInfo(timezone))
-    hour, minute = map(int, daily_time.split(":"))
+    clock = _clock(daily_time if daily_time is not None else os.environ.get("NEWS_OFFICER_DAILY_TIME", "08:30"))
+    hour, minute = clock.hour, clock.minute
     scheduled = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
     key = f"daily:{local.date().isoformat()}"
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
         subscribed = bool(db.execute("SELECT 1 FROM subscriptions WHERE active=1 LIMIT 1").fetchone())
+        subscribed = subscribed or bool(_csv(os.environ.get("NEWS_OFFICER_DAILY_CHAT_IDS", "")))
         job = db.execute("SELECT status,analysis_complete FROM jobs WHERE job_key=?", (key,)).fetchone()
         sends = db.execute(
             "SELECT status,sent_at FROM outbox WHERE job_key=? AND group_key LIKE 'daily:bundle:%'", (key,)
@@ -58,7 +63,7 @@ def business_snapshot(path: Path, *, now=None, daily_time="08:30", timezone="Asi
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, required=True)
-    parser.add_argument("--daily-time", default="08:30")
+    parser.add_argument("--daily-time")
     args = parser.parse_args()
     print(json.dumps(business_snapshot(args.db, daily_time=args.daily_time), ensure_ascii=False))
 

@@ -141,6 +141,7 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
 
         instance, job, _ = self.setup_job([], key="daily:2026-10-04", payload={
             "scheduled_for": "2026-10-04T08:30:00+08:00"})
+        instance.settings.daily_release_notes = True
         await instance._handle_daily_job(job)
         self.assertEqual(len(self.messenger.attempts), 1)
         self.assertIn("功能更新", body(self.messenger.attempts[0]))
@@ -152,6 +153,7 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
         self.store = reopened
         instance, job, _ = self.setup_job([], key="daily:2026-10-05", payload={
             "scheduled_for": "2026-10-05T08:30:00+08:00"})
+        instance.settings.daily_release_notes = True
         await instance._handle_daily_job(job)
         self.assertEqual(len(self.messenger.attempts), 2)
         self.assertNotIn("功能更新", body(self.messenger.attempts[-1]))
@@ -160,6 +162,7 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
         item = self.item("release-retry")
         instance, job, _ = self.setup_job([item], key="daily:2026-10-04", payload={
             "scheduled_for": "2026-10-04T08:30:00+08:00"})
+        instance.settings.daily_release_notes = True
         instance._persist_daily_items(job, [item])
         instance._prepare_daily_outbox_and_terminal_states(job)
         before = self.store.outbox_items(job.key)[0]
@@ -178,18 +181,21 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
             instance, job, podcast = self.setup_job([self.item(key)], key=key, payload={
                 "scheduled_for": "2026-10-04T08:30:00+08:00",
                 "transcript_catchup": catchup})
+            instance.settings.daily_release_notes = True
             podcast.build_pending = podcast.build_daily
             await instance._handle_daily_job(job)
             self.assertNotIn("功能更新", body(self.messenger.attempts[-1]))
             self.store.complete(job.key)
         instance, job, _ = self.setup_job([], key="daily:2026-10-05", payload={
             "scheduled_for": "2026-10-05T08:30:00+08:00"})
+        instance.settings.daily_release_notes = True
         await instance._handle_daily_job(job)
         self.assertIn("功能更新", body(self.messenger.attempts[-1]))
 
     async def test_old_report_does_not_announce_future_feature(self):
         instance, job, _ = self.setup_job([], key="daily:2026-10-03", payload={
             "scheduled_for": "2026-10-03T08:30:00+08:00"})
+        instance.settings.daily_release_notes = True
         await instance._handle_daily_job(job)
         self.assertNotIn("功能更新", body(self.messenger.attempts[0]))
 
@@ -240,13 +246,13 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_recipient_does_not_duplicate_successful_recipient(self):
         item = self.item("shared")
         instance, job, _ = self.setup_job([item])
-        self.store.add_subscription("chat_id", "team", source="test")
+        self.store.add_subscription("chat_id", "oc_team", source="test")
         deliver = self.messenger.deliver
         failed = False
 
         def deliver_once(part):
             nonlocal failed
-            if part.target_id == "team" and not failed:
+            if part.target_id == "oc_team" and not failed:
                 failed = True
                 raise ConnectionError("recipient unavailable")
             return deliver(part)
@@ -303,11 +309,11 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
         instance, job, _ = self.setup_job(items)
         # Use only the explicit group subscription for this test.
         self.store.remove_subscription("open_id", "ou_test")
-        self.store.add_subscription("chat_id", "team", source="test")
+        self.store.add_subscription("chat_id", "oc_team", source="test")
         await instance._handle_daily_job(job)
         part = self.store.outbox_items(job.key)[0]
         self.store.mark_outbox_sent(part.id, "remote-bundle")
-        msg = IncomingMessage("new", "team", "第二期详细说说", "group", "colleague",
+        msg = IncomingMessage("new", "oc_team", "第二期详细说说", "group", "colleague",
                               parent_message_id="remote-bundle")
         context = quoted_context(self.store, msg)
         self.assertEqual([e["title"] for e in context["episodes"]], ["first", "second"])
