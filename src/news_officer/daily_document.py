@@ -60,8 +60,10 @@ def descendant_payload(nodes, start):
 
 
 class DailyDocumentCompiler:
-    def __init__(self, store, api, writer, *, folder='', start_date='', root=None):
+    def __init__(self, store, api, writer, *, folder='', start_date='', root=None, audience_filter=None):
         self.store, self.api, self.writer = store, api, writer
+        # Re-validates frozen daily:recipients against the runtime allowlist.
+        self.audience_filter = audience_filter
         self.folder, self.start_date = folder, start_date
         self.root = root or store.path.parent / 'daily-shownotes'
 
@@ -95,6 +97,12 @@ class DailyDocumentCompiler:
         revision = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
         return revision, records, pending
 
+    def _audience(self, targets):
+        """Frozen targets that are still subscribed and still allowed to receive."""
+        active = set(self.store.list_subscriptions())
+        audience = [tuple(t) for t in targets if tuple(t) in active]
+        return list(self.audience_filter(audience)) if self.audience_filter else audience
+
     def enqueue_ready(self, today):
         day = date.fromisoformat(today)
         oldest = (day - timedelta(days=7)).isoformat()
@@ -102,13 +110,12 @@ class DailyDocumentCompiler:
         with self.store._connect() as db:
             jobs = db.execute("SELECT job_key FROM jobs WHERE kind='daily' AND analysis_complete=1 ORDER BY job_key").fetchall()
         count = 0
-        active = set(self.store.list_subscriptions())
         for row in jobs:
             match = re.fullmatch(r'daily:(\d{4}-\d{2}-\d{2})', row[0])
             if not match or not cutoff <= match[1] <= today:
                 continue
             targets = self.store.get_job_result(row[0], 'daily:recipients') or {}
-            audience = [t for t in targets.get('targets', []) if tuple(t) in active]
+            audience = self._audience(targets.get('targets', []))
             if not audience:
                 continue
             # Finish a frozen edition before appending its successor, even if
@@ -188,8 +195,7 @@ class DailyDocumentCompiler:
         day = job.payload['day']
         if date.fromisoformat(day).isoformat() != day:
             raise ValueError('Invalid edition date')
-        active = set(self.store.list_subscriptions())
-        targets = [t for t in job.payload['targets'] if tuple(t) in active]
+        targets = self._audience(job.payload['targets'])
         if not targets:
             return None
         bundle = self.store.get_job_result(job.key, 'document:content')

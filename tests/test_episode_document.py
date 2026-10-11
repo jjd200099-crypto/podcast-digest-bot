@@ -185,3 +185,52 @@ class SelectedDelivery(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DocumentAllowlist(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+
+    def audience(self, allowlist, require=False):
+        from types import SimpleNamespace
+
+        from test_reliability import runtime
+        owner = runtime(self.fixture.store, None, None)
+        owner.settings = SimpleNamespace(daily_chat_ids=allowlist, daily_require_chat_ids=require)
+        self.compiler.audience_filter = owner._document_audience
+        return owner
+
+    def freeze(self, targets):
+        f = self.fixture
+        for kind, target in targets:
+            f.store.add_subscription(kind, target)
+        f.store.save_job_result(f.base, 'daily:recipients', 'recipients', {'targets': [list(t) for t in targets]})
+
+    def test_frozen_old_open_id_is_revalidated_against_allowlist(self):
+        self.freeze([('open_id', 'ou_old'), ('chat_id', 'oc_test'), ('chat_id', 'oc_extra')])
+        self.audience(('oc_test',))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
+        job = self.fixture.store.claim_next('document')
+        self.assertEqual(job.payload['targets'], [['chat_id', 'oc_test']])
+        # A payload frozen before the allowlist is also filtered at publish time.
+        job.payload['targets'] = [['open_id', 'ou_old'], ['chat_id', 'oc_test']]
+        self.assertEqual(self.compiler._audience(job.payload['targets']), [('chat_id', 'oc_test')])
+
+    def test_no_allowlisted_audience_means_no_document_job_or_publish(self):
+        self.freeze([('open_id', 'ou_old'), ('chat_id', 'oc_test')])
+        self.audience(('oc_other',))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        job = Job('episode-documents:x', 'document', {'mode': 'selected_episodes', 'day': '2026-09-21',
+            'base_job': self.fixture.base, 'revision': 'r', 'targets': [['open_id', 'ou_old']]}, 1)
+        self.assertIsNone(self.compiler.publish(job))
+        self.assertEqual(self.fixture.api.creates, 0)
+
+    def test_required_but_empty_allowlist_blocks_documents(self):
+        self.freeze([('chat_id', 'oc_test')])
+        self.audience((), require=True)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+
+    def test_without_allowlist_documents_keep_subscription_behavior(self):
+        self.freeze([('chat_id', 'oc_test')])
+        self.audience(())
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)

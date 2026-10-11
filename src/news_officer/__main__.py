@@ -103,6 +103,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
             folder=settings.daily_document_folder, start_date=settings.daily_document_start_date,
             min_stars=settings.daily_document_min_stars,
             request_authorizer=research.allowed if research else None,
+            audience_filter=runtime._document_audience,
         )
         if research:
             research.document_compiler = runtime.document_compiler

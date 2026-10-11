@@ -78,15 +78,15 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             return retried
         if pending:
             return retried + int(self.store.enqueue(pending[0], 'document', json.loads(pending[1])))
-        active, count = set(self.store.list_subscriptions()), retried
+        count = retried
         for row in jobs:
             if self.store.get_job_result(row[0], 'daily:inline-documents') is not None:
                 continue
             match = re.fullmatch(r'daily:(\d{4}-\d{2}-\d{2})', row[0])
             if not match or not cutoff <= match[1] <= today:
                 continue
-            audience = [t for t in (self.store.get_job_result(row[0], 'daily:recipients') or {}).get('targets', [])
-                        if tuple(t) in active]
+            audience = self._audience(
+                (self.store.get_job_result(row[0], 'daily:recipients') or {}).get('targets', []))
             if not audience:
                 continue
             revision, selected, _ = self.snapshot(row[0])
@@ -116,8 +116,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         else:
             day = job.payload['day']
             date.fromisoformat(day)
-            active = set(self.store.list_subscriptions())
-            targets = [t for t in job.payload['targets'] if tuple(t) in active]
+            targets = self._audience(job.payload['targets'])
             revision, records, _ = self.snapshot(job.payload['base_job'])
         if not targets:
             return None
