@@ -94,9 +94,11 @@ class BackgroundWatchdogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_registers_and_cleans_up_background_deadlines(self):
         for kind, payload, budget in [('daily', {}, 2700), ('daily', {'prepare_only': True}, 900),
-                                      ('document', {}, 3600)]:
+                                      ('document', {}, 3600), ('daily', {'configured_budget': 5400}, 5400)]:
             with self.subTest(kind=kind, payload=payload):
                 runtime = object.__new__(NewsOfficerRuntime)
+                if payload.get('configured_budget'):
+                    runtime.settings = SimpleNamespace(daily_health_budget_seconds=payload['configured_budget'])
                 runtime.active_jobs, runtime.background_jobs = {}, {}
                 runtime.wake_workers = {kind: asyncio.Event()}
                 runtime.store = Mock()

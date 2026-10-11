@@ -124,6 +124,8 @@ uv run scripts/bootstrap_railway.py --project-id <project-id> --apply
 
 默认每天北京时间 08:30 扫描（默认值，可用 `NEWS_OFFICER_DAILY_TIME` 配置）；代码默认追踪窗口为 72 小时，24 小时运行窗口需显式配置 `NEWS_OFFICER_LOOKBACK_HOURS=24`。默认候选和摘要数量均为 0，表示不设数量上限；全文核验和编辑筛选继续生效。生产窗口须以实际环境变量核验。日报发送目标默认来自持久订阅表；若设置 `NEWS_OFFICER_DAILY_CHAT_IDS`（逗号分隔的 `oc_` 群 ID），则只发这些群，订阅表中的私聊 open_id 与其他群不会收到日报，也不会收到文档链接通知。设置 `NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS=true` 后，白名单为空或无有效 ID 时日报任务直接报错且不发送（不退回订阅表）。私聊问答白名单与日报收件人分别配置，详见 `docs/production-operations.md`。所有已检查节目、消息幂等键和任务状态都保存在 `/data/news-officer.sqlite3`。
 
+`NEWS_OFFICER_DAILY_HEALTH_BUDGET_SECONDS`：日报后台健康预算（正整数秒），默认 `2700`（45 分钟）；仅调整普通日报 worker 的健康截止，准备任务仍为 900 秒、文档任务仍为 3600 秒。
+
 本地运行：
 
 ```bash

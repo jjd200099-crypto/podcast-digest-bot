@@ -1051,7 +1051,9 @@ class NewsOfficerRuntime:
                     # Blocking tool threads cannot safely be cancelled and retried
                     # in-process. Let the existing process watchdog recover the
                     # durable job after a generous whole-job deadline instead.
-                    budget = 900 if job.payload.get('prepare_only') else 2700 if kind == 'daily' else 3600
+                    budget = (900 if job.payload.get('prepare_only') else
+                              getattr(getattr(self, 'settings', None), 'daily_health_budget_seconds', 2700)
+                              if kind == 'daily' else 3600)
                     self.background_jobs[job.key] = (time.monotonic(), budget)
                 if kind == "message":
                     await self._handle_message_job(job)

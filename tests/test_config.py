@@ -65,6 +65,14 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
                 self.assertEqual(Settings.from_env().daily_document_max_attempts, expected)
 
+    def test_daily_health_budget_defaults_override_and_invalid_fallback(self):
+        for value, expected in ((None, 2700), ('5400', 5400), ('0', 2700), ('bad', 2700)):
+            env = self.base_environment()
+            if value is not None:
+                env['NEWS_OFFICER_DAILY_HEALTH_BUDGET_SECONDS'] = value
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                self.assertEqual(Settings.from_env().daily_health_budget_seconds, expected)
+
     def base_environment(self):
         return {
             "FEISHU_APP_ID": "app-id",
