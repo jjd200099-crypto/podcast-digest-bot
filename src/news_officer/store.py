@@ -802,6 +802,11 @@ class Store:
             for row in rows
         ]
 
+    def outbox_created_at(self, item_id: int) -> str:
+        with self._connect() as connection:
+            return str(connection.execute(
+                'SELECT created_at FROM outbox WHERE id=?', (item_id,)).fetchone()[0])
+
     def mark_outbox_attempt(self, item_id: int) -> None:
         with self._connect() as connection:
             connection.execute(

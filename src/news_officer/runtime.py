@@ -371,9 +371,13 @@ class NewsOfficerRuntime:
                 continue
             await asyncio.to_thread(self.store.mark_outbox_attempt, item.id)
             try:
-                remote_message_id = await asyncio.to_thread(
-                    self.messenger.deliver, item
-                )
+                remote_message_id = ''
+                reconcile = getattr(self.messenger, 'reconcile_delivery', None)
+                if item.attempts and callable(reconcile):
+                    created_at = await asyncio.to_thread(self.store.outbox_created_at, item.id)
+                    remote_message_id = await asyncio.to_thread(reconcile, item, created_at)
+                if not remote_message_id:
+                    remote_message_id = await asyncio.to_thread(self.messenger.deliver, item)
                 if (job.kind == 'document'
                         and job.payload.get('mode') == 'daily_document_followup'
                         and not str(remote_message_id or '').strip()):
