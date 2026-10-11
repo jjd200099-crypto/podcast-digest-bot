@@ -234,3 +234,8 @@ class DocumentAllowlist(unittest.TestCase):
         self.freeze([('chat_id', 'oc_test')])
         self.audience(())
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
+
+    def test_allowlisted_chat_does_not_need_subscription_for_documents(self):
+        self.audience(('oc_new',))
+        self.assertNotIn(('chat_id', 'oc_new'), self.fixture.store.list_subscriptions())
+        self.assertEqual(self.compiler._audience([['chat_id', 'oc_new']]), [('chat_id', 'oc_new')])

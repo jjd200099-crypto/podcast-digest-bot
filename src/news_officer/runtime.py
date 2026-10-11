@@ -318,7 +318,8 @@ class NewsOfficerRuntime:
         targets = [(str(t[0]), str(t[1])) for t in targets]
         if self._daily_allowlist() or self._daily_require():
             return self._valid_daily_targets(targets)
-        return targets
+        active = set(self.store.list_subscriptions())
+        return [t for t in targets if t in active]
 
     def _has_daily_recipients(self) -> bool:
         try:

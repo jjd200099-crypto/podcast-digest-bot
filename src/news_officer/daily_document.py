@@ -99,9 +99,10 @@ class DailyDocumentCompiler:
 
     def _audience(self, targets):
         """Frozen targets that are still subscribed and still allowed to receive."""
+        if self.audience_filter:
+            return list(self.audience_filter(targets))
         active = set(self.store.list_subscriptions())
-        audience = [tuple(t) for t in targets if tuple(t) in active]
-        return list(self.audience_filter(audience)) if self.audience_filter else audience
+        return [tuple(t) for t in targets if tuple(t) in active]
 
     def enqueue_ready(self, today):
         day = date.fromisoformat(today)
