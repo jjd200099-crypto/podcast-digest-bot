@@ -58,6 +58,10 @@ class Store:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS episode_document_attempts (
+                    episode_id TEXT NOT NULL, revision TEXT NOT NULL, day TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
+                    PRIMARY KEY (episode_id, revision));
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_key TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,

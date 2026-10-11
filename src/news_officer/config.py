@@ -14,6 +14,14 @@ def _csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _positive_int(value: str, default: int) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _clock(value: str) -> time:
     try:
         hour, minute = (int(part) for part in value.split(":"))
@@ -71,6 +79,7 @@ class Settings:
     daily_document_start_date: str = ''
     daily_document_folder: str = ''
     daily_document_min_stars: int = 5
+    daily_document_max_attempts: int = 3
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -212,5 +221,7 @@ class Settings:
             daily_document_enabled=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT', 'false').lower() == 'true',
             daily_document_start_date=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_START_DATE', ''),
             daily_document_folder=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FOLDER', ''),
+            daily_document_max_attempts=_positive_int(
+                os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MAX_ATTEMPTS', '3'), 3),
             daily_document_min_stars=int(os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS', '5')),
         )

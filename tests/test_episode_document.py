@@ -18,7 +18,7 @@ class SelectedDocuments(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         f = self.fixture
-        self.compiler = SelectedEpisodeCompiler(f.store, f.api, f.writer, start_date='2026-09-21')
+        self.compiler = SelectedEpisodeCompiler(f.store, f.api, f.writer, start_date='2026-09-21', today=lambda: '2026-09-21')
         self.compiler.initialize()
         self.rate('one', 5)
         f.store.ensure_outbox(job_key=f.base, group_key='daily:bundle:test', delivery_key='daily-test',
@@ -328,3 +328,82 @@ class InlineFollowup(unittest.IsolatedAsyncioTestCase):
             {'mode': 'inline_daily_retry', 'base_job': f.base,
              'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1))
         self.assertEqual(messenger.delivered, [])
+
+
+class DocumentRetryLimits(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+    job = SelectedDocuments.job
+
+    def test_total_revision_budget_survives_revival_and_restart_and_warns(self):
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.operations import business_snapshot
+        f = self.fixture
+        f.writer.generate.side_effect = ValueError('deterministic invalid notes')
+        job = self.job()
+        for _ in range(3):
+            self.assertTrue(self.compiler.publish(job)['deferred'])
+        self.assertEqual(f.writer.generate.call_count, 3)
+        restarted = SelectedEpisodeCompiler(f.store, f.api, f.writer, today=lambda: '2026-09-21')
+        with self.assertRaises(DocumentRetryStopped):
+            restarted.publish(job)
+        self.assertEqual(restarted.enqueue_ready('2026-09-21'), 0)
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?', (job.key,)).fetchone()[0], 'failed')
+            row = db.execute('SELECT attempts,status FROM episode_document_attempts').fetchone()
+        self.assertEqual(tuple(row), (3, 'failed'))
+        self.assertIn('episode_document_retry_stopped:1', business_snapshot(f.store.path)['warnings'])
+        self.assertEqual(f.writer.generate.call_count, 3)
+
+    def test_next_day_stops_model_calls_and_reviving_inline_jobs(self):
+        from news_officer.episode_document import DocumentRetryStopped
+        f = self.fixture
+        f.writer.generate.side_effect = ValueError('invalid')
+        job = self.job()
+        self.compiler.publish(job)
+        payload = {'mode': 'inline_daily_retry', 'base_job': f.base,
+                   'scheduled_for': '2026-09-21T08:30:00+08:00'}
+        f.store.enqueue('inline', 'document', payload)
+        f.store.fail('inline', 'ValueError', 5, failed_daily_requeue_seconds=0)
+        self.compiler.today = lambda: '2026-09-22'
+        with self.assertRaises(DocumentRetryStopped):
+            self.compiler.publish(job)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-22', requested_only=True), 0)
+        self.assertEqual(f.writer.generate.call_count, 1)
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM episode_document_attempts').fetchone()[0], 'failed')
+
+    def test_new_transcript_revision_has_a_fresh_budget(self):
+        from news_officer.models import Transcript
+        from news_officer.shownotes import note_identity
+        f = self.fixture
+        f.writer.generate.side_effect = ValueError('invalid')
+        job = self.job()
+        for _ in range(3):
+            self.compiler.publish(job)
+        updated = f.store.save_verified_transcript(f.record.episode,
+            Transcript(f.record.transcript.text + ' revised', 'official', f.record.episode.url, True))
+        revision = self.compiler.snapshot(f.base)[0]
+        new = Job('new-revision', 'document', {**job.payload, 'revision': revision}, 1)
+        self.assertTrue(self.compiler.publish(new)['deferred'])
+        with f.store._connect() as db:
+            row = db.execute('SELECT attempts,status FROM episode_document_attempts WHERE revision=?',
+                             (note_identity(updated),)).fetchone()
+        self.assertEqual(tuple(row), (1, 'pending'))
+        self.assertEqual(f.writer.generate.call_count, 4)
+
+    def test_successful_siblings_do_not_revive_an_exhausted_episode(self):
+        f = self.fixture
+        f.add_episode('two')
+        self.rate('two', 5)
+        def generate(record):
+            if record.episode.id == 'one':
+                raise ValueError('invalid')
+            return fixtures.notes(record)
+        f.writer.generate.side_effect = generate
+        job = self.job()
+        for _ in range(3):
+            self.compiler.publish(job)
+        self.assertFalse(self.compiler.retry_available(job.payload, '2026-09-21'))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        self.assertEqual(f.writer.generate.call_count, 4)

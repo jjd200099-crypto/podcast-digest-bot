@@ -41,6 +41,8 @@ def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/S
             ((now - timedelta(hours=72)).isoformat(),),
         ).fetchone()[0]
         failed = db.execute("SELECT count(*) FROM jobs WHERE status='failed'").fetchone()[0]
+        document_failures = db.execute(
+            "SELECT count(*) FROM episode_document_attempts WHERE status='failed'").fetchone()[0]
         rows = db.execute(
             "SELECT payload_json FROM job_results WHERE job_key=? AND kind='daily_item'", (key,)
         ).fetchall()
@@ -57,6 +59,8 @@ def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/S
         _csv(os.environ.get("NEWS_OFFICER_DAILY_CHAT_IDS", "")),
         os.environ.get("NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS", "false").strip().lower() == "true",
         os.environ.get("NEWS_OFFICER_WATCH_CHAT_ID", "").strip())
+    if document_failures:
+        warnings.append(f'episode_document_retry_stopped:{document_failures}')
     overdue = subscribed and not complete and local >= scheduled + timedelta(minutes=45)
     state = ("not_subscribed" if not subscribed else "sent" if complete else "overdue" if overdue
              else "partial" if delivered else "processing" if job else "not_due" if local < scheduled else "pending")

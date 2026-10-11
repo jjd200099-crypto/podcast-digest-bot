@@ -140,7 +140,7 @@ python -m unittest discover -s tests -v
 
 ### 重点播客：一期一篇飞书精读
 
-设置 `NEWS_OFFICER_DAILY_DOCUMENT=true` 后，早间文字日报的内容、筛选范围和发送方式保持不变。默认阅读版在日报冻结前，从同一份日报清单选择 **五星“值得编译”的每一期**，分别编译成独立飞书文档，不生成每日合集。默认门槛为 `NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS=5`；没有符合条件的节目就不另发空通知。编译完成、写入回读和群阅读授权都通过后，文档链接随同一条日报发送，每期链接只出现一次，不另发自动通知；编译较慢会延后该日报。关闭阅读版时保留日报送达后编译并另发链接的兼容流程。`NEWS_OFFICER_DAILY_DOCUMENT_START_DATE=YYYY-MM-DD` 限定启用日期，最多回看最近七天；`NEWS_OFFICER_DAILY_DOCUMENT_FOLDER` 可配置机器人有写入权限的文件夹，留空则创建在机器人根目录。
+设置 `NEWS_OFFICER_DAILY_DOCUMENT=true` 后，早间文字日报的内容、筛选范围和发送方式保持不变。默认阅读版在日报冻结前，从同一份日报清单选择 **五星“值得编译”的每一期**，分别编译成独立飞书文档，不生成每日合集。默认门槛为 `NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS=5`；没有符合条件的节目就不另发空通知。编译完成、写入回读和群阅读授权都通过后，文档链接随同一条日报发送，每期链接只出现一次，不另发自动通知；编译失败时先发送日报，成功后同日最多补发一条仅含文档链接的消息。关闭阅读版时保留日报送达后编译并另发链接的兼容流程。`NEWS_OFFICER_DAILY_DOCUMENT_MAX_ATTEMPTS` 默认 `3`，为每个 episode 文档 revision 的总尝试轮数上限（每轮最多三次模型调用），非法值回退 `3`；日期翻篇后停止重试，达到上限标记 failed 并出现在 operations warnings，新 revision 重新计数。`NEWS_OFFICER_DAILY_DOCUMENT_START_DATE=YYYY-MM-DD` 限定启用日期，最多回看最近七天；`NEWS_OFFICER_DAILY_DOCUMENT_FOLDER` 可配置机器人有写入权限的文件夹，留空则创建在机器人根目录。
 
 每日任务和交互请求共同加载 `src/news_officer/prompts/podcast_shownotes.md`。这是用户提供的 `podcast-notes-feishu` 的章节笔记适配版，不声称完整执行版：保留原始英文标题、浅蓝信息框、6–9 条带时间戳核心论点、章节英文短引、中文要点和原生对比表，不附完整实录或整期翻译，不加编者评论。有节目说明章节时按其顺序，章节太多才合并为 8–12 章；没有官方章节时按话题分章，不强行凑数。引文必须逐字匹配，合计最多 25 个单词；时间戳定位到原稿发言，ASR 订正须有依据。输入必须是已核验全文，不用简介补写。自动任务继续使用现有官方全文/RSS/Podwise 取稿链路，不依赖用户电脑上的浏览器。
 

@@ -21,6 +21,7 @@ from lark_channel import (
 
 from .config import Settings
 from .daily_report import coverage_report
+from .episode_document import DocumentRetryStopped
 from .daily_targets import allowlist_warnings, filter_daily_targets, valid_allowlist
 from .feishu import (
     FeishuMessenger,
@@ -1037,9 +1038,10 @@ class NewsOfficerRuntime:
                 logger.error("Job %s failed: %s", job.key, type(error).__name__,
                              exc_info=(RuntimeError, safe_error, error.__traceback__))
                 if not isinstance(error, ResearchContinuationPending) or job.attempts >= 5:
-                    await self._failure_notice(job, terminal=job.attempts >= 5)
+                    await self._failure_notice(job, terminal=job.attempts >= 5 or isinstance(error, DocumentRetryStopped))
                 await asyncio.to_thread(
-                    self.store.fail, job.key, type(error).__name__, job.attempts
+                    self.store.fail, job.key, type(error).__name__, job.attempts,
+                    **({'max_attempts': 1} if isinstance(error, DocumentRetryStopped) else {})
                 )
             else:
                 await asyncio.to_thread(self.store.complete, job.key)
@@ -1112,6 +1114,8 @@ class NewsOfficerRuntime:
             await asyncio.to_thread(self._inline_daily_documents, base,
                                     datetime.fromisoformat(job.payload['scheduled_for']))
             if self.store.get_job_result(base.key, 'daily:inline-documents') is None:
+                if not self.document_compiler.retry_available(job.payload, self.document_compiler.today()):
+                    raise DocumentRetryStopped('Daily documents exhausted retry budget or deadline')
                 raise RuntimeError('Daily documents pending retry')
             documents = self.store.get_job_result(base.key, 'daily:inline-documents')['documents']
             if documents:
@@ -1155,6 +1159,8 @@ class NewsOfficerRuntime:
                     reply_in_thread=False, parts=combined_delivery_parts(content, key))
         await self._drain_outbox(job)
         if result and result.get('deferred'):
+            if not self.document_compiler.retry_available(job.payload, self.document_compiler.today()):
+                raise DocumentRetryStopped('Episode documents exhausted retry budget or deadline')
             raise ValueError('Some episode documents failed validation; retry required')
 
     async def _library_archiver(self) -> None:

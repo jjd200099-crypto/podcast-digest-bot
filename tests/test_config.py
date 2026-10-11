@@ -45,6 +45,14 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.daily_require_chat_ids)
         self.assertEqual(settings.daily_time.strftime('%H:%M'), '08:00')
 
+    def test_document_max_attempts_default_override_and_invalid_fallback(self):
+        for value, expected in ((None, 3), ('2', 2), ('0', 3), ('-1', 3), ('bad', 3), ('', 3)):
+            env = self.base_environment()
+            if value is not None:
+                env['NEWS_OFFICER_DAILY_DOCUMENT_MAX_ATTEMPTS'] = value
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                self.assertEqual(Settings.from_env().daily_document_max_attempts, expected)
+
     def base_environment(self):
         return {
             "FEISHU_APP_ID": "app-id",

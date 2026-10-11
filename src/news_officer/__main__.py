@@ -102,6 +102,7 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
             store, FeishuLibraryAPI(messenger), ShownotesWriter(summarizer.client, settings.openai_model),
             folder=settings.daily_document_folder, start_date=settings.daily_document_start_date,
             min_stars=settings.daily_document_min_stars,
+            max_attempts=settings.daily_document_max_attempts, timezone=settings.timezone,
             request_authorizer=research.allowed if research else None,
             audience_filter=runtime._document_audience,
         )
