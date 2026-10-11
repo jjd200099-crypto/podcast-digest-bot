@@ -615,7 +615,10 @@ class BackoffRecoveryCaps(unittest.TestCase):
     def test_cross_day_failed_recovery_after_six_day_window_never_calls_model(self):
         from unittest.mock import Mock
 
-        from news_officer.daily_enrichment import enqueue_enrichment
+        from news_officer.daily_enrichment import (
+            document_recovery_jobs,
+            enqueue_enrichment,
+        )
         from news_officer.operations import business_snapshot
         from news_officer.shownotes import ShownotesWriter
         f = self.fixture
@@ -639,12 +642,18 @@ class BackoffRecoveryCaps(unittest.TestCase):
         client = Mock()
         self.compiler.writer = ShownotesWriter(client, 'test-model')
         self.compiler.today = lambda: '2026-10-01'
+        # Terminal failed jobs never enter the hourly revival scan.
+        self.assertEqual(document_recovery_jobs(f.store, '2026-10-01', 3), [])
+        self.compiler.retry_available = Mock(wraps=self.compiler.retry_available)
         # Even callers without a compiler must reject documents past their day.
         self.assertEqual(enqueue_enrichment(f.store, '2026-10-01'), 0)
         self.assertIsNone(f.store.claim_next('document'))
         self.assertEqual(enqueue_enrichment(f.store, '2026-10-01', compiler=self.compiler), 0)
         client.responses.parse.assert_not_called()
+        self.compiler.retry_available.assert_not_called()
         with f.store._connect() as db:
             self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?',
                                         (job.key,)).fetchone()[0], 'failed')
-        self.assertIn('episode_document_retry_stopped:1', business_snapshot(f.store.path)['warnings'])
+        self.assertTrue(any('document link missing:episode=' in warning
+                            and 'day=2026-09-21' in warning
+                            for warning in business_snapshot(f.store.path)['warnings']))

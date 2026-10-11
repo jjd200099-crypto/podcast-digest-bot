@@ -28,8 +28,21 @@ def enrichment_bundle(store, key):
     return matches[0] if matches else None
 
 
+def document_recovery_jobs(store, today, max_attempts):
+    """Exclude terminal failed episodes before the hourly revival scan."""
+    with store._connect() as db:
+        return db.execute(
+            "SELECT job_key,payload_json FROM jobs WHERE kind='document' "
+            "AND json_extract(payload_json,'$.mode')='daily_episode' "
+            "AND status!='completed' AND (status!='failed' OR (attempts<? "
+            "AND json_extract(payload_json,'$.day')=? "
+            "AND last_error!='DocumentRetryStopped'))", (max_attempts, today)).fetchall()
+
+
 def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
     """Resume each episode separately, only after the original send succeeded."""
+    max_attempts = compiler.max_attempts if compiler else 3
+    recovery = {row['job_key'] for row in document_recovery_jobs(store, today, max_attempts)}
     cutoff = (date.fromisoformat(today) - timedelta(days=6)).isoformat()
     with store._connect() as db:
         rows = db.execute("SELECT DISTINCT r.job_key FROM job_results r JOIN jobs j "
@@ -38,10 +51,12 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
                           "AND json_extract(r.payload_json,'$.enrichment.version')=1 "
                           "AND (json_extract(r.payload_json,'$.enrichment.day') BETWEEN ? AND ? "
                           "OR EXISTS (SELECT 1 FROM jobs d WHERE d.kind='document' "
-                          "AND d.status IN ('pending','processing','failed') "
+                          "AND (d.status IN ('pending','processing') OR (d.status='failed' "
+                          "AND d.attempts<? AND json_extract(d.payload_json,'$.day')=? "
+                          "AND d.last_error!='DocumentRetryStopped')) "
                           "AND json_extract(d.payload_json,'$.base_job')=r.job_key "
                           "AND json_extract(d.payload_json,'$.mode')='daily_episode'))",
-                          (cutoff, today)).fetchall()
+                          (cutoff, today, max_attempts, today)).fetchall()
     count = 0
     for row in rows:
         base = row[0]
@@ -62,7 +77,7 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
                 f'{base}:{episode_id}:{item.attachment.record_revision_sha256}'.encode()).hexdigest()[:28]
             with store._connect() as db:
                 existing = db.execute('SELECT status FROM jobs WHERE job_key=?', (key,)).fetchone()
-            if existing and existing[0] == 'completed':
+            if existing and key not in recovery:
                 continue
             payload = {
                 'mode': 'daily_episode', 'day': bundle['enrichment']['day'],
@@ -76,7 +91,7 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
                 store.fail(key, 'DocumentRetryStopped', 1, max_attempts=1)
                 continue
             count += store.enqueue(key, 'document', payload,
-                document_max_attempts=compiler.max_attempts if compiler else 3)
+                document_max_attempts=max_attempts)
         count += enqueue_followup(store, base, today, audience_filter=audience_filter)
     return count
 

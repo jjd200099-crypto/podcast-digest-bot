@@ -1,13 +1,15 @@
 import copy
 import json
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import test_reader_daily as fixtures
 
 from news_officer.daily_enrichment import (
     _content,
+    document_recovery_jobs,
     enqueue_enrichment,
     enrichment_bundle,
     normalized_content,
@@ -303,7 +305,9 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         instance._main_loop = None
         return compiler
 
-    async def test_real_shownotes_failure_preserves_body_and_successful_sibling(self):
+    @patch('news_officer.runtime.datetime', wraps=datetime)
+    async def test_real_shownotes_failure_preserves_body_and_successful_sibling(self, clock):
+        clock.now.return_value = datetime.fromisoformat('2026-10-11T09:00:00+08:00')
         from test_daily_document import notes
 
         from news_officer.daily_enrichment import enqueue_followup
@@ -401,7 +405,9 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute("SELECT count(*) FROM episode_document_attempts WHERE status='failed'").fetchone()[0], 2)
         self.assertIn('episode_document_retry_stopped:2', business_snapshot(self.store.path)['warnings'])
 
-    async def test_allowlist_overrides_subscription_for_enqueue_edit_and_followup(self):
+    @patch('news_officer.runtime.datetime', wraps=datetime)
+    async def test_allowlist_overrides_subscription_for_enqueue_edit_and_followup(self, clock):
+        clock.now.return_value = datetime.fromisoformat('2026-10-11T09:00:00+08:00')
         from news_officer.daily_enrichment import enqueue_followup
         instance, job, _ = self.setup_job([self.item('one', 5)], key='daily:2026-10-11',
             payload={'scheduled_for': '2026-10-11T08:30:00+08:00'})
@@ -480,3 +486,41 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         with self.store._connect() as db:
             self.assertEqual(tuple(db.execute('SELECT attempts,status FROM jobs WHERE job_key=?',
                                               (first.key,)).fetchone()), (2, 'failed'))
+
+    async def test_recovery_scan_excludes_exhausted_and_old_failed_jobs(self):
+        instance, _ = await self.prepare()
+        compiler = self.compiler(instance)
+        compiler.max_attempts = 2
+        enqueue_enrichment(self.store, '2026-10-11', compiler=compiler)
+        first = self.store.claim_next('document')
+        second = self.store.claim_next('document')
+        self.store.fail(first.key, 'outage', first.attempts, max_attempts=1,
+                        failed_daily_requeue_seconds=0)
+        self.store.fail(second.key, 'outage', second.attempts, max_attempts=1,
+                        failed_daily_requeue_seconds=0)
+        with self.store._connect() as db:
+            db.execute('UPDATE jobs SET attempts=2 WHERE job_key=?', (first.key,))
+        self.assertEqual([row['job_key'] for row in
+                          document_recovery_jobs(self.store, '2026-10-11', 2)], [second.key])
+        compiler.retry_available = Mock(wraps=compiler.retry_available)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11', compiler=compiler), 1)
+        self.assertEqual(compiler.retry_available.call_count, 1)
+        self.assertEqual(self.store.claim_next('document').key, second.key)
+        self.store.fail(second.key, 'outage', 2, max_attempts=1, failed_daily_requeue_seconds=0)
+        self.assertEqual(document_recovery_jobs(self.store, '2026-10-12', 3), [])
+        compiler.retry_available.reset_mock()
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-12', compiler=compiler), 0)
+        compiler.retry_available.assert_not_called()
+        from news_officer.operations import business_snapshot
+        self.assertTrue(any('document link missing:episode=' in warning
+                            for warning in business_snapshot(self.store.path)['warnings']))
+
+    async def test_revision_stopped_jobs_are_excluded_even_below_job_attempt_cap(self):
+        instance, _ = await self.prepare()
+        compiler = self.compiler(instance)
+        enqueue_enrichment(self.store, '2026-10-11', compiler=compiler)
+        first = self.store.claim_next('document')
+        self.store.fail(first.key, 'DocumentRetryStopped', first.attempts, max_attempts=1,
+                        failed_daily_requeue_seconds=0)
+        self.assertNotIn(first.key, [row['job_key'] for row in
+                                    document_recovery_jobs(self.store, '2026-10-11', 3)])
