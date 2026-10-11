@@ -172,6 +172,8 @@ def _update_target(store, api, base, bundle, ready, delivery, audience_filter):
         # Feishu allows 20 edits. Reserve the last slot for all remaining
         # documents rather than consuming it on another partial update.
         if len(intents) >= 19 and set(documents) != set(bundle['enrichment']['eligible']):
+            record_warning(store, base, 'daily_enrichment_edit_budget_exhausted',
+                           bundle['enrichment']['day'], used=len(intents), limit=20)
             return
         identity = hashlib.sha256((row['remote_message_id'] + content).encode()).hexdigest()
         existing = store.get_job_result(base, 'daily:edit:' + identity)

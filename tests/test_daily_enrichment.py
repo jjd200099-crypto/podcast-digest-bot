@@ -123,6 +123,25 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         job = self.store.claim_next('document')
         self.assertEqual([d['target'] for d in job.payload['deliveries']], [['open_id', 'ou_test']])
 
+    async def test_reserved_edit_budget_warns_without_put(self):
+        from news_officer.operations import business_snapshot
+        _, base = await self.prepare()
+        self.ready(base.key, 'one')
+        for number in range(19):
+            self.store.save_job_result(base.key, f'intent:{number}', 'daily_edit_intent', {
+                'message_id': 'om_original', 'msg_type': 'post', 'content': self.original})
+        update_daily_message(self.store, self.api, base.key)
+        update_daily_message(self.store, self.api, base.key)
+        self.assertEqual(self.api.puts, [])
+        self.assertEqual(self.store.list_job_results(base.key, 'daily_edit_receipt'), [])
+        warnings = business_snapshot(self.store.path)['warnings']
+        self.assertEqual(sum('daily_enrichment_edit_budget_exhausted:day=2026-10-11:used=19/20' == w for w in warnings), 1)
+        self.assertNotIn('om_original', str(warnings))
+        # The reserved final edit remains available for the complete document set.
+        self.ready(base.key, 'two')
+        update_daily_message(self.store, self.api, base.key)
+        self.assertEqual(len(self.api.puts), 1)
+
     async def test_old_frozen_template_uses_current_label_without_mutating_archive(self):
         _, base = await self.prepare()
         bundle = enrichment_bundle(self.store, base.key)
