@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import _clock, _csv
+from .daily_targets import allowlist_warnings
 
 
 def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/Shanghai") -> dict:
@@ -52,12 +53,17 @@ def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/S
                           "summary_format_error", "discovery_status", "unverified_date", "failed", "outside_window"}:
             status = "other"
         counts[status] = counts.get(status, 0) + 1
+    warnings = allowlist_warnings(
+        _csv(os.environ.get("NEWS_OFFICER_DAILY_CHAT_IDS", "")),
+        os.environ.get("NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS", "false").strip().lower() == "true",
+        os.environ.get("NEWS_OFFICER_WATCH_CHAT_ID", "").strip())
     overdue = subscribed and not complete and local >= scheduled + timedelta(minutes=45)
     state = ("not_subscribed" if not subscribed else "sent" if complete else "overdue" if overdue
              else "partial" if delivered else "processing" if job else "not_due" if local < scheduled else "pending")
     return {"date": str(local.date()), "daily_state": state, "daily_overdue": overdue,
             "last_daily_send_at": last, "daily_counts": counts, "transcripts_pending": pending,
-            "transcripts_pending_over_72h": old, "failed_jobs": failed}
+            "transcripts_pending_over_72h": old, "failed_jobs": failed,
+            "warnings": warnings}
 
 
 def main():

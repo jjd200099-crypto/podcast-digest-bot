@@ -32,14 +32,17 @@ class SettingsTests(unittest.TestCase):
             settings = Settings.from_env()
         self.assertEqual(settings.daily_chat_ids, ())
         self.assertFalse(settings.daily_release_notes)
+        self.assertFalse(settings.daily_require_chat_ids)
         self.assertEqual(settings.daily_time.strftime('%H:%M'), '08:30')
         with patch.dict(os.environ, {**self.base_environment(),
                 'NEWS_OFFICER_DAILY_CHAT_IDS': ' oc_one, oc_two ,',
                 'NEWS_OFFICER_DAILY_RELEASE_NOTES': 'true',
+                'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS': 'True',
                 'NEWS_OFFICER_DAILY_TIME': '08:00'}, clear=True):
             settings = Settings.from_env()
         self.assertEqual(settings.daily_chat_ids, ('oc_one', 'oc_two'))
         self.assertTrue(settings.daily_release_notes)
+        self.assertTrue(settings.daily_require_chat_ids)
         self.assertEqual(settings.daily_time.strftime('%H:%M'), '08:00')
 
     def base_environment(self):

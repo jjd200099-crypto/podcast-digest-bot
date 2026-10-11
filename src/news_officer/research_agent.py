@@ -421,7 +421,7 @@ class ResearchTools:
         if name == "get_delivery_health":
             from .operations import business_snapshot
             return business_snapshot(self.agent.store.path,
-                daily_time=getattr(self.agent, 'daily_time', '08:30'),
+                daily_time=getattr(self.agent, 'daily_time', None),  # None: follow NEWS_OFFICER_DAILY_TIME
                 timezone=getattr(self.agent, 'timezone', 'Asia/Shanghai'))
         if name == "record_editorial_feedback":
             feedback, scope = args['feedback'].strip(), args['scope']

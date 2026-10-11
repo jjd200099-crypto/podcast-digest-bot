@@ -80,6 +80,76 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({(i.target_type, i.target_id) for i in self.messenger.attempts},
                          {('open_id', 'ou_test'), ('chat_id', 'oc_other')})
 
+    async def test_required_allowlist_fails_closed_without_sending(self):
+        for allowlist in ((), ('bad', 'ou_private', 'oc_bad space')):
+            instance, job, podcast = self.setup_job([self.item('selected')], key=f'daily:req-{len(allowlist)}')
+            instance.settings.daily_chat_ids = allowlist
+            instance.settings.daily_require_chat_ids = True
+            with self.assertRaisesRegex(RuntimeError, 'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS'):
+                await instance._handle_daily_job(job)
+            self.assertEqual(self.messenger.attempts, [])
+            self.assertEqual(self.store.outbox_items(job.key), [])
+            self.assertIsNone(self.store.get_job_result(job.key, 'daily:recipients'))
+            self.assertEqual(podcast.calls, 0)
+            with self.assertRaises(RuntimeError):
+                instance._daily_targets(job)
+            # The scheduler must not crash; the job itself fails loudly instead.
+            self.assertTrue(instance._has_daily_recipients())
+            self.assertEqual(instance._valid_daily_targets([('open_id', 'ou_test')]), [])
+        # A prepare-only warm-up fails too instead of silently spending capacity.
+        instance, job, _ = self.setup_job([], key='daily:prepare:req', payload={
+            'prepare_only': True, 'scheduled_for': '2099-01-01T08:30:00+08:00'})
+        instance.settings.daily_chat_ids = ()
+        instance.settings.daily_require_chat_ids = True
+        with self.assertRaises(RuntimeError):
+            await instance._handle_daily_job(job)
+
+    async def test_required_allowlist_with_valid_id_sends_only_to_it(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance.settings.daily_chat_ids = ('oc_good',)
+        instance.settings.daily_require_chat_ids = True
+        await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
+
+    async def test_require_flag_defaults_off_so_unset_allowlist_still_delivers(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        self.assertFalse(getattr(instance.settings, 'daily_require_chat_ids', False))
+        await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('open_id', 'ou_test')])
+
+    async def test_subscription_fallback_warns_once_per_job(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            instance._daily_candidates(job)
+            instance._daily_candidates(job)
+        warnings = [line for line in logs.output if 'NEWS_OFFICER_DAILY_CHAT_IDS is not set' in line]
+        self.assertEqual(len(warnings), 1)
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            instance._daily_candidates(Job('daily:other', 'daily', {}, 1))
+        self.assertEqual(sum('is not set' in line for line in logs.output), 1)
+        instance.settings.daily_chat_ids = ('oc_good',)
+        with self.assertNoLogs('news_officer.runtime', level='WARNING'):
+            instance._daily_candidates(Job('daily:third', 'daily', {}, 1))
+
+    async def test_private_subscription_entries_never_receive_with_allowlist(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        # Same writes as FEISHU_USER_OPEN_IDS seeding and the private 'subscribe' command.
+        self.store.seed_subscriptions(('ou_seed',), ('oc_seeded_group',))
+        self.store.add_subscription('open_id', 'ou_command', source='command')
+        instance.settings.daily_chat_ids = ('oc_good',)
+        # A snapshot frozen before the allowlist existed still names old open_ids.
+        self.store.save_job_result(job.key, 'daily:recipients', 'delivery_targets', {'targets': [
+            ['open_id', 'ou_test'], ['open_id', 'ou_old'], ['chat_id', 'oc_seeded_group'],
+            ['chat_id', 'oc_good']]})
+        await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
+        self.assertEqual([(i.target_type, i.target_id) for i in self.store.outbox_items(job.key)],
+                         [('chat_id', 'oc_good')])
+        self.assertEqual(instance._daily_targets(job), [('chat_id', 'oc_good')])
+
     async def test_allowlist_blocks_previously_frozen_private_outbox(self):
         instance, job, _ = self.setup_job([self.item('selected')])
         instance._persist_daily_items(job, [self.item('selected')])

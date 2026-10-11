@@ -42,6 +42,7 @@ class Settings:
     manual_digest_id: str
     daily_chat_ids: tuple[str, ...] = ()
     daily_release_notes: bool = False
+    daily_require_chat_ids: bool = False
     research_agent_enabled: bool = False
     library_folder_token: str = ""
     research_user_open_ids: tuple[str, ...] = ()
@@ -175,6 +176,7 @@ class Settings:
             daily_time=_clock(os.environ.get("NEWS_OFFICER_DAILY_TIME", "08:30")),
             daily_chat_ids=_csv(os.environ.get("NEWS_OFFICER_DAILY_CHAT_IDS", "")),
             daily_release_notes=os.environ.get("NEWS_OFFICER_DAILY_RELEASE_NOTES", "false").lower() == "true",
+            daily_require_chat_ids=os.environ.get("NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS", "false").strip().lower() == "true",
             user_open_ids=user_ids,
             group_chat_ids=_csv(os.environ.get("FEISHU_GROUP_CHAT_IDS", "")),
             max_daily_summaries=max(

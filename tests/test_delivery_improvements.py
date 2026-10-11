@@ -41,6 +41,23 @@ class DeliveryImprovements(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_test'}):
             self.assertNotEqual(business_snapshot(self.store.path, now=now)['daily_state'], 'not_subscribed')
 
+    def test_operations_status_surfaces_allowlist_warnings(self):
+        self.store.add_subscription('chat_id', 'oc_test')
+        now = self.now + timedelta(minutes=16)
+        env = {k: v for k, v in os.environ.items() if not k.startswith('NEWS_OFFICER_')}
+        with patch.dict(os.environ, env, clear=True):
+            warnings = business_snapshot(self.store.path, now=now)['warnings']
+            self.assertEqual([w.split(':')[0] for w in warnings], ['daily_allowlist_unset'])
+        with patch.dict(os.environ, {**env, 'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_test'}, clear=True):
+            self.assertEqual(business_snapshot(self.store.path, now=now)['warnings'], [])
+        with patch.dict(os.environ, {**env, 'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS': 'true'}, clear=True):
+            warnings = business_snapshot(self.store.path, now=now)['warnings']
+            self.assertEqual([w.split(':')[0] for w in warnings], ['daily_allowlist_required_but_missing'])
+        with patch.dict(os.environ, {**env, 'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_test',
+                                     'NEWS_OFFICER_WATCH_CHAT_ID': 'oc_other'}, clear=True):
+            warnings = business_snapshot(self.store.path, now=now)['warnings']
+            self.assertEqual([w.split(':')[0] for w in warnings], ['watch_chat_not_in_daily_allowlist'])
+
     def service(self):
         resolver = Mock()
         resolver.fetch.return_value = Transcript('Verified interview content.', 'official', self.episode.url, True)

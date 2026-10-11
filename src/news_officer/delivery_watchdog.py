@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -15,7 +16,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .config import _clock
+from .config import _clock, _csv
+from .daily_targets import allowlist_warnings
 
 BASE = 'https://open.feishu.cn/open-apis'
 ZONE = ZoneInfo('Asia/Shanghai')
@@ -139,6 +141,14 @@ def run_check(app_id, secret, chat_id, owner_id='', *, day=None, now=None, notif
     return result
 
 
+def config_warnings():
+    """Non-fatal allowlist warnings from the same settings the daily uses."""
+    return allowlist_warnings(
+        _csv(os.getenv('NEWS_OFFICER_DAILY_CHAT_IDS', '')),
+        os.getenv('NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS', 'false').strip().lower() == 'true',
+        os.getenv('NEWS_OFFICER_WATCH_CHAT_ID', '').strip())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--notify', action='store_true')
@@ -153,6 +163,10 @@ def main():
         result = run_check(*values, day=date.fromisoformat(requested) if requested else None, notify=args.notify)
     except ValueError:
         result = {'status': 'check_failed', 'error': 'Invalid date or historical alert requested'}
+    result['warnings'] = config_warnings()
+    for warning in result['warnings']:
+        # Annotation only: never changes the exit code or the alert decision.
+        print(f'::warning title=Daily allowlist::{warning}', file=sys.stderr)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result['status'] in {'delivered', 'not_due'} else 1
 

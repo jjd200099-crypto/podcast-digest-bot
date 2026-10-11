@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta
@@ -22,6 +21,7 @@ from lark_channel import (
 
 from .config import Settings
 from .daily_report import coverage_report
+from .daily_targets import filter_daily_targets, valid_allowlist
 from .feishu import (
     FeishuMessenger,
     combined_delivery_parts,
@@ -278,33 +278,64 @@ class NewsOfficerRuntime:
             return ""
         return str(canonical["file_key"])
 
-    def _daily_candidates(self) -> list[tuple[str, str]]:
-        chats = getattr(getattr(self, "settings", None), "daily_chat_ids", ())
-        return ([('chat_id', chat) for chat in dict.fromkeys(chats)]
-                if chats else self.store.list_subscriptions())
+    def _daily_allowlist(self) -> tuple[str, ...]:
+        return tuple(getattr(getattr(self, "settings", None), "daily_chat_ids", ()) or ())
+
+    def _daily_require(self) -> bool:
+        return bool(getattr(getattr(self, "settings", None), "daily_require_chat_ids", False))
+
+    def _require_daily_allowlist(self) -> None:
+        """Fail loudly (no send) when a required allowlist is missing/invalid."""
+        if self._daily_require() and not valid_allowlist(self._daily_allowlist()):
+            raise RuntimeError(
+                "NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS is true but NEWS_OFFICER_DAILY_CHAT_IDS "
+                "is empty or has no valid oc_ chat ids; refusing to send the daily"
+            )
+
+    def _daily_candidates(self, job: Job | None = None) -> list[tuple[str, str]]:
+        chats = self._daily_allowlist()
+        if chats:
+            return [('chat_id', chat) for chat in dict.fromkeys(chats)]
+        self._require_daily_allowlist()
+        if job is not None:
+            warned = self.__dict__.setdefault("_daily_fallback_warned", set())
+            if job.key not in warned:
+                warned.add(job.key)
+                logger.warning(
+                    "NEWS_OFFICER_DAILY_CHAT_IDS is not set; daily %s falls back to all active "
+                    "subscriptions. Set it and NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS=true to fail closed.",
+                    job.key)
+        return self.store.list_subscriptions()
 
     def _valid_daily_targets(self, targets) -> list[tuple[str, str]]:
-        valid = []
-        chats = getattr(getattr(self, "settings", None), "daily_chat_ids", ())
-        for kind, target in targets:
-            prefix = {"chat_id": "oc_", "open_id": "ou_"}.get(kind)
-            if not prefix or not re.fullmatch(prefix + r"[A-Za-z0-9_-]{1,125}", target):
-                logger.warning("Skipping daily recipient with invalid ID format (type=%s)", kind)
-                continue
-            if chats and (kind != "chat_id" or target not in chats):
-                continue
-            valid.append((kind, target))
-        return valid
+        return filter_daily_targets(
+            targets, self._daily_allowlist(), require=self._daily_require(),
+            on_invalid=lambda kind: logger.warning(
+                "Skipping daily recipient with invalid ID format (type=%s)", kind))
+
+    def _document_audience(self, targets) -> list[tuple[str, str]]:
+        """Document-link audience: re-validate against the allowlist when one is enforced."""
+        targets = [(str(t[0]), str(t[1])) for t in targets]
+        if self._daily_allowlist() or self._daily_require():
+            return self._valid_daily_targets(targets)
+        return targets
 
     def _has_daily_recipients(self) -> bool:
-        return bool(self._valid_daily_targets(self._daily_candidates()))
+        try:
+            self._require_daily_allowlist()
+            return bool(self._valid_daily_targets(self._daily_candidates()))
+        except RuntimeError:
+            # Let the daily job itself fail loudly instead of crashing the
+            # scheduler (and every other worker) on a configuration error.
+            return True
 
     def _daily_targets(self, job: Job) -> list[tuple[str, str]]:
         """Freeze one DB-backed recipient snapshot for the whole daily job."""
 
+        self._require_daily_allowlist()
         persisted = self.store.get_job_result(job.key, "daily:recipients")
         if persisted is None:
-            targets = self._valid_daily_targets(self._daily_candidates())
+            targets = self._valid_daily_targets(self._daily_candidates(job))
             persisted = self.store.save_job_result(
                 job.key,
                 "daily:recipients",
@@ -768,6 +799,7 @@ class NewsOfficerRuntime:
                 self.store.complete_daily_transcript(item.episode.id)
 
     async def _handle_daily_job(self, job: Job) -> None:
+        self._require_daily_allowlist()
         reader_mode = getattr(getattr(self, 'settings', None), 'daily_reader_mode', False) and self._combined_daily(job)
         if reader_mode and job.payload.get('transcript_catchup'):
             # Keep backlog rows intact; the scheduled edition will retry them.
@@ -929,10 +961,11 @@ class NewsOfficerRuntime:
                         await self._drain_outbox(job)
                     return
                 active = set(self.store.list_subscriptions())
+                audience = set(self._document_audience(job.payload['targets']))
                 content = (f"{job.payload['day']} 的播客精读文档暂未编译完成，云端会继续重试。"
                            "短版日报与聊天问答不受影响；尚未完成的文档不会作为成品推送。")
                 for kind, target in job.payload['targets']:
-                    if (kind, target) not in active:
+                    if (kind, target) not in active or (kind, target) not in audience:
                         continue
                     key = f"{job.key}:document-delayed:{kind}:{target}"
                     self.store.ensure_outbox(job_key=job.key, group_key='document:delayed',
@@ -1104,7 +1137,8 @@ class NewsOfficerRuntime:
                 if encoded != previous:
                     # Business failure must alert operators, not restart the
                     # worker mid-analysis and repeatedly lose progress.
-                    log = logger.error if state["daily_overdue"] else logger.info
+                    log = (logger.error if state["daily_overdue"]
+                           else logger.warning if state.get("warnings") else logger.info)
                     log("Business delivery status: %s", encoded)
                     previous = encoded
             except Exception as error:  # noqa: BLE001 - monitoring must not kill delivery

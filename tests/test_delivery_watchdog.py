@@ -1,13 +1,17 @@
+import io
 import json
 import os
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, date, datetime
 from unittest.mock import Mock, patch
 
 from news_officer.delivery_watchdog import (
     CheckError,
     check_receipt,
+    config_warnings,
     is_daily_receipt,
+    main,
     run_check,
 )
 
@@ -91,3 +95,30 @@ class WatchdogTests(unittest.TestCase):
             result = run_check('bot', 'secret', 'chat', 'owner', now=self.now, notify=True)
             self.assertEqual(result['status'], 'check_failed')
             self.assertFalse(result['alert_sent'])
+
+    def run_main(self, extra):
+        env = {'FEISHU_APP_ID': 'cli_bot', 'FEISHU_APP_SECRET': 'hidden', 'NEWS_OFFICER_WATCH_CHAT_ID': 'oc_watch'}
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, {**env, **extra}, clear=True), \
+                patch('news_officer.delivery_watchdog.run_check',
+                      return_value={'status': 'delivered', 'alert_sent': False}), \
+                redirect_stdout(out), redirect_stderr(err), patch('sys.argv', ['watchdog']):
+            code = main()
+        return code, json.loads(out.getvalue()), err.getvalue()
+
+    def test_unset_allowlist_is_reported_as_non_fatal_warning(self):
+        code, result, err = self.run_main({})
+        self.assertEqual(code, 0)
+        self.assertEqual(result['status'], 'delivered')
+        self.assertEqual(len(result['warnings']), 1)
+        self.assertTrue(result['warnings'][0].startswith('daily_allowlist_unset'))
+        self.assertIn('::warning title=Daily allowlist::daily_allowlist_unset', err)
+
+    def test_configured_allowlist_has_no_warning_and_mismatch_is_flagged(self):
+        code, result, err = self.run_main({'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_watch'})
+        self.assertEqual((code, result['warnings'], err), (0, [], ''))
+        code, result, _ = self.run_main({'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_other'})
+        self.assertEqual(code, 0)
+        self.assertTrue(result['warnings'][0].startswith('watch_chat_not_in_daily_allowlist'))
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS': 'true'}, clear=True):
+            self.assertTrue(config_warnings()[0].startswith('daily_allowlist_required_but_missing'))
