@@ -21,7 +21,7 @@ from lark_channel import (
 
 from .config import Settings
 from .daily_report import coverage_report
-from .daily_targets import filter_daily_targets, valid_allowlist
+from .daily_targets import allowlist_warnings, filter_daily_targets, valid_allowlist
 from .feishu import (
     FeishuMessenger,
     combined_delivery_parts,
@@ -296,6 +296,9 @@ class NewsOfficerRuntime:
     def _daily_candidates(self, job: Job | None = None) -> list[tuple[str, str]]:
         chats = self._daily_allowlist()
         if chats:
+            if not self._daily_require():
+                for warning in allowlist_warnings(chats):
+                    logger.warning('%s', warning)
             return [('chat_id', chat) for chat in dict.fromkeys(chats)]
         self._require_daily_allowlist()
         if job is not None:
@@ -699,6 +702,8 @@ class NewsOfficerRuntime:
                         'targets': self._daily_targets(job)}, job.attempts))
                     if result is None:
                         raise RuntimeError('Daily document snapshot changed; retry required')
+                    if result.get('deferred'):
+                        raise ValueError('Some episode documents failed validation; retry required')
                     documents = result['documents']
         except (ValueError, LibraryError):
             logger.warning('Daily document compilation deferred', exc_info=True)
@@ -1135,6 +1140,8 @@ class NewsOfficerRuntime:
                     delivery_key=key, operation='send', target_id=target, target_type=kind,
                     reply_in_thread=False, parts=combined_delivery_parts(content, key))
         await self._drain_outbox(job)
+        if result and result.get('deferred'):
+            raise ValueError('Some episode documents failed validation; retry required')
 
     async def _library_archiver(self) -> None:
         while True:

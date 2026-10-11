@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import re
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -9,6 +10,8 @@ from types import SimpleNamespace
 from .daily_document import DailyDocumentCompiler
 from .models import IncomingMessage
 from .shownotes import VERSION, note_identity, text_node
+
+logger = logging.getLogger(__name__)
 
 
 def stars(markdown):
@@ -121,6 +124,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             revision, records, _ = self.snapshot(job.payload['base_job'])
         if not targets:
             return None
+        deferred = False
         bundle = self.store.get_job_result(job.key, 'episodes:content')
         if bundle is None:
             if not requested and revision != job.payload['revision']:
@@ -139,14 +143,23 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 if identity not in entries:
                     if nodes:
                         nodes.append(text_node('补充精读（原稿版本更新）', 'heading1'))
-                    nodes.extend(self._notes(record, digest))
+                    try:
+                        episode_nodes = self._notes(record, digest)
+                    except ValueError:
+                        if requested:
+                            raise
+                        logger.warning('Episode document validation failed; deferred', exc_info=True)
+                        deferred = True
+                        continue
+                    nodes.extend(episode_nodes)
                     entries.append(identity)
                 documents.append({'key': key, 'title': title, 'nodes': nodes, 'entries': entries,
                                   'revision': identity, 'stars': stars(digest)})
             if not requested and self.snapshot(job.payload['base_job'])[0] != revision:
                 return None
-            bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
-                                                {'documents': documents})
+            bundle = {'documents': documents}
+            if not deferred:
+                bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents', bundle)
         links = []
         for document in bundle['documents']:
             # An older pending batch must not bypass a newly raised threshold.
@@ -171,6 +184,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                               'url': f'https://www.feishu.cn/docx/{token}'})
         result = {'title': '播客重点总结已整理成文档' if requested else f'{day} 重点播客精读',
                   'documents': links, 'count': len(links), 'notify': bool(links), 'targets': targets}
+        if deferred:
+            result['deferred'] = True
         if requested:
             result['reply_to'] = job.payload['message_id']
             result['reply_in_thread'] = job.payload['reply_in_thread']

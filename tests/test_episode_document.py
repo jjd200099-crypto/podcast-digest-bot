@@ -159,6 +159,40 @@ class SelectedDocuments(unittest.TestCase):
 
 
 class SelectedDelivery(unittest.IsolatedAsyncioTestCase):
+    async def test_allowlisted_never_subscribed_and_unsubscribed_receive_daily_and_links(self):
+        from types import SimpleNamespace
+
+        from test_reliability import FakeMessenger, FakePlugin, SequencePodcast, runtime
+
+        for unsubscribed in (False, True):
+            with self.subTest(unsubscribed=unsubscribed):
+                test = SelectedDocuments()
+                test.setUp()
+                self.addCleanup(test.doCleanups)
+                f = test.fixture
+                target = ('chat_id', 'oc_allowlisted')
+                if unsubscribed:
+                    f.store.add_subscription(*target)
+                    f.store.remove_subscription(*target)
+                messenger = FakeMessenger()
+                instance = runtime(f.store, messenger, SequencePodcast([]), FakePlugin())
+                instance.settings = SimpleNamespace(daily_chat_ids=(target[1],),
+                    daily_require_chat_ids=False, daily_combined_message=True)
+                instance.document_compiler = test.compiler
+                test.compiler.audience_filter = instance._document_audience
+                # Replace the fixture's old frozen recipients with the runtime snapshot.
+                with f.store._connect() as db:
+                    db.execute("DELETE FROM job_results WHERE job_key=? AND result_key='daily:recipients'", (f.base,))
+                    db.execute("UPDATE jobs SET analysis_complete=0 WHERE job_key=?", (f.base,))
+                daily = Job(f.base, 'daily', {'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1)
+                await instance._handle_daily_job(daily)
+                document = test.job()
+                self.assertIsNotNone(document)
+                await instance._handle_document_job(document)
+                self.assertNotIn(target, f.store.list_subscriptions())
+                self.assertEqual([(r.target_type, r.target_id) for r in messenger.attempts], [target, target])
+                self.assertIn('https://www.feishu.cn/docx/', messenger.attempts[-1].content)
+
     async def test_multiple_documents_share_one_notification(self):
         from test_reliability import FakeMessenger, FakePlugin, SequencePodcast, runtime
 

@@ -42,6 +42,9 @@ def allowlist_warnings(chat_ids, require=False, watch_chat_id="") -> list[str]:
     if require and not valid:
         warnings.append("daily_allowlist_required_but_missing: NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS is on "
                         "but NEWS_OFFICER_DAILY_CHAT_IDS is empty or has no valid oc_ ids; the daily will not send")
+    elif chat_ids and not valid:
+        warnings.append("daily_allowlist_invalid: NEWS_OFFICER_DAILY_CHAT_IDS has no valid oc_ ids; "
+                        "the daily will not send")
     elif not chat_ids:
         warnings.append("daily_allowlist_unset: NEWS_OFFICER_DAILY_CHAT_IDS is empty; the daily falls back "
                         "to every active subscription (set it, then enable NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS)")

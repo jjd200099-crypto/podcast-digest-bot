@@ -337,3 +337,56 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Traceback', output)
         self.assertIn('_worker', output)
         self.assertNotIn('secret-token-in-url', output)
+
+
+    async def test_invalid_optional_allowlist_logs_and_operations_warns(self):
+        import os
+
+        from news_officer.operations import business_snapshot
+
+        instance, _, _ = self.setup_job([])
+        instance.settings.daily_chat_ids = ('bad', 'ou_wrong')
+        instance.settings.daily_require_chat_ids = False
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            self.assertFalse(instance._has_daily_recipients())
+        self.assertTrue(any('daily_allowlist_invalid' in r.getMessage() for r in logs.records))
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_CHAT_IDS': 'bad,ou_wrong',
+                                    'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS': 'false'}, clear=True):
+            warnings = business_snapshot(self.store.path)['warnings']
+        self.assertTrue(any(w.startswith('daily_allowlist_invalid:') for w in warnings))
+
+    async def test_real_mixed_episode_validation_delivers_body_and_compiles_good_episode(self):
+        from test_daily_document import notes
+        from test_episode_document import SelectedDocuments
+
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        f.add_episode('two')
+        test.rate('two', 5)
+        def generate(record):
+            value = notes(record)
+            if record.episode.id == 'one':
+                value['core'][0]['evidence_ids'] = ['invented']
+            return value
+        f.writer.generate.side_effect = generate
+        instance, job, _ = self.setup_job([self.item('one', 5), self.item('two', 5)],
+            key=f.base, payload={'scheduled_for': '2026-09-21T08:30:00+08:00'})
+        instance.document_compiler = test.compiler
+        test.compiler.audience_filter = instance._document_audience
+        with self.assertLogs(level='WARNING'):
+            await instance._handle_daily_job(job)
+        self.assertEqual(f.api.creates, 1)
+        self.assertTrue(f.api.files[0]['name'].startswith('two｜'))
+        self.assertEqual(len(self.messenger.attempts), 1)
+        self.assertNotIn('https://www.feishu.cn/docx/', self.messenger.attempts[0].content)
+        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
+        self.assertIsNone(f.store.get_job_result(job.key, 'episodes:content'))
+        retry = self.store.claim_next('document')
+        self.assertEqual(retry.payload['mode'], 'inline_daily_retry')
+        f.writer.generate.side_effect = notes
+        await instance._handle_document_job(retry)
+        self.assertEqual(f.api.creates, 2)
+        self.assertEqual(len(self.store.get_job_result(job.key, 'daily:inline-documents')['documents']), 2)
+        self.assertEqual(len(self.messenger.attempts), 1)

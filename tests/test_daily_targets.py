@@ -21,5 +21,6 @@ class DailyTargetTests(unittest.TestCase):
         code = lambda *a: [w.split(':')[0] for w in allowlist_warnings(*a)]
         self.assertEqual(code((), False), ['daily_allowlist_unset'])
         self.assertEqual(code((), True), ['daily_allowlist_required_but_missing'])
+        self.assertEqual(code(('bad',), False), ['daily_allowlist_invalid'])
         self.assertEqual(code(('bad',), True), ['daily_allowlist_required_but_missing'])
         self.assertEqual(code(('oc_a',), True, 'oc_a'), [])

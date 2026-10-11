@@ -98,7 +98,7 @@ class DailyDocumentCompiler:
         return revision, records, pending
 
     def _audience(self, targets):
-        """Frozen targets that are still subscribed and still allowed to receive."""
+        """Revalidate frozen targets; an explicit audience policy overrides subscriptions."""
         if self.audience_filter:
             return list(self.audience_filter(targets))
         active = set(self.store.list_subscriptions())
