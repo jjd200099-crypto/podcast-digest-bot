@@ -407,3 +407,56 @@ class DocumentRetryLimits(unittest.TestCase):
         self.assertFalse(self.compiler.retry_available(job.payload, '2026-09-21'))
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
         self.assertEqual(f.writer.generate.call_count, 4)
+
+
+class InlineFailureNotice(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_payload_targets_notifies_frozen_allowlisted_recipients(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        # Frozen allowed chat has no subscription. Newly allowed chat was not frozen.
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_frozen', 'oc_new'), daily_require_chat_ids=True)
+        with f.store._connect() as db:
+            db.execute("UPDATE job_results SET payload_json=? WHERE job_key=? AND result_key='daily:recipients'",
+                       (json.dumps({'targets': [['chat_id', 'oc_frozen'], ['chat_id', 'oc_removed'],
+                                                ['open_id', 'ou_old']]}), f.base))
+        job = Job('inline-notice', 'document', {'mode': 'inline_daily_retry', 'base_job': f.base,
+                  'scheduled_for': '2026-09-21T08:30:00+08:00'}, 5)
+        with patch('news_officer.runtime.logger.warning') as warning:
+            await owner._failure_notice(job, terminal=True)
+            warning.assert_not_called()
+        await owner._failure_notice(job, terminal=True)
+        self.assertEqual(len(messenger.delivered), 1)
+        self.assertEqual([(r.target_type, r.target_id) for r in messenger.attempts],
+                         [('chat_id', 'oc_frozen')])
+        self.assertIn('2026-09-21', messenger.attempts[0].content)
+
+    async def test_notice_rechecks_allowlist_immediately_before_delivery(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_test',), daily_require_chat_ids=True)
+        job = Job('inline-notice', 'document', {'mode': 'inline_daily_retry', 'base_job': f.base,
+                  'scheduled_for': '2026-09-21T08:30:00+08:00'}, 5)
+        original = f.store.ensure_outbox
+        def change_allowlist(**kwargs):
+            result = original(**kwargs)
+            owner.settings = SimpleNamespace(daily_chat_ids=('oc_other',), daily_require_chat_ids=True)
+            return result
+        with patch.object(f.store, 'ensure_outbox', side_effect=change_allowlist):
+            await owner._failure_notice(job, terminal=True)
+        self.assertEqual(messenger.delivered, [])

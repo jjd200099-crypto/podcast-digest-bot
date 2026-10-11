@@ -977,13 +977,16 @@ class NewsOfficerRuntime:
                             job.payload.get('reply_in_thread', False))
                         await self._drain_outbox(job)
                     return
-                active = set(self.store.list_subscriptions())
-                audience = set(self._document_audience(job.payload['targets']))
-                content = (f"{job.payload['day']} 的播客精读文档暂未编译完成，云端会继续重试。"
+                if job.payload.get('mode') == 'inline_daily_retry':
+                    base = Job(job.payload['base_job'], 'daily', {}, job.attempts)
+                    audience = self._daily_targets(base)
+                    day = job.payload['scheduled_for'][:10]
+                else:
+                    audience = self._document_audience(job.payload['targets'])
+                    day = job.payload['day']
+                content = (f"{day} 的播客精读文档暂未编译完成，已保留失败状态。"
                            "短版日报与聊天问答不受影响；尚未完成的文档不会作为成品推送。")
-                for kind, target in job.payload['targets']:
-                    if (kind, target) not in active or (kind, target) not in audience:
-                        continue
+                for kind, target in audience:
                     key = f"{job.key}:document-delayed:{kind}:{target}"
                     self.store.ensure_outbox(job_key=job.key, group_key='document:delayed',
                         delivery_key=key, operation='send', target_id=target, target_type=kind,
