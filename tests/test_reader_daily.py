@@ -190,6 +190,63 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         await instance._handle_daily_job(job)
         self.assertIn('补齐旧节目', body(self.messenger.attempts[0]))
 
+    def oversized_item(self, name, extra):
+        from test_reliability import attachment_for
+        item = self.item(name)
+        record = self.store.get_verified_transcript(name)
+        message = item.message.replace('推荐星级：', extra + '\n\n推荐星级：')
+        with self.store._connect() as db:
+            db.execute('DELETE FROM episode_digests WHERE episode_id=?', (name,))
+        self.store.save_transcript_digest(name, message, record.content_sha256, record.record_revision_sha256)
+        return DailyItem(item.episode, 'summarized', message, attachment_for(record, message))
+
+    async def test_oversized_daily_keeps_each_summary_and_link_in_one_send(self):
+        from news_officer.operations import business_snapshot
+        items = [self.oversized_item(name, '次要段落。' * 15000) for name in ('one', 'two')]
+        instance, job, _ = self.setup_job(items)
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(self.messenger.attempts), 1)
+        content = self.messenger.attempts[0].content
+        for name in ('one', 'two'):
+            self.assertIn(name + ' 的核心判断', content)
+            self.assertIn('https://example.test/' + name, content)
+        self.assertNotIn('次要段落', content)
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        self.assertTrue(all('次要段落' not in section['template'] for section in bundle['enrichment']['sections']))
+        self.assertTrue(any('daily_message_degraded' in w for w in business_snapshot(self.store.path)['warnings']))
+
+    async def test_oversized_first_paragraph_keeps_complete_first_sentence(self):
+        from news_officer.daily_report import compact_reader_episode
+        content = '**节目**\n\n完整的核心判断。' + '次要解释。' * 30000 + '\n\n[收听节目](https://example.test/one)'
+        result = compact_reader_episode(content, 3, 'https://example.test/one')
+        self.assertIn('完整的核心判断。', result)
+        self.assertNotIn('次要解释', result)
+        self.assertIn('https://example.test/one', result)
+
+    async def test_plaintext_fallback_warns_without_changing_body(self):
+        from news_officer.daily_report import reader_episode
+        from news_officer.operations import business_snapshot
+        item = self.oversized_item('one', '完整次要段落。' * 2000)
+        instance, job, _ = self.setup_job([item])
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(self.messenger.attempts), 1)
+        part = self.messenger.attempts[0]
+        self.assertEqual(part.msg_type, 'text')
+        self.assertTrue(json.loads(part.content)['text'].endswith(reader_episode(item.message)))
+        self.assertTrue(any('daily_message_plaintext_fallback' in w for w in business_snapshot(self.store.path)['warnings']))
+
+    async def test_indivisible_summary_overflow_stops_and_warns(self):
+        from news_officer.operations import business_snapshot
+        instance, job, _ = self.setup_job([self.item('one')])
+        # A sentence without any boundary cannot be safely shortened.
+        with (patch('news_officer.daily_report.reader_episode', return_value=
+                    '**节目**\n\n' + '核心判断' * 20000 + '\n\n[收听节目](https://example.test/one)'),
+              self.assertRaisesRegex(ValueError, 'single-message capacity')):
+            await instance._handle_daily_job(job)
+        self.assertEqual(self.messenger.attempts, [])
+        self.assertEqual(self.store.outbox_items(job.key), [])
+        self.assertTrue(any('daily_message_capacity_exceeded' in w for w in business_snapshot(self.store.path)['warnings']))
+
     async def test_platform_overflow_never_silently_sends_multiple_messages(self):
         instance, job, _ = self.setup_job([self.item('one')])
         with (patch('news_officer.runtime.combined_delivery_parts', return_value=[
@@ -198,6 +255,8 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
             await instance._handle_daily_job(job)
         self.assertEqual(self.messenger.attempts, [])
         self.assertEqual(self.store.outbox_items(job.key), [])
+        from news_officer.operations import business_snapshot
+        self.assertTrue(any('daily_message_capacity_exceeded' in w for w in business_snapshot(self.store.path)['warnings']))
 
     async def test_source_failure_retries_without_group_status_spam(self):
         instance, job, podcast = self.setup_job([])

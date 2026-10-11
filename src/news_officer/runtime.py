@@ -680,6 +680,32 @@ class NewsOfficerRuntime:
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')
         markdown = ("\n\n" if reader_mode else "\n\n---\n\n").join(blocks)
+        if reader_mode:
+            from .daily_report import compact_reader_episode
+            from .operations import record_warning
+            edition_title = f'🎧 播客精选 · {when:%Y-%m-%d}'
+            probe = combined_delivery_parts(markdown, job.key, title=edition_title)
+            if len(probe) != 1:
+                prefix = blocks[:-len(sections)] if sections else blocks
+                original_sections = sections
+                for level in (1, 2, 3):
+                    sections = [{**section,
+                        'body': compact_reader_episode(section['body'], level, item.episode.url),
+                        'template': compact_reader_episode(section['template'], level, item.episode.url)}
+                        for section, item in zip(original_sections, summaries)]
+                    blocks = [*prefix, *(section['body'] for section in sections)]
+                    markdown = '\n\n'.join(blocks)
+                    probe = combined_delivery_parts(markdown, job.key, title=edition_title)
+                    if len(probe) == 1:
+                        break
+                record_warning(self.store, job.key,
+                    'daily_message_degraded' if len(probe) == 1 else 'daily_message_capacity_exceeded',
+                    when.date().isoformat())
+                if len(probe) != 1:
+                    raise ValueError('Daily edition exceeds single-message capacity')
+            elif probe[0][0] == 'text':
+                record_warning(self.store, job.key, 'daily_message_plaintext_fallback',
+                               when.date().isoformat())
         group = "daily:bundle:" + hashlib.sha256(markdown.encode()).hexdigest()[:20]
         deliveries = []
         for target_type, target_id in self._daily_targets(job):
