@@ -104,14 +104,26 @@ def validate_notes(value, evidence):
                     raise ValueError('Invalid comparison table row')
                 if any(key not in evidence for key in row.evidence_ids):
                     raise ValueError('Unknown table evidence')
-    words = 0
+    evidence_keys = list(evidence)
+    word_counts = []
     for quote in notes.quotes:
-        if (quote.evidence_id not in evidence or not quote.text.strip()
-                or quote.text not in evidence[quote.evidence_id]['text']):
+        if quote.evidence_id not in evidence or not quote.text.strip():
             raise ValueError('Quote not found in cited transcript')
+        if quote.text not in evidence[quote.evidence_id]['text']:
+            index = evidence_keys.index(quote.evidence_id)
+            neighbors = evidence_keys[max(0, index - 1):index] + evidence_keys[index + 1:index + 2]
+            actual = next((key for key in neighbors if quote.text in evidence[key]['text']), None)
+            if actual is None:
+                raise ValueError('Quote not found in cited transcript')
+            quote.evidence_id = actual
         if quote.part_index >= len(notes.parts):
             raise ValueError('Quote part does not exist')
-        words += len(re.findall(r"\w+(?:['’-]\w+)*", quote.text))
+        word_counts.append(len(re.findall(r"\w+(?:['’-]\w+)*", quote.text)))
+    words = sum(word_counts)
+    # Keep the first quote intact; never hide an overlong quote by truncating it.
+    while words > 25 and len(notes.quotes) > 1:
+        notes.quotes.pop()
+        words -= word_counts.pop()
     if words > 25:
         raise ValueError('Quote budget exceeded')
     for correction in notes.corrections:
@@ -164,7 +176,7 @@ class ShownotesWriter:
                     raise ValueError('Incomplete model output')
                 return validate_notes(parsed.model_dump(), evidence)
             except ValueError as error:
-                repair = '\n上次输出未通过校验：' + str(error)[:250]
+                repair = '\n上次输出未通过校验：' + str(error)[:250] + '。引文总词数 ≤25、逐条核对 evidence_id；每条引文必须逐字连续出现在对应原文中。'
         raise ValueError('Shownotes validation failed')
 
 
