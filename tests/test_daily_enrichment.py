@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import test_reader_daily as fixtures
 
 from news_officer.daily_enrichment import (
+    _content,
     enqueue_enrichment,
     enrichment_bundle,
     normalized_content,
@@ -74,6 +75,19 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
                                 'title': episode}], 'targets': targets, 'notify': True}
         self.store.save_job_result(base, 'daily:document:' + episode, 'daily_document_ready', value)
         return value
+
+    async def test_old_frozen_template_uses_current_label_without_mutating_archive(self):
+        _, base = await self.prepare()
+        bundle = enrichment_bundle(self.store, base.key)
+        for section in bundle['enrichment']['sections']:
+            section['template'] = section['template'].replace('精读和完整中文对谈', '精读与完整中文对谈')
+        original = copy.deepcopy(bundle)
+        _, content = _content(bundle, {'one': {'url': 'https://www.feishu.cn/docx/one'}},
+                              bundle['deliveries'][0])
+        self.assertIn('精读和完整中文对谈', content)
+        self.assertNotIn('精读与完整中文对谈', content)
+        self.assertIn('https://www.feishu.cn/docx/one', content)
+        self.assertEqual(bundle, original)
 
     async def test_enqueue_independent_selected_episodes_after_original_delivery(self):
         await self.prepare()

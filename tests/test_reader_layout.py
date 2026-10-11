@@ -16,8 +16,9 @@ class ReaderLayout(unittest.TestCase):
         self.assertEqual(rows[0][0]['style'], ['bold'])
         self.assertEqual(rows[1][0]['style'], ['bold'])
         text = str(rows)
-        self.assertLess(text.index('正文内容不改写'), text.index('精读与完整中文对谈'))
-        self.assertLess(text.index('精读与完整中文对谈'), text.index('收听节目'))
+        self.assertLess(text.index('正文内容不改写'), text.index('精读和完整中文对谈'))
+        self.assertLess(text.index('精读和完整中文对谈'), text.index('收听节目'))
+        self.assertNotIn('精读与完整中文对谈', text)
         self.assertEqual(text.count('https://example.test/audio'), 1)
         self.assertNotIn('**', text)
         self.assertNotIn('style', str(next(row for row in rows if any('正文内容' in e.get('text', '') for e in row))))
@@ -25,7 +26,7 @@ class ReaderLayout(unittest.TestCase):
     def test_no_document_retains_listening_link_at_end(self):
         rendered = reader_episode('【主题】\n链接：https://example.test/episode\n正文')
         self.assertTrue(rendered.endswith('[收听节目](https://example.test/episode)'))
-        self.assertNotIn('精读与', rendered)
+        self.assertNotIn('精读和', rendered)
         self.assertTrue(rendered.startswith('**【主题】**'))
 
     def test_document_mapping_is_identity_based_not_position(self):
