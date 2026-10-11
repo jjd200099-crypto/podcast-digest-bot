@@ -118,12 +118,16 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(self.fixture.api.creates, 0)
         self.assertEqual(stars('没有评级'), 0)
 
-    def test_only_five_stars_is_automatically_compiled(self):
-        for rating in (3, 4):
-            self.rate('one', rating)
-            self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
-        self.rate('one', 5)
-        self.assertEqual(self.compiler.publish(self.job())['count'], 1)
+    def test_default_selection_compiles_four_and_five_but_not_three_stars(self):
+        self.assertEqual(self.compiler.min_stars, 4)
+        self.rate('one', 4)
+        self.fixture.add_episode('five')
+        self.fixture.add_episode('three')
+        self.rate('five', 5)
+        self.rate('three', 3)
+        result = self.compiler.publish(self.job())
+        self.assertEqual([d['stars'] for d in result['documents']], [5, 4])
+        self.assertEqual(self.fixture.api.creates, 2)
 
     def test_explicit_four_star_setting_is_supported(self):
         self.compiler.min_stars = 4

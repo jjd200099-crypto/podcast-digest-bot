@@ -670,7 +670,7 @@ class NewsOfficerRuntime:
                     prefix = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n'
                     content, template = prefix + content, prefix + template
                 sections.append({'episode_id': item.episode.id, 'body': content, 'template': template})
-                if stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 5):
+                if stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4):
                     eligible.append(item.episode.id)
                 blocks.append(content)
             if not summaries:

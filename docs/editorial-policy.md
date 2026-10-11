@@ -38,7 +38,7 @@ no daily quota; zero compilation-worthy episodes is a valid outcome.
 | Internal rating (not displayed) | Code gate: relevance / density | Reader action |
 |---|---|---|
 | ★★★★★ | Both exactly 5 | 值得编译 — automatically create an individual Feishu document |
-| ★★★★☆ | Priority topic; otherwise both at least 4, or relevance ≥3 and density 5 | 值得看全文 |
+| ★★★★☆ | Priority topic; otherwise both at least 4, or relevance ≥3 and density 5 | 值得看全文 — automatically create an individual Feishu document |
 | ★★★☆☆ | Both at least 3, below the above gates | 看摘要 |
 | ★★☆☆☆ | Both at least 2, below the above gates | 无关 |
 | ★☆☆☆☆ | Otherwise | 无关 |
@@ -74,9 +74,10 @@ including document-link notifications. Here 无关 means not recommended for thi
 research brief: relevance OR information density is insufficient and no priority rule applies. A missing or
 unverified transcript remains pending/unrated, never automatically 无关.
 
-`NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **5**. Production should also
-set it to 5 explicitly, since an older environment override of 3 wins over code
-defaults. In default reader mode, the daily message is sent before compilation. Independent
+`NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **4**: every
+值得看全文（4★）and 值得编译（5★）episode gets an individual detailed document;
+3★ and below do not. Use this environment variable to adjust the threshold;
+environment overrides take precedence over code defaults. In default reader mode, the daily message is sent before compilation. Independent
 episode jobs edit the original receipt after verification and permission checks.
 One same-day links-only followup uses the frozen, revalidated audience after all
 episode jobs finish or stop. Legacy non-reader mode sends a separate link notice. Frozen

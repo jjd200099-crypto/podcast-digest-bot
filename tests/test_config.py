@@ -23,12 +23,21 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
             Settings.from_env()
 
-    def test_automatic_compilation_keeps_existing_five_star_threshold(self):
+    def test_automatic_compilation_defaults_to_four_stars_without_environment_override(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
-            self.assertEqual(Settings.from_env().daily_document_min_stars, 5)
+            self.assertEqual(Settings.from_env().daily_document_min_stars, 4)
             self.assertFalse(Settings.from_env().daily_document_fulltext)
             with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT': 'true'}):
                 self.assertTrue(Settings.from_env().daily_document_fulltext)
+
+    def test_settings_constructor_defaults_to_four_stars(self):
+        from dataclasses import MISSING, fields
+
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            configured = Settings.from_env()
+        required = {f.name: getattr(configured, f.name) for f in fields(Settings)
+                    if f.default is MISSING and f.default_factory is MISSING}
+        self.assertEqual(Settings(**required).daily_document_min_stars, 4)
 
     def test_daily_delivery_configuration_defaults_and_overrides(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):

@@ -27,7 +27,7 @@ class DocumentRetryStopped(ValueError):
 
 
 class SelectedEpisodeCompiler(DailyDocumentCompiler):
-    def __init__(self, *args, min_stars=5, request_authorizer=None, max_attempts=3,
+    def __init__(self, *args, min_stars=4, request_authorizer=None, max_attempts=3,
                  timezone=None, today=None, include_fulltext=False, transcript_writer=None, **kwargs):
         super().__init__(*args, **kwargs)
         if min_stars not in range(1, 6):

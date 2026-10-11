@@ -47,6 +47,14 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Podwise', archived)
         self.assertNotIn('播客追踪状态', archived)
 
+    async def test_missing_compiler_threshold_defaults_to_four_for_real_daily_selection(self):
+        instance, job, _ = self.setup_job(
+            [self.item('four', 4), self.item('five', 5), self.item('three', 3)])
+        instance.document_compiler = None
+        await instance._handle_daily_job(job)
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        self.assertEqual(set(bundle['enrichment']['eligible']), {'four', 'five'})
+
     async def test_reader_omits_release_notes_even_when_opted_in(self):
         from news_officer.daily_archive import read_daily_digest
 

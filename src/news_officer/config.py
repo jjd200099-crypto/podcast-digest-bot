@@ -78,7 +78,7 @@ class Settings:
     daily_document_enabled: bool = False
     daily_document_start_date: str = ''
     daily_document_folder: str = ''
-    daily_document_min_stars: int = 5
+    daily_document_min_stars: int = 4
     daily_document_max_attempts: int = 3
     daily_document_fulltext: bool = False
 
@@ -224,6 +224,6 @@ class Settings:
             daily_document_folder=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FOLDER', ''),
             daily_document_max_attempts=_positive_int(
                 os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MAX_ATTEMPTS', '3'), 3),
-            daily_document_min_stars=int(os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS', '5')),
+            daily_document_min_stars=int(os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS', '4')),
             daily_document_fulltext=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT', 'false').lower() == 'true',
         )
