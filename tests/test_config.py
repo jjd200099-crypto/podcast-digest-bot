@@ -39,6 +39,23 @@ class SettingsTests(unittest.TestCase):
                     if f.default is MISSING and f.default_factory is MISSING}
         self.assertEqual(Settings(**required).daily_document_min_stars, 4)
 
+    def test_example_document_numeric_defaults_match_constructor_and_environment(self):
+        from dataclasses import MISSING, fields
+
+        example = dict(line.split('=', 1) for line in
+                       (ROOT / '.env.example').read_text().splitlines()
+                       if line.strip() and not line.startswith('#') and '=' in line)
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            configured = Settings.from_env()
+        required = {f.name: getattr(configured, f.name) for f in fields(Settings)
+                    if f.default is MISSING and f.default_factory is MISSING}
+        defaults = Settings(**required)
+        for name in ('daily_document_min_stars', 'daily_document_max_attempts'):
+            with self.subTest(name=name):
+                self.assertEqual(int(example['NEWS_OFFICER_' + name.upper()]),
+                                 getattr(defaults, name))
+                self.assertEqual(getattr(configured, name), getattr(defaults, name))
+
     def test_daily_delivery_configuration_defaults_and_overrides(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
             settings = Settings.from_env()

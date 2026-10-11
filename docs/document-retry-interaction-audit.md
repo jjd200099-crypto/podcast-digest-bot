@@ -5,15 +5,15 @@
 
 ## 默认门槛恢复
 
-原先把默认门槛或默认行为写成 5 的文件，精确列表：
+原先默认门槛修复所涉及的文件，当前状态如下：
 
-- `src/news_officer/config.py`：字段默认和环境变量默认均为 5。
-- `src/news_officer/episode_document.py`：构造参数默认 min_stars=5。
-- `src/news_officer/runtime.py`：没有 compiler/min_stars 时回退为 5。
-- `README.md`：默认门槛 5、仅五星生成文档。
-- `docs/editorial-policy.md`：默认 5，并要求环境显式设置 5。
-- `tests/test_config.py`：默认值期望 5。
-- `tests/test_episode_document.py`：默认只编译五星的行为断言。
+- `src/news_officer/config.py`：字段默认和环境变量默认均为 4。
+- `src/news_officer/episode_document.py`：构造参数默认 min_stars=4。
+- `src/news_officer/runtime.py`：没有 compiler/min_stars 时回退为 4。
+- `README.md`：默认门槛 4、四星及五星生成文档。
+- `docs/editorial-policy.md`：默认 4。
+- `tests/test_config.py`：默认值期望 4。
+- `tests/test_episode_document.py`：默认编译四星及五星的行为断言。
 
 `tests/test_reader_daily.py` 原有显式 `Mock(min_stars=5)`；这是显式配置用例，
 保持不变，新增缺少 compiler 时的默认回退测试。评分体系本身的五星内容与
