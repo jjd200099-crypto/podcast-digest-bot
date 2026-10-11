@@ -50,8 +50,11 @@ class NewsOfficerRuntime:
         router: CommandRouter,
         podcast_service: PodcastService,
         research_agent=None,
+        scheduler_clock=time.monotonic,
     ):
         self.settings = settings
+        self._scheduler_clock = scheduler_clock
+        self._scheduler_failures = {}
         self.store = store
         self.messenger = messenger
         self.router = router
@@ -1114,11 +1117,19 @@ class NewsOfficerRuntime:
                 if hasattr(self, 'background_jobs'):
                     self.background_jobs.pop(job.key, None)
 
-    @staticmethod
-    def _log_scheduler_failure(error):
+    def _log_scheduler_failure(self, error):
+        now = getattr(self, '_scheduler_clock', time.monotonic)()
+        if not hasattr(self, '_scheduler_failures'):
+            self._scheduler_failures = {}
+        key = (type(error), hashlib.sha256(str(error).encode()).digest())
+        previous, suppressed = self._scheduler_failures.get(key, (None, 0))
+        if previous is not None and now - previous < 600:
+            self._scheduler_failures[key] = (previous, suppressed + 1)
+            return
+        self._scheduler_failures[key] = (now, 0)
         # Preserve stack frames without exception text or chained secrets.
         safe_error = RuntimeError(type(error).__name__)
-        logger.error('Scheduler step failed: %s', type(error).__name__,
+        logger.error('Scheduler step failed: %s; 已抑制 %d 次', type(error).__name__, suppressed,
                      exc_info=(RuntimeError, safe_error, error.__traceback__))
 
     async def _scheduler(self) -> None:

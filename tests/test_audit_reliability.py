@@ -206,10 +206,34 @@ class SchedulerIsolationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertRaises(asyncio.CancelledError):
             await runtime._scheduler()
         self.assertEqual(enrichment.call_count, 2)
+        self.assertEqual(len(logs.records), 1)
         self.assertEqual(runtime.store.enqueue.call_count, 2)
         self.assertTrue(all(record.exc_info for record in logs.records))
         self.assertIn('Traceback', logs.output[0])
         self.assertNotIn('sensitive-value', ''.join(logs.output))
+
+    def test_scheduler_failure_rate_limit_uses_independent_keys_and_clock(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime._scheduler_clock = Mock(return_value=0)
+        with patch('news_officer.runtime.logger.error') as log:
+            runtime._log_scheduler_failure(ValueError('first'))
+            runtime._scheduler_clock.return_value = 599
+            runtime._log_scheduler_failure(ValueError('first'))
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_count, 1)
+            runtime._log_scheduler_failure(ValueError('second'))
+            runtime._log_scheduler_failure(TypeError('first'))
+            self.assertEqual(log.call_count, 3)
+            runtime._scheduler_clock.return_value = 600
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_count, 4)
+            self.assertEqual(log.call_args.args[2], 2)
+            self.assertIsNotNone(log.call_args.kwargs['exc_info'])
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_count, 4)
+            runtime._scheduler_clock.return_value = 1200
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_args.args[2], 1)
 
     async def test_cancelled_step_propagates(self):
         runtime = object.__new__(NewsOfficerRuntime)
