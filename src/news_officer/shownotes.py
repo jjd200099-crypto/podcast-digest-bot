@@ -105,7 +105,7 @@ def validate_notes(value, evidence):
                 if any(key not in evidence for key in row.evidence_ids):
                     raise ValueError('Unknown table evidence')
     evidence_keys = list(evidence)
-    word_counts = []
+    quote_words = []
     for quote in notes.quotes:
         if quote.evidence_id not in evidence or not quote.text.strip():
             raise ValueError('Quote not found in cited transcript')
@@ -118,12 +118,23 @@ def validate_notes(value, evidence):
             quote.evidence_id = actual
         if quote.part_index >= len(notes.parts):
             raise ValueError('Quote part does not exist')
-        word_counts.append(len(re.findall(r"\w+(?:['’-]\w+)*", quote.text)))
-    words = sum(word_counts)
-    # Drop complete tail quotes, including an overlong sole quote; never truncate.
-    while words > 25:
-        notes.quotes.pop()
-        words -= word_counts.pop()
+        quote_words.append(list(re.finditer(r"\w+(?:['’-]\w+)*", quote.text)))
+    remaining, retained = 25, []
+    for quote, words in zip(notes.quotes, quote_words):
+        if remaining < 4:
+            break
+        if len(words) > remaining:
+            # Include boundary punctuation, but never split a regex-matched word.
+            limit = words[remaining].start()
+            boundaries = [match.end() for match in re.finditer(r'[.,;:!?。，；：！？]', quote.text[:limit])
+                          if match.start() >= words[3].end()]
+            end = boundaries[-1] if boundaries else words[remaining - 1].end()
+            quote.text = quote.text[:end].strip()
+            if quote.text not in evidence[quote.evidence_id]['text']:
+                raise ValueError('Quote not found in cited transcript')
+        retained.append(quote)
+        remaining -= len(re.findall(r"\w+(?:['’-]\w+)*", quote.text))
+    notes.quotes = retained
     for correction in notes.corrections:
         if (correction.evidence_id not in evidence or not correction.original.strip()
                 or correction.original not in evidence[correction.evidence_id]['text']):

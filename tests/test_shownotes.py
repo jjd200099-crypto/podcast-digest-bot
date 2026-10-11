@@ -1,4 +1,5 @@
 import copy
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -54,7 +55,7 @@ class ShownotesValidation(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Quote not found in cited transcript'):
                     validate_notes(self.value, self.evidence)
 
-    def test_budget_drops_whole_tail_quotes_without_truncating(self):
+    def test_remaining_budget_under_four_drops_tail_quotes(self):
         first = 'One two three four five six seven eight nine ten eleven twelve.'
         second = 'Thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour.'
         tail = 'This entire sentence must be dropped.'
@@ -63,11 +64,44 @@ class ShownotesValidation(unittest.TestCase):
         result = validate_notes(self.value, self.evidence)
         self.assertEqual(result['quotes'], self.value['quotes'][:2])
 
-    def test_overlong_first_quote_is_dropped_whole(self):
-        text = ' '.join(f'word{i}' for i in range(26))
+    def assert_grounded_budget(self, result):
+        self.assertLessEqual(sum(len(re.findall(r"\w+(?:['’-]\w+)*", quote['text']))
+                                 for quote in result['quotes']), 25)
+        for quote in result['quotes']:
+            self.assertIn(quote['text'], self.evidence[quote['evidence_id']]['text'])
+
+    def test_overlong_first_quote_is_shortened_to_word_limit(self):
+        text = ' '.join(f'word{i}' for i in range(40))
         self.evidence['C0001']['text'] = text + ' Short quote.'
-        self.value['quotes'] = [self.quote(text), self.quote('Short quote.')]
-        self.assertEqual(validate_notes(self.value, self.evidence)['quotes'], [])
+        self.value['quotes'] = [self.quote(text)]
+        result = validate_notes(self.value, self.evidence)
+        self.assertEqual([quote['text'] for quote in result['quotes']],
+                         [' '.join(f'word{i}' for i in range(25))])
+        self.assertIn(result['quotes'][0]['text'], text)
+        self.assert_grounded_budget(result)
+
+    def test_second_quote_shortens_at_latest_clause_boundary(self):
+        first = ' '.join(f'first{i}' for i in range(12))
+        second = 'One two three four. Five six seven eight, nine ten; eleven twelve thirteen fourteen fifteen.'
+        self.evidence['C0001']['text'] = first
+        self.evidence['C0002']['text'] = second
+        self.value['quotes'] = [self.quote(first), self.quote(second, 'C0002')]
+        result = validate_notes(self.value, self.evidence)
+        self.assertEqual(result['quotes'][0], self.value['quotes'][0])
+        self.assertEqual(result['quotes'][1]['text'], 'One two three four. Five six seven eight, nine ten;')
+        self.assertIn(result['quotes'][1]['text'], second)
+        self.assert_grounded_budget(result)
+
+    def test_shortening_preserves_regex_words_and_adjacent_chunk_correction(self):
+        text = '  ' + "don't well-known it’s " * 14
+        self.evidence['C0003']['text'] = text
+        self.value['quotes'] = [self.quote(text, 'C0002')]
+        result = validate_notes(self.value, self.evidence)
+        quote = result['quotes'][0]
+        self.assertEqual(quote['evidence_id'], 'C0003')
+        self.assertEqual(quote['text'], ("don't well-known it’s " * 8 + "don't"))
+        self.assertIn(quote['text'], text)
+        self.assert_grounded_budget(result)
 
     def test_fabricated_tail_is_rejected_before_budget_trimming(self):
         text = ' '.join(f'word{i}' for i in range(25))
