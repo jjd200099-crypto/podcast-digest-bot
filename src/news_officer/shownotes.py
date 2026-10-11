@@ -120,12 +120,10 @@ def validate_notes(value, evidence):
             raise ValueError('Quote part does not exist')
         word_counts.append(len(re.findall(r"\w+(?:['’-]\w+)*", quote.text)))
     words = sum(word_counts)
-    # Keep the first quote intact; never hide an overlong quote by truncating it.
-    while words > 25 and len(notes.quotes) > 1:
+    # Drop complete tail quotes, including an overlong sole quote; never truncate.
+    while words > 25:
         notes.quotes.pop()
         words -= word_counts.pop()
-    if words > 25:
-        raise ValueError('Quote budget exceeded')
     for correction in notes.corrections:
         if (correction.evidence_id not in evidence or not correction.original.strip()
                 or correction.original not in evidence[correction.evidence_id]['text']):
@@ -197,7 +195,7 @@ def table_node(rows):
                          for row in rows for cell in row]}
 
 
-def render_episode(record, notes, digest=''):
+def render_episode(record, notes, digest='', *, fulltext_attached=False):
     evidence = transcript_evidence(record.transcript.text)
     notes = validate_notes(notes, evidence)
     ep = record.episode
@@ -208,7 +206,8 @@ def render_episode(record, notes, digest=''):
                 f'[收听本期]({ep.url})',
                 ('章节沿节目说明中的时间标记整理。' if chapter_outline(ep) else '未取得官方章节，按原对谈话题分章。')
                 + '时间戳取自所引原文段落，无时间戳时明确标注。']
-    metadata.append('观点、数字与预测归属节目嘉宾；本文为主题精读，不附整期实录。')
+    metadata.append('观点、数字与预测归属节目嘉宾；' + (
+        '精读之后附去除时间戳的完整中文文字稿。' if fulltext_attached else '本文为主题精读，不附整期实录。'))
     for line in digest.splitlines():
         if line.startswith(('推荐理由：', '推荐星级：')):
             metadata.append(line)

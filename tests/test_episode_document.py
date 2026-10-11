@@ -13,6 +13,43 @@ from news_officer.shownotes import render_episode, transcript_evidence, validate
 
 
 class SelectedDocuments(unittest.TestCase):
+    def enrichment_job(self, identity):
+        f = self.fixture
+        record = f.store.get_verified_transcript(identity)
+        job = Job('enrich:' + identity, 'document', {'mode': 'daily_episode',
+                   'base_job': f.base, 'day': '2026-09-21', 'episode_id': identity,
+                   'record_revision': record.record_revision_sha256,
+                   'targets': [('chat_id', 'oc_test')]}, 1)
+        f.store.enqueue(job.key, job.kind, job.payload)
+        return job
+
+    def test_enrichment_compiles_one_episode_and_reuses_already_published_links(self):
+        f = self.fixture
+        f.add_episode('two')
+        self.rate('two', 5)
+        f.store.save_job_result(f.base, 'bundle', 'daily_bundle', {
+            'enrichment': {'version': 1, 'eligible': ['one', 'two']},
+            'deliveries': [{'target_type': 'chat_id', 'target_id': 'oc_test'}]})
+        # A legacy published doc still needs to be linked in the new edition.
+        self.compiler.publish(self.job())
+        before = f.api.creates
+        result = self.compiler.publish(self.enrichment_job('two'))
+        self.assertEqual([d['episode_id'] for d in result['documents']], ['two'])
+        self.assertEqual(f.api.creates, before)
+
+    def test_enrichment_rejects_changed_transcript_or_ineligible_episode(self):
+        f = self.fixture
+        f.store.save_job_result(f.base, 'bundle', 'daily_bundle', {
+            'enrichment': {'version': 1, 'eligible': ['one']},
+            'deliveries': [{'target_type': 'chat_id', 'target_id': 'oc_test'}]})
+        job = self.enrichment_job('one')
+        job.payload['record_revision'] = 'stale'
+        with self.assertRaisesRegex(Exception, '版本'):
+            self.compiler.publish(job)
+        f.add_episode('low')
+        self.assertIsNone(self.compiler.publish(self.enrichment_job('low')))
+        self.assertEqual(f.api.creates, 0)
+
     def setUp(self):
         self.fixture = fixtures.DailyDocuments()
         self.fixture.setUp()
@@ -88,6 +125,18 @@ class SelectedDocuments(unittest.TestCase):
         self.rate('one', 5)
         self.assertEqual(self.compiler.publish(self.job())['count'], 1)
 
+    def test_explicit_four_star_setting_is_supported(self):
+        self.compiler.min_stars = 4
+        for rating in (1, 2, 3):
+            self.rate('one', rating)
+            self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        self.rate('one', 4)
+        self.fixture.add_episode('five')
+        self.rate('five', 5)
+        result = self.compiler.publish(self.job())
+        self.assertEqual(result['count'], 2)
+        self.assertEqual([d['stars'] for d in result['documents']], [5, 4])
+
     def test_daily_must_finish_delivery_before_document_enqueue(self):
         f = self.fixture
         with f.store._connect() as db:
@@ -101,6 +150,7 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
 
     def test_frozen_old_batch_cannot_bypass_raised_threshold(self):
+        self.compiler.min_stars = 5
         job = self.job()
         self.fixture.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
                                            {'documents': [{'stars': 4}]})
@@ -377,7 +427,6 @@ class DocumentRetryLimits(unittest.TestCase):
 
     def test_new_transcript_revision_has_a_fresh_budget(self):
         from news_officer.models import Transcript
-        from news_officer.shownotes import note_identity
         f = self.fixture
         f.writer.generate.side_effect = ValueError('invalid')
         job = self.job()
@@ -390,7 +439,7 @@ class DocumentRetryLimits(unittest.TestCase):
         self.assertTrue(self.compiler.publish(new)['deferred'])
         with f.store._connect() as db:
             row = db.execute('SELECT attempts,status FROM episode_document_attempts WHERE revision=?',
-                             (note_identity(updated),)).fetchone()
+                             (self.compiler.document_identity(updated),)).fetchone()
         self.assertEqual(tuple(row), (1, 'pending'))
         self.assertEqual(f.writer.generate.call_count, 4)
 
@@ -464,3 +513,46 @@ class InlineFailureNotice(unittest.IsolatedAsyncioTestCase):
         with patch.object(f.store, 'ensure_outbox', side_effect=change_allowlist):
             await owner._failure_notice(job, terminal=True)
         self.assertEqual(messenger.delivered, {})
+
+
+class CompleteDocumentBudget(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+    job = SelectedDocuments.job
+
+    def test_pre_merge_notes_revision_budget_is_not_reset(self):
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.shownotes import note_identity
+        f = self.fixture
+        job = self.job()
+        with f.store._connect() as db:
+            db.execute("INSERT INTO episode_document_attempts VALUES (?,?,?,3,'failed')",
+                       (f.record.episode.id, note_identity(f.record), '2026-09-21'))
+        with self.assertRaises(DocumentRetryStopped):
+            self.compiler.publish(job)
+        f.writer.generate.assert_not_called()
+        with f.store._connect() as db:
+            rows = db.execute('SELECT revision,attempts,status FROM episode_document_attempts').fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(self.compiler.document_identity(f.record), 3, 'failed')])
+
+    def test_translation_failures_share_the_document_revision_budget(self):
+        from unittest.mock import Mock
+
+        from news_officer.episode_document import DocumentRetryStopped
+        f = self.fixture
+        self.compiler.include_fulltext = True
+        self.compiler.transcript_writer = Mock()
+        self.compiler.transcript_writer.generate.side_effect = ValueError('invalid translation')
+        job = self.job()
+        for attempt in range(3):
+            with self.assertRaises(DocumentRetryStopped if attempt == 2 else ValueError):
+                self.compiler.publish(job)
+        with self.assertRaises(DocumentRetryStopped):
+            self.compiler.publish(job)
+        self.assertEqual(f.writer.generate.call_count, 1)
+        self.assertEqual(self.compiler.transcript_writer.generate.call_count, 3)
+        self.assertEqual(f.api.creates, 0)
+        self.assertIsNone(f.store.get_job_result(job.key, 'episodes:content'))
+        with f.store._connect() as db:
+            self.assertEqual(tuple(db.execute('SELECT attempts,status FROM episode_document_attempts').fetchone()),
+                             (3, 'failed'))

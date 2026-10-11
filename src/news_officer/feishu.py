@@ -120,6 +120,9 @@ def _post_elements(line: str) -> list[dict]:
     """Convert the small Markdown subset used by summaries into post elements."""
 
     heading = line.lstrip().startswith("#")
+    stripped = line.strip()
+    bold = heading or (stripped.startswith('**') and stripped.endswith('**')) or (
+        stripped.startswith('【') and stripped.endswith('】'))
     clean = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
     clean = clean.replace("**", "").replace("__", "")
     if heading:
@@ -133,6 +136,9 @@ def _post_elements(line: str) -> list[dict]:
         position = match.end()
     if position < len(clean):
         elements.append({"tag": "text", "text": clean[position:]})
+    if bold:
+        for element in elements:
+            element['style'] = ['bold']
     return elements or [{"tag": "text", "text": " "}]
 
 

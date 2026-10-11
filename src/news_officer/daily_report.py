@@ -4,6 +4,38 @@ import re
 from collections import Counter
 
 from .models import DailyItem
+from .summarizer import remove_editorial_leadins
+
+
+def reader_episode(markdown: str, document_url: str = '') -> str:
+    """Group one episode's reading and listening links below its prose."""
+    content = render_daily_summary(markdown, reader_mode=True)
+    lines, links = [], []
+    for line in content.splitlines():
+        clean = line.strip().removeprefix('**').removesuffix('**').strip()
+        if re.match(r'^(?:链接|节目链接|收听链接)：', clean):
+            value = clean.split('：', 1)[1].strip()
+            links.append(f'[收听节目]({value})' if re.fullmatch(r'https?://\S+', value) else value)
+            continue
+        if clean.startswith('节目：') or (not any(v.strip() for v in lines) and clean and not clean.startswith('#')):
+            line = '**' + clean + '**'
+        lines.append(line)
+    if document_url:
+        lines.extend(['', f'[精读与完整中文对谈]({document_url})'])
+    if links:
+        lines.extend(['', *dict.fromkeys(links)])
+    return '\n'.join(lines).strip()
+
+
+def episode_document_url(episode, documents):
+    exact = [d for d in documents if d.get('episode_id') == episode.id]
+    # Older frozen document results have no episode_id. Match both exact title
+    # and show, never positional order (some episodes have no reading document).
+    matches = exact or [d for d in documents if not d.get('episode_id') and
+                       d['title'].startswith(f'{episode.title}｜{episode.show}｜')]
+    if len(matches) > 1:
+        raise ValueError('Ambiguous episode document mapping')
+    return matches[0]['url'] if matches else ''
 
 
 def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode: bool = False) -> str:
@@ -12,6 +44,7 @@ def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode
     marker = '发现渠道：Podwise 扩展发现\n\n'
     if reader_mode:
         markdown = markdown.removeprefix(marker)
+        markdown = remove_editorial_leadins(markdown)
     elif discovered and not markdown.startswith(marker):
         markdown = marker + markdown
     markdown = markdown.replace('\n## 内容解读\n', '\n')

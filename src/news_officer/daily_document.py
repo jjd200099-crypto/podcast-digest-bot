@@ -18,12 +18,23 @@ from .shownotes import INTRO, VERSION, note_identity, render_episode, text_node
 
 
 def tree_signature(node):
-    """Ignore server IDs/default styles, retain structure, text and link targets."""
+    """Ignore server IDs/run boundaries; retain exact text and link targets.
+
+    Feishu can split a literal text run into several runs during storage. Those
+    storage boundaries are not content changes. Do not normalize whitespace or
+    merge across different link destinations.
+    """
     payload = next((v for k, v in node.items() if isinstance(v, dict) and k != 'children'), {})
-    elements = tuple((e.get('text_run', {}).get('content', ''),
-                      e.get('text_run', {}).get('text_element_style', {}).get('link', {}).get('url', ''))
-                     for e in payload.get('elements', []))
-    return node['block_type'], elements, tuple(tree_signature(c) for c in node.get('children', []))
+    elements = []
+    for element in payload.get('elements', []):
+        run = element.get('text_run', {})
+        text = run.get('content', '')
+        link = run.get('text_element_style', {}).get('link', {}).get('url', '')
+        if elements and elements[-1][1] == link:
+            elements[-1] = (elements[-1][0] + text, link)
+        else:
+            elements.append((text, link))
+    return node['block_type'], tuple(elements), tuple(tree_signature(c) for c in node.get('children', []))
 
 
 def read_tree(blocks, token):
@@ -136,12 +147,12 @@ class DailyDocumentCompiler:
                                          'targets': audience})
         return count
 
-    def _notes(self, record, digest):
+    def _notes(self, record, digest, *, fulltext_attached=False):
         identity = note_identity(record)
         with self.store._connect() as db:
             row = db.execute('SELECT notes_json FROM episode_shownotes WHERE identity=?', (identity,)).fetchone()
         notes = json.loads(row[0]) if row else self.writer.generate(record)
-        nodes, markdown = render_episode(record, notes, digest)
+        nodes, markdown = render_episode(record, notes, digest, fulltext_attached=fulltext_attached)
         if not row:
             with self.store._connect() as db:
                 db.execute('INSERT OR IGNORE INTO episode_shownotes VALUES (?,?,?)',

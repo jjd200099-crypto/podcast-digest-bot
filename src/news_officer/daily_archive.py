@@ -40,6 +40,8 @@ def read_daily_digest(store, day: str) -> dict:
             if update and update not in feature_updates:
                 feature_updates.append(update)
         documents.extend((store.get_job_result(job['job_key'], 'daily:inline-documents') or {}).get('documents', []))
+        for result in store.list_job_results(job['job_key'], 'daily_document_ready'):
+            documents.extend(result['documents'])
         for value in store.list_job_results(job["job_key"], "daily_item"):
             item = DailyItem.from_persisted_dict(value)
             previous = items.get(item.episode.id)

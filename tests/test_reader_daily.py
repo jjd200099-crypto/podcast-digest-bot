@@ -47,7 +47,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Podwise', archived)
         self.assertNotIn('播客追踪状态', archived)
 
-    async def test_release_notes_default_off_and_opt_in(self):
+    async def test_reader_omits_release_notes_even_when_opted_in(self):
         from news_officer.daily_archive import read_daily_digest
 
         for enabled in (False, True):
@@ -56,8 +56,8 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
                 payload={'scheduled_for': f'{day}T08:30:00+08:00'})
             instance.settings.daily_release_notes = enabled
             await instance._handle_daily_job(job)
-            self.assertEqual('功能更新' in body(self.messenger.attempts[-1]), enabled)
-            self.assertEqual('功能更新' in read_daily_digest(self.store, day)['markdown'], enabled)
+            self.assertNotIn('功能更新', body(self.messenger.attempts[-1]))
+            self.assertNotIn('功能更新', read_daily_digest(self.store, day)['markdown'])
             self.store.complete(job.key)
 
     async def test_chat_allowlist_skips_invalid_ids_and_private_subscriptions(self):
@@ -199,22 +199,21 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.analysis_complete(job.key))
         self.assertEqual(self.messenger.attempts, [])
 
-    async def test_document_retry_does_not_rescan_or_send_early(self):
+    async def test_document_failure_cannot_block_original_daily_send(self):
         instance, job, podcast = self.setup_job([self.item('selected', 5)])
         compiler = Mock()
+        compiler.min_stars = 4
         compiler.snapshot.return_value = ('revision', ['selected'], [])
         compiler.publish.side_effect = [TimeoutError('retry'),
-            {'documents': [{'title': 'Selected', 'url': 'https://example.test/doc'}]}]
+            {'documents': [{'title': 'Selected', 'episode_id': 'selected', 'url': 'https://example.test/doc'}]}]
         instance.document_compiler = compiler
-        with self.assertRaises(TimeoutError):
-            await instance._handle_daily_job(job)
-        self.assertEqual(self.messenger.attempts, [])
         await instance._handle_daily_job(job)
         self.assertEqual(podcast.calls, 1)
         self.assertEqual(len(self.messenger.attempts), 1)
-        self.assertIn('https://example.test/doc', self.messenger.attempts[0].content)
+        self.assertNotIn('https://example.test/doc', self.messenger.attempts[0].content)
         await instance._handle_daily_job(job)
-        self.assertEqual(compiler.publish.call_count, 2)
+        compiler.publish.assert_not_called()
+        compiler.snapshot.assert_not_called()
         self.assertEqual(len(self.messenger.attempts), 1)
 
     async def test_send_retry_preserves_exactly_one_frozen_bundle(self):
@@ -269,37 +268,27 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
                          [('chat_id', 'oc_good')])
 
-    async def test_inline_value_error_delivers_body_and_retries_without_freezing_empty(self):
+    async def test_daily_body_never_calls_document_compiler(self):
         instance, job, podcast = self.setup_job([self.item('selected', 5)])
-        compiler = Mock()
-        compiler.snapshot.return_value = ('revision', ['selected'], [])
-        compiler.publish.side_effect = [ValueError('Shownotes validation failed'),
-            {'documents': [{'title': 'Selected', 'url': 'https://example.test/doc'}]}]
+        compiler = Mock(min_stars=5)
+        compiler.publish.side_effect = ValueError('Shownotes validation failed')
         instance.document_compiler = compiler
-        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
-            await instance._handle_daily_job(job)
-        warnings = [r for r in logs.records if 'compilation deferred' in r.getMessage()]
-        self.assertTrue(warnings[0].exc_info)
-        self.assertIn('Traceback', '\n'.join(logs.output))
+        await instance._handle_daily_job(job)
+        compiler.publish.assert_not_called()
+        compiler.snapshot.assert_not_called()
         self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
         self.assertEqual(len(self.messenger.attempts), 1)
-        self.assertNotIn('https://example.test/doc', self.messenger.attempts[0].content)
-        retry = self.store.claim_next('document')
-        self.assertEqual(retry.payload['mode'], 'inline_daily_retry')
-        await instance._handle_document_job(retry)
-        self.assertEqual(self.store.get_job_result(job.key, 'daily:inline-documents')['documents'],
-                         [{'title': 'Selected', 'url': 'https://example.test/doc'}])
         self.assertEqual(podcast.calls, 1)
-        self.assertEqual(len(self.messenger.attempts), 2)
 
-    async def test_inline_snapshot_changed_still_raises(self):
+    async def test_legacy_inline_snapshot_changed_is_deferred(self):
         instance, job, _ = self.setup_job([self.item('selected', 5)])
         compiler = Mock()
         compiler.snapshot.return_value = ('revision', ['selected'], [])
         compiler.publish.return_value = None
         instance.document_compiler = compiler
-        with self.assertRaisesRegex(RuntimeError, 'snapshot changed'):
-            instance._inline_daily_documents(job, datetime.now(UTC))
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            self.assertEqual(instance._inline_daily_documents(job, datetime.now(UTC)), [])
+        self.assertTrue(any(r.exc_info for r in logs.records))
         self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
 
     async def test_inline_library_error_returns_empty_then_normal_result_is_cached(self):
@@ -326,7 +315,9 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
 
         instance, job, _ = self.setup_job([])
         instance.wake_workers = {'daily': asyncio.Event()}
-        instance._handle_daily_job = AsyncMock(side_effect=ValueError('secret-token-in-url'))
+        error = ValueError('secret-token-in-url')
+        error.__cause__ = RuntimeError('secret-token-in-chain')
+        instance._handle_daily_job = AsyncMock(side_effect=error)
         instance._failure_notice = AsyncMock()
         with (patch.object(self.store, 'claim_next', side_effect=[job, asyncio.CancelledError()]),
               self.assertLogs('news_officer.runtime', level='ERROR') as logs,
@@ -337,6 +328,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Traceback', output)
         self.assertIn('_worker', output)
         self.assertNotIn('secret-token-in-url', output)
+        self.assertNotIn('secret-token-in-chain', output)
 
 
     async def test_invalid_optional_allowlist_logs_and_operations_warns(self):
@@ -355,41 +347,25 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
             warnings = business_snapshot(self.store.path)['warnings']
         self.assertTrue(any(w.startswith('daily_allowlist_invalid:') for w in warnings))
 
-    async def test_real_mixed_episode_validation_delivers_body_and_compiles_good_episode(self):
-        from test_daily_document import notes
-        from test_episode_document import SelectedDocuments
+    async def test_reader_omits_release_updates_without_claiming_them(self):
+        instance, job, _ = self.setup_job([self.item('selected')], payload={
+            'scheduled_for': '2026-10-11T08:30:00+08:00'})
+        await instance._handle_daily_job(job)
+        self.assertNotIn('功能更新', body(self.messenger.attempts[0]))
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM daily_release_announcements').fetchone()[0], 0)
 
-        test = SelectedDocuments()
-        test.setUp()
-        self.addCleanup(test.doCleanups)
-        f = test.fixture
-        f.add_episode('two')
-        test.rate('two', 5)
-        def generate(record):
-            value = notes(record)
-            if record.episode.id == 'one':
-                value['core'][0]['evidence_ids'] = ['invented']
-            return value
-        f.writer.generate.side_effect = generate
-        instance, job, _ = self.setup_job([self.item('one', 5), self.item('two', 5)],
-            key=f.base, payload={'scheduled_for': '2026-09-21T08:30:00+08:00'})
-        instance.document_compiler = test.compiler
-        test.compiler.audience_filter = instance._document_audience
-        with self.assertLogs(level='WARNING'):
+    async def test_mixed_allowlist_warning_reaches_operations(self):
+        import os
+
+        from news_officer.operations import business_snapshot
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance.settings.daily_chat_ids = ('oc_good', 'invalid')
+        instance.settings.daily_require_chat_ids = True
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
             await instance._handle_daily_job(job)
-        self.assertEqual(f.api.creates, 1)
-        self.assertTrue(f.api.files[0]['name'].startswith('two｜'))
-        self.assertEqual(len(self.messenger.attempts), 1)
-        self.assertNotIn('https://www.feishu.cn/docx/', self.messenger.attempts[0].content)
-        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
-        self.assertIsNone(f.store.get_job_result(job.key, 'episodes:content'))
-        retry = self.store.claim_next('document')
-        self.assertEqual(retry.payload['mode'], 'inline_daily_retry')
-        f.writer.generate.side_effect = notes
-        await instance._handle_document_job(retry)
-        self.assertEqual(f.api.creates, 2)
-        self.assertEqual(len(self.store.get_job_result(job.key, 'daily:inline-documents')['documents']), 2)
-        self.assertEqual(len(self.messenger.attempts), 2)
-        self.assertEqual(self.messenger.attempts[-1].content.count('https://www.feishu.cn/docx/'), 2)
-        await instance._handle_document_job(retry)
-        self.assertEqual(len(self.messenger.attempts), 2)
+        self.assertTrue(any('daily_allowlist_invalid:' in r.getMessage() for r in logs.records))
+        self.assertEqual([r.target_id for r in self.messenger.attempts], ['oc_good'])
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_good,invalid'}, clear=True):
+            self.assertTrue(any(w.startswith('daily_allowlist_invalid:')
+                for w in business_snapshot(self.store.path)['warnings']))

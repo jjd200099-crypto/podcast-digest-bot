@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from news_officer.delivery_watchdog import (
     CheckError,
+    api,
     check_receipt,
     config_warnings,
     is_daily_receipt,
@@ -17,6 +18,13 @@ from news_officer.delivery_watchdog import (
 
 
 class WatchdogTests(unittest.TestCase):
+    def test_http_error_retains_only_safe_numeric_api_code(self):
+        session = Mock()
+        session.request.return_value.status_code = 400
+        session.request.return_value.json.return_value = {'code': 230001, 'msg': 'secret response body'}
+        with self.assertRaisesRegex(CheckError, '^Feishu HTTP 400; API code 230001$'):
+            api(session, 'GET', '/im/v1/messages')
+
     def setUp(self):
         self.now = datetime(2026, 10, 8, 2, tzinfo=UTC)
         self.day = date(2026, 10, 8)

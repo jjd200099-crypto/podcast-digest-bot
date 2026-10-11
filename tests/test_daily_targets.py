@@ -24,3 +24,9 @@ class DailyTargetTests(unittest.TestCase):
         self.assertEqual(code(('bad',), False), ['daily_allowlist_invalid'])
         self.assertEqual(code(('bad',), True), ['daily_allowlist_required_but_missing'])
         self.assertEqual(code(('oc_a',), True, 'oc_a'), [])
+
+    def test_mixed_allowlist_warns_without_echoing_invalid_content(self):
+        warnings = allowlist_warnings(('oc_good', 'bad secret value'), require=True)
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0].startswith('daily_allowlist_invalid:'))
+        self.assertNotIn('secret', warnings[0])

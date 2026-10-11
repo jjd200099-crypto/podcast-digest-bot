@@ -63,12 +63,11 @@ class ShownotesValidation(unittest.TestCase):
         result = validate_notes(self.value, self.evidence)
         self.assertEqual(result['quotes'], self.value['quotes'][:2])
 
-    def test_overlong_first_quote_keeps_original_failure(self):
+    def test_overlong_first_quote_is_dropped_whole(self):
         text = ' '.join(f'word{i}' for i in range(26))
         self.evidence['C0001']['text'] = text + ' Short quote.'
         self.value['quotes'] = [self.quote(text), self.quote('Short quote.')]
-        with self.assertRaisesRegex(ValueError, 'Quote budget exceeded'):
-            validate_notes(self.value, self.evidence)
+        self.assertEqual(validate_notes(self.value, self.evidence)['quotes'], [])
 
     def test_fabricated_tail_is_rejected_before_budget_trimming(self):
         text = ' '.join(f'word{i}' for i in range(25))

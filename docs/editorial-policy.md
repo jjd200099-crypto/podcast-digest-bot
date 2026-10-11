@@ -76,8 +76,21 @@ unverified transcript remains pending/unrated, never automatically 无关.
 
 `NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **5**. Production should also
 set it to 5 explicitly, since an older environment override of 3 wins over code
-defaults. In default reader mode, automatic compilation happens before the daily message
-is frozen; verified document links are included in that same message. Legacy
-non-reader mode compiles after delivery and sends a separate link notice. Frozen
+defaults. In default reader mode, the daily message is sent before compilation. Independent
+episode jobs edit the original receipt after verification and permission checks.
+One same-day links-only followup uses the frozen, revalidated audience after all
+episode jobs finish or stop. Legacy non-reader mode sends a separate link notice. Frozen
 older document batches cannot bypass the current threshold. A user's explicit
 request for a detailed episode document still bypasses the star threshold.
+
+After the operator confirms full-text publication rights for the configured
+audience, `NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT=true` appends the complete verified
+archive as a complete Chinese translation to each selected/requested document.
+Timestamp cues are removed, explicit speakers retained, and paragraphs made readable.
+The verified original is unchanged. Translation uses the configured model (and
+model quota), not additional Podwise calls. Batches are durably cached and checked
+for segment coverage/order, Chinese output and source numbers before publication.
+These checks detect structural omissions, not every possible semantic error.
+Only an exact, unedited legacy generated appendix can be replaced, with an optimistic
+document revision and frozen recoverable backup; front notes are preserved.
+No broader sharing permissions or chat attachments are added.

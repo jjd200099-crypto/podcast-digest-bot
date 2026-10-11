@@ -48,6 +48,9 @@ def allowlist_warnings(chat_ids, require=False, watch_chat_id="") -> list[str]:
     elif not chat_ids:
         warnings.append("daily_allowlist_unset: NEWS_OFFICER_DAILY_CHAT_IDS is empty; the daily falls back "
                         "to every active subscription (set it, then enable NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS)")
+    invalid_count = sum(not valid_target_id('chat_id', value) for value in chat_ids)
+    if valid and invalid_count:
+        warnings.append(f'daily_allowlist_invalid: {invalid_count} malformed entry(s) ignored')
     if valid and watch_chat_id and watch_chat_id not in valid:
         warnings.append("watch_chat_not_in_daily_allowlist: NEWS_OFFICER_WATCH_CHAT_ID is not one of "
                         "NEWS_OFFICER_DAILY_CHAT_IDS; the watchdog checks a chat the daily does not target")
