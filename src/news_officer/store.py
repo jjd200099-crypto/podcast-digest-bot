@@ -438,7 +438,7 @@ class Store:
             )
             return result.rowcount
 
-    def enqueue(self, key: str, kind: str, payload: dict) -> bool:
+    def enqueue(self, key: str, kind: str, payload: dict, *, document_max_attempts: int = 3) -> bool:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -456,17 +456,20 @@ class Store:
                 return True
             # A daily job that exhausted its immediate retries may be revived
             # later the same day by the scheduler. Its immutable results and
-            # outbox are deliberately retained and resumed.
+            # outbox are deliberately retained and resumed. Document attempts
+            # remain cumulative across hourly revival.
             if kind not in {"daily", "document"}:
                 return False
             revived = connection.execute(
                 """
                 UPDATE jobs
-                SET status = 'pending', attempts = 0, updated_at = ?
+                SET status = 'pending', attempts = CASE WHEN kind='document' THEN attempts ELSE 0 END, updated_at = ?
                 WHERE job_key = ? AND kind IN ('daily','document') AND status = 'failed'
                     AND available_at <= ?
+                    AND (json_extract(payload_json,'$.mode') != 'daily_episode'
+                         OR json_extract(payload_json,'$.mode') IS NULL OR attempts < ?)
                 """,
-                (now, key, now),
+                (now, key, now, document_max_attempts),
             )
             return revived.rowcount == 1
 

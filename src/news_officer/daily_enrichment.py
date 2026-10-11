@@ -64,12 +64,15 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
                 'mode': 'daily_episode', 'day': bundle['enrichment']['day'],
                 'base_job': base, 'episode_id': episode_id, 'targets': targets,
                 'record_revision': item.attachment.record_revision_sha256}
-            if compiler and not compiler.retry_available(payload, today):
+            # Same-day deadline is stricter than the six-day recovery window.
+            retry_available = compiler.retry_available(payload, today) if compiler else payload['day'] == today
+            if not retry_available:
                 # Persist the terminal job as well as the per-revision warning.
                 store.enqueue(key, 'document', payload)
-                compiler._stop_job(key)
+                store.fail(key, 'DocumentRetryStopped', 1, max_attempts=1)
                 continue
-            count += store.enqueue(key, 'document', payload)
+            count += store.enqueue(key, 'document', payload,
+                document_max_attempts=compiler.max_attempts if compiler else 3)
         count += enqueue_followup(store, base, today, audience_filter=audience_filter)
     return count
 

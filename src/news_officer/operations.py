@@ -1,6 +1,7 @@
 """Read-only business checks. No message bodies, identities or credentials."""
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -43,6 +44,11 @@ def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/S
         failed = db.execute("SELECT count(*) FROM jobs WHERE status='failed'").fetchone()[0]
         document_failures = db.execute(
             "SELECT count(*) FROM episode_document_attempts WHERE status='failed'").fetchone()[0]
+        missing_documents = db.execute(
+            "SELECT episode_id,day FROM episode_document_attempts WHERE status='failed' "
+            "UNION SELECT json_extract(payload_json,'$.episode_id'),json_extract(payload_json,'$.day') "
+            "FROM jobs WHERE kind='document' AND status='failed' "
+            "AND json_extract(payload_json,'$.mode')='daily_episode'").fetchall()
         rows = db.execute(
             "SELECT payload_json FROM job_results WHERE job_key=? AND kind='daily_item'", (key,)
         ).fetchall()
@@ -61,6 +67,14 @@ def business_snapshot(path: Path, *, now=None, daily_time=None, timezone="Asia/S
         os.environ.get("NEWS_OFFICER_WATCH_CHAT_ID", "").strip())
     if document_failures:
         warnings.append(f'episode_document_retry_stopped:{document_failures}')
+    for episode, day in missing_documents:
+        # Episode fingerprint identifies the source without exposing URLs or titles.
+        fingerprint = hashlib.sha256(str(episode).encode()).hexdigest()[:12]
+        try:
+            safe_day = datetime.strptime(str(day), '%Y-%m-%d').date().isoformat()
+        except ValueError:
+            safe_day = 'unknown'
+        warnings.append(f'document link missing:episode={fingerprint}:day={safe_day}')
     overdue = subscribed and not complete and local >= scheduled + timedelta(minutes=45)
     state = ("not_subscribed" if not subscribed else "sent" if complete else "overdue" if overdue
              else "partial" if delivered else "processing" if job else "not_due" if local < scheduled else "pending")

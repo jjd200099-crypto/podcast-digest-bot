@@ -99,14 +99,13 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 1)
         self.assertEqual(len(self.messenger.attempts), 1)
 
-    async def test_existing_failed_document_is_not_abandoned_after_six_days(self):
+    async def test_existing_failed_document_is_stopped_after_six_days(self):
         await self.prepare()
         enqueue_enrichment(self.store, '2026-10-11')
         first = self.store.claim_next('document')
         self.store.fail(first.key, 'temporary outage', 5, failed_daily_requeue_seconds=0)
-        self.assertEqual(enqueue_enrichment(self.store, '2026-10-20'), 1)
-        recovered = self.store.claim_next('document')
-        self.assertEqual(recovered.key, first.key)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-20'), 0)
+        self.assertIsNone(self.store.claim_next('document'))
         self.assertEqual(len(self.messenger.attempts), 1)
 
     async def test_three_fulltext_recommendations_without_caches_all_enqueue_automatically(self):
@@ -387,3 +386,31 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.api.request = revoke_on_read
         update_daily_message(self.store, self.api, base.key, audience_filter=audience)
         self.assertEqual(self.api.puts, [])
+
+
+    async def test_revival_preserves_attempts_and_respects_configured_cap(self):
+        instance, _ = await self.prepare()
+        compiler = self.compiler(instance)
+        compiler.max_attempts = 2
+        enqueue_enrichment(self.store, '2026-10-11', compiler=compiler)
+        first = self.store.claim_next('document')
+        self.store.fail(first.key, 'outage', first.attempts, max_attempts=1,
+                        failed_daily_requeue_seconds=0)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11', compiler=compiler), 1)
+        revived = self.store.claim_next('document')
+        # The sibling was already pending; locate the revived job explicitly.
+        if revived.key != first.key:
+            revived = self.store.claim_next('document')
+        self.assertEqual(revived.attempts, 2)
+        self.store.fail(revived.key, 'outage', revived.attempts, max_attempts=1,
+                        failed_daily_requeue_seconds=0)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11', compiler=compiler), 0)
+        self.writer.generate.assert_not_called()
+        from news_officer.operations import business_snapshot
+        warnings = business_snapshot(self.store.path)['warnings']
+        self.assertTrue(any('document link missing:episode=' in w and 'day=2026-10-11' in w
+                            for w in warnings))
+        self.assertEqual(len(self.messenger.attempts), 1)
+        with self.store._connect() as db:
+            self.assertEqual(tuple(db.execute('SELECT attempts,status FROM jobs WHERE job_key=?',
+                                              (first.key,)).fetchone()), (2, 'failed'))

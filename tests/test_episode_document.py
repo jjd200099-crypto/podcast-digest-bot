@@ -598,7 +598,7 @@ class BackoffRecoveryCaps(unittest.TestCase):
         f.store.fail(job.key, 'DocumentRetryStopped', job.attempts, max_attempts=1,
                      failed_daily_requeue_seconds=0)
         client.responses.parse.reset_mock()
-        # #47 can revive a failed job after its cooldown, resetting only job attempts.
+        # Revival preserves job attempts; the revision budget still blocks model calls.
         self.assertTrue(f.store.enqueue(job.key, 'document', job.payload))
         revived = f.store.claim_next('document')
         restarted = SelectedEpisodeCompiler(f.store, f.api, self.compiler.writer,
@@ -616,7 +616,6 @@ class BackoffRecoveryCaps(unittest.TestCase):
         from unittest.mock import Mock
 
         from news_officer.daily_enrichment import enqueue_enrichment
-        from news_officer.episode_document import DocumentRetryStopped
         from news_officer.operations import business_snapshot
         from news_officer.shownotes import ShownotesWriter
         f = self.fixture
@@ -640,12 +639,9 @@ class BackoffRecoveryCaps(unittest.TestCase):
         client = Mock()
         self.compiler.writer = ShownotesWriter(client, 'test-model')
         self.compiler.today = lambda: '2026-10-01'
-        # Exercise #47's recovery without the scheduler guard, then the guarded path.
-        self.assertEqual(enqueue_enrichment(f.store, '2026-10-01'), 1)
-        revived = f.store.claim_next('document')
-        with self.assertRaises(DocumentRetryStopped):
-            self.compiler.publish(revived)
-        f.store.fail(revived.key, 'DocumentRetryStopped', revived.attempts, max_attempts=1)
+        # Even callers without a compiler must reject documents past their day.
+        self.assertEqual(enqueue_enrichment(f.store, '2026-10-01'), 0)
+        self.assertIsNone(f.store.claim_next('document'))
         self.assertEqual(enqueue_enrichment(f.store, '2026-10-01', compiler=self.compiler), 0)
         client.responses.parse.assert_not_called()
         with f.store._connect() as db:
