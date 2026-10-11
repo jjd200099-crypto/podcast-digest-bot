@@ -1138,11 +1138,14 @@ class NewsOfficerRuntime:
                 if hasattr(self, 'background_jobs'):
                     self.background_jobs.pop(job.key, None)
 
-    def _log_scheduler_failure(self, error, site=None, *, warning=False):
+    def _log_scheduler_failure(self, error, site='_scheduler', *, warning=False):
         now = getattr(self, '_scheduler_clock', time.monotonic)()
         if not hasattr(self, '_scheduler_failures'):
             self._scheduler_failures = {}
-        key = (type(error), site or hashlib.sha256(str(error).encode()).digest())
+        # Message text varies per request and may contain sensitive data.
+        key = (type(error), site)
+        if key not in self._scheduler_failures and len(self._scheduler_failures) >= 256:
+            del self._scheduler_failures[next(iter(self._scheduler_failures))]
         previous, suppressed = self._scheduler_failures.get(key, (None, 0))
         if previous is not None and now - previous < 600:
             self._scheduler_failures[key] = (previous, suppressed + 1)
@@ -1170,7 +1173,7 @@ class NewsOfficerRuntime:
                         if inserted:
                             self._wake_worker('daily')
                 except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
-                    self._log_scheduler_failure(error)
+                    self._log_scheduler_failure(error, site='daily_prepare')
                 try:
                     if has_subscribers and local_now.time() >= self.settings.daily_time:
                         jobs = [
@@ -1204,7 +1207,7 @@ class NewsOfficerRuntime:
                                 logger.info("Queued daily digest %s", key)
                                 self._wake_worker("daily")
                 except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
-                    self._log_scheduler_failure(error)
+                    self._log_scheduler_failure(error, site='daily_enqueue')
                 try:
                     if (not getattr(self.settings, 'daily_reader_mode', False)
                             and has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1)
@@ -1216,14 +1219,14 @@ class NewsOfficerRuntime:
                         if inserted:
                             self._wake_worker('daily')
                 except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
-                    self._log_scheduler_failure(error)
+                    self._log_scheduler_failure(error, site='transcript_catchup')
                 try:
                     if (getattr(self, 'document_compiler', None)
                             and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat(),
                                 **({'requested_only': True} if getattr(self.settings, 'daily_reader_mode', False) else {}))):
                         self._wake_worker('document')
                 except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
-                    self._log_scheduler_failure(error)
+                    self._log_scheduler_failure(error, site='document_enqueue')
                 try:
                     if (getattr(self, 'document_compiler', None)
                             and getattr(self.settings, 'daily_reader_mode', False)):
@@ -1232,9 +1235,9 @@ class NewsOfficerRuntime:
                                 audience_filter=self._document_audience, compiler=self.document_compiler):
                             self._wake_worker('document')
                 except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
-                    self._log_scheduler_failure(error)
+                    self._log_scheduler_failure(error, site='daily_enrichment')
             except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
-                self._log_scheduler_failure(error)
+                self._log_scheduler_failure(error, site='scheduler_tick')
             await asyncio.sleep(30)
 
     async def _handle_document_job(self, job):

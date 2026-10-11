@@ -221,7 +221,7 @@ class SchedulerIsolationTests(unittest.IsolatedAsyncioTestCase):
             runtime._log_scheduler_failure(ValueError('first'))
             runtime._log_scheduler_failure(ValueError('first'))
             self.assertEqual(log.call_count, 1)
-            runtime._log_scheduler_failure(ValueError('second'))
+            runtime._log_scheduler_failure(ValueError('second'), site='other_step')
             runtime._log_scheduler_failure(TypeError('first'))
             self.assertEqual(log.call_count, 3)
             runtime._scheduler_clock.return_value = 600
@@ -234,6 +234,24 @@ class SchedulerIsolationTests(unittest.IsolatedAsyncioTestCase):
             runtime._scheduler_clock.return_value = 1200
             runtime._log_scheduler_failure(ValueError('first'))
             self.assertEqual(log.call_args.args[2], 1)
+
+    def test_scheduler_limiter_ignores_message_and_caps_oldest_keys(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime._scheduler_clock = Mock(return_value=0)
+        with patch('news_officer.runtime.logger.error') as log:
+            runtime._log_scheduler_failure(ValueError('request 1'), site='fetch')
+            runtime._log_scheduler_failure(ValueError('request 2'), site='fetch')
+            self.assertEqual(log.call_count, 1)
+            runtime._log_scheduler_failure(ValueError('request 2'), site='parse')
+            self.assertEqual(log.call_count, 2)
+            for index in range(255):
+                runtime._log_scheduler_failure(ValueError(str(index)), site=f'step_{index}')
+            self.assertEqual(len(runtime._scheduler_failures), 256)
+            self.assertNotIn((ValueError, 'fetch'), runtime._scheduler_failures)
+            self.assertIn((ValueError, 'parse'), runtime._scheduler_failures)
+            runtime._log_scheduler_failure(ValueError('new request'), site='fetch')
+            self.assertEqual(len(runtime._scheduler_failures), 256)
+            self.assertNotIn((ValueError, 'parse'), runtime._scheduler_failures)
 
     async def test_cancelled_step_propagates(self):
         runtime = object.__new__(NewsOfficerRuntime)
