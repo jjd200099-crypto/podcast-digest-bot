@@ -173,3 +173,45 @@ class CandidateCheckpointTests(unittest.TestCase):
         service.max_daily_summaries = 1
         self.assertEqual(len(service.build_daily(self.now)), 1)
         self.assertIn(second.id, [e.id for e in self.store.due_daily_transcripts()])
+
+
+class SchedulerIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_enrichment_failure_preserves_ticks_traceback_and_cancellation(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime.settings = SimpleNamespace(timezone=UTC, daily_time=datetime.min.time(),
+            manual_digest_id='', daily_reader_mode=True)
+        runtime.store = Mock()
+        runtime._has_daily_recipients = Mock(return_value=True)
+        runtime._document_audience = Mock()
+        runtime.document_compiler = Mock()
+        runtime._wake_worker = Mock()
+        ticks = 0
+
+        async def sleep(_):
+            nonlocal ticks
+            ticks += 1
+            if ticks == 2:
+                raise asyncio.CancelledError
+
+        async def thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with patch('news_officer.runtime.asyncio.to_thread', side_effect=thread), \
+                patch('news_officer.runtime.asyncio.sleep', side_effect=sleep), \
+                patch('news_officer.daily_enrichment.enqueue_enrichment',
+                      side_effect=ValueError('sensitive-value')) as enrichment, \
+                self.assertLogs('news_officer.runtime', level='ERROR') as logs, \
+                self.assertRaises(asyncio.CancelledError):
+            await runtime._scheduler()
+        self.assertEqual(enrichment.call_count, 2)
+        self.assertEqual(runtime.store.enqueue.call_count, 2)
+        self.assertTrue(all(record.exc_info for record in logs.records))
+        self.assertIn('Traceback', logs.output[0])
+        self.assertNotIn('sensitive-value', ''.join(logs.output))
+
+    async def test_cancelled_step_propagates(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime.settings = SimpleNamespace(timezone=UTC)
+        runtime._has_daily_recipients = Mock(side_effect=asyncio.CancelledError)
+        with self.assertRaises(asyncio.CancelledError):
+            await runtime._scheduler()

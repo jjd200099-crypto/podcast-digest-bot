@@ -1081,69 +1081,94 @@ class NewsOfficerRuntime:
                 if hasattr(self, 'background_jobs'):
                     self.background_jobs.pop(job.key, None)
 
+    @staticmethod
+    def _log_scheduler_failure(error):
+        # Preserve stack frames without exception text or chained secrets.
+        safe_error = RuntimeError(type(error).__name__)
+        logger.error('Scheduler step failed: %s', type(error).__name__,
+                     exc_info=(RuntimeError, safe_error, error.__traceback__))
+
     async def _scheduler(self) -> None:
         while True:
-            local_now = datetime.now(self.settings.timezone)
-            has_subscribers = await asyncio.to_thread(self._has_daily_recipients)
-            scheduled = local_now.replace(hour=self.settings.daily_time.hour,
-                minute=self.settings.daily_time.minute, second=0, microsecond=0)
-            if (has_subscribers and getattr(self.settings, 'daily_preparation_enabled', False)
-                    and scheduled - timedelta(hours=2) <= local_now < scheduled - timedelta(hours=1)):
-                inserted = await asyncio.to_thread(self.store.enqueue,
-                    f'daily:prepare:{scheduled.date().isoformat()}', 'daily',
-                    {'scheduled_for': scheduled.isoformat(), 'prepare_only': True})
-                if inserted:
-                    self._wake_worker('daily')
-            if has_subscribers and local_now.time() >= self.settings.daily_time:
-                jobs = [
-                    (
-                        f"daily:{local_now.date().isoformat()}",
-                        {"scheduled_for": local_now.isoformat()},
-                    )
-                ]
-                # A one-time backfill is explicit operator state, not coupled
-                # to a code version. Keeping the ID stable makes it idempotent
-                # across deploys and prevents accidental same-day re-sends.
-                manual_digest_id = self.settings.manual_digest_id
-                if manual_digest_id:
-                    jobs.append(
-                        (
-                            f"daily:manual:{manual_digest_id}",
-                            {
-                                "scheduled_for": local_now.isoformat(),
-                                "manual_digest_id": manual_digest_id,
-                            },
-                        )
-                    )
-                for key, payload in jobs:
-                    inserted = await asyncio.to_thread(
-                        self.store.enqueue,
-                        key,
-                        "daily",
-                        payload,
-                    )
-                    if inserted:
-                        logger.info("Queued daily digest %s", key)
-                        self._wake_worker("daily")
-            if (not getattr(self.settings, 'daily_reader_mode', False)
-                    and has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1)
-                    and not await asyncio.to_thread(self.store.has_unfinished_transcript_catchup)):
-                slot = int(local_now.timestamp()) // 1800
-                inserted = await asyncio.to_thread(self.store.enqueue,
-                    f'daily:transcript-catchup:{slot}', 'daily',
-                    {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
-                if inserted:
-                    self._wake_worker('daily')
-            if (getattr(self, 'document_compiler', None)
-                    and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat(),
-                        **({'requested_only': True} if getattr(self.settings, 'daily_reader_mode', False) else {}))):
-                self._wake_worker('document')
-            if (getattr(self, 'document_compiler', None)
-                    and getattr(self.settings, 'daily_reader_mode', False)):
-                from .daily_enrichment import enqueue_enrichment
-                if await asyncio.to_thread(enqueue_enrichment, self.store, local_now.date().isoformat(),
-                        audience_filter=self._document_audience, compiler=self.document_compiler):
-                    self._wake_worker('document')
+            try:
+                local_now = datetime.now(self.settings.timezone)
+                has_subscribers = await asyncio.to_thread(self._has_daily_recipients)
+                scheduled = local_now.replace(hour=self.settings.daily_time.hour,
+                    minute=self.settings.daily_time.minute, second=0, microsecond=0)
+                try:
+                    if (has_subscribers and getattr(self.settings, 'daily_preparation_enabled', False)
+                            and scheduled - timedelta(hours=2) <= local_now < scheduled - timedelta(hours=1)):
+                        inserted = await asyncio.to_thread(self.store.enqueue,
+                            f'daily:prepare:{scheduled.date().isoformat()}', 'daily',
+                            {'scheduled_for': scheduled.isoformat(), 'prepare_only': True})
+                        if inserted:
+                            self._wake_worker('daily')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error)
+                try:
+                    if has_subscribers and local_now.time() >= self.settings.daily_time:
+                        jobs = [
+                            (
+                                f"daily:{local_now.date().isoformat()}",
+                                {"scheduled_for": local_now.isoformat()},
+                            )
+                        ]
+                        # A one-time backfill is explicit operator state, not coupled
+                        # to a code version. Keeping the ID stable makes it idempotent
+                        # across deploys and prevents accidental same-day re-sends.
+                        manual_digest_id = self.settings.manual_digest_id
+                        if manual_digest_id:
+                            jobs.append(
+                                (
+                                    f"daily:manual:{manual_digest_id}",
+                                    {
+                                        "scheduled_for": local_now.isoformat(),
+                                        "manual_digest_id": manual_digest_id,
+                                    },
+                                )
+                            )
+                        for key, payload in jobs:
+                            inserted = await asyncio.to_thread(
+                                self.store.enqueue,
+                                key,
+                                "daily",
+                                payload,
+                            )
+                            if inserted:
+                                logger.info("Queued daily digest %s", key)
+                                self._wake_worker("daily")
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error)
+                try:
+                    if (not getattr(self.settings, 'daily_reader_mode', False)
+                            and has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1)
+                            and not await asyncio.to_thread(self.store.has_unfinished_transcript_catchup)):
+                        slot = int(local_now.timestamp()) // 1800
+                        inserted = await asyncio.to_thread(self.store.enqueue,
+                            f'daily:transcript-catchup:{slot}', 'daily',
+                            {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
+                        if inserted:
+                            self._wake_worker('daily')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error)
+                try:
+                    if (getattr(self, 'document_compiler', None)
+                            and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat(),
+                                **({'requested_only': True} if getattr(self.settings, 'daily_reader_mode', False) else {}))):
+                        self._wake_worker('document')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error)
+                try:
+                    if (getattr(self, 'document_compiler', None)
+                            and getattr(self.settings, 'daily_reader_mode', False)):
+                        from .daily_enrichment import enqueue_enrichment
+                        if await asyncio.to_thread(enqueue_enrichment, self.store, local_now.date().isoformat(),
+                                audience_filter=self._document_audience, compiler=self.document_compiler):
+                            self._wake_worker('document')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error)
+            except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                self._log_scheduler_failure(error)
             await asyncio.sleep(30)
 
     async def _handle_document_job(self, job):
