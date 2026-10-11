@@ -668,7 +668,8 @@ class NewsOfficerRuntime:
             sections, eligible = [], []
             for item in summaries:
                 content = reader_episode(item.message)
-                template = reader_episode(item.message, DOCUMENT_PLACEHOLDER)
+                template = reader_episode(item.message, DOCUMENT_PLACEHOLDER,
+                    fulltext=getattr(settings, 'daily_document_fulltext', False))
                 published = item.episode.published_at
                 if published and published < start:
                     prefix = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n'

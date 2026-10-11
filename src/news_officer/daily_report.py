@@ -7,7 +7,7 @@ from .models import DailyItem
 from .summarizer import remove_editorial_leadins
 
 
-def reader_episode(markdown: str, document_url: str = '') -> str:
+def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = True) -> str:
     """Group one episode's reading and listening links below its prose."""
     content = render_daily_summary(markdown, reader_mode=True)
     lines, links = [], []
@@ -21,7 +21,8 @@ def reader_episode(markdown: str, document_url: str = '') -> str:
             line = '**' + clean + '**'
         lines.append(line)
     if document_url:
-        lines.extend(['', f'[精读和完整中文对谈]({document_url})'])
+        label = '精读和完整中文对谈' if fulltext else '精读'
+        lines.extend(['', f'[{label}]({document_url})'])
     if links:
         lines.extend(['', *dict.fromkeys(links)])
     return '\n'.join(lines).strip()

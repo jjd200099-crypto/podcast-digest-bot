@@ -146,7 +146,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         _, base = await self.prepare()
         bundle = enrichment_bundle(self.store, base.key)
         for section in bundle['enrichment']['sections']:
-            section['template'] = section['template'].replace('精读和完整中文对谈', '精读与完整中文对谈')
+            section['template'] = section['template'].replace('[精读](', '[精读与完整中文对谈](')
         original = copy.deepcopy(bundle)
         _, content = _content(bundle, {'one': {'url': 'https://www.feishu.cn/docx/one'}},
                               bundle['deliveries'][0])

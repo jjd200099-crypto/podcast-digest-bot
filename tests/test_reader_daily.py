@@ -247,6 +247,19 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.outbox_items(job.key), [])
         self.assertTrue(any('daily_message_capacity_exceeded' in w for w in business_snapshot(self.store.path)['warnings']))
 
+    async def test_document_label_matches_fulltext_setting(self):
+        from news_officer.daily_enrichment import _content
+        for enabled in (False, True):
+            instance, job, _ = self.setup_job([self.item(str(enabled), 5)], key=f'daily:fulltext-{enabled}')
+            instance.settings.daily_document_fulltext = enabled
+            await instance._handle_daily_job(job)
+            bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+            _, content = _content(bundle, {str(enabled): {'url': 'https://example.test/doc'}}, bundle['deliveries'][0])
+            self.assertIn('精读和完整中文对谈' if enabled else '精读', content)
+            if not enabled:
+                self.assertNotIn('完整中文对谈', content)
+            self.store.complete(job.key)
+
     async def test_platform_overflow_never_silently_sends_multiple_messages(self):
         instance, job, _ = self.setup_job([self.item('one')])
         with (patch('news_officer.runtime.combined_delivery_parts', return_value=[
