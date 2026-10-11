@@ -37,6 +37,11 @@ jobs:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           NEWS_OFFICER_WATCH_CHAT_ID: ${{ vars.NEWS_OFFICER_WATCH_CHAT_ID }}
+          # Keep in sync with the Railway service. Default 08:30 when unset.
+          NEWS_OFFICER_DAILY_TIME: ${{ vars.NEWS_OFFICER_DAILY_TIME || '08:30' }}
+          # Optional mirrors of the daily allowlist settings; used only to report non-fatal warnings.
+          NEWS_OFFICER_DAILY_CHAT_IDS: ${{ vars.NEWS_OFFICER_DAILY_CHAT_IDS }}
+          NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS: ${{ vars.NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS }}
           NEWS_OFFICER_ALERT_OPEN_ID: ${{ vars.NEWS_OFFICER_ALERT_OPEN_ID }}
           WATCH_DATE: ${{ inputs.date }}
           SEND_ALERT: ${{ (github.event_name == 'schedule' || inputs.notify == true) && github.run_attempt == 1 }}

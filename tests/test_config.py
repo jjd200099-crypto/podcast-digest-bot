@@ -23,12 +23,72 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
             Settings.from_env()
 
-    def test_automatic_compilation_defaults_to_worth_reading_and_above(self):
+    def test_automatic_compilation_defaults_to_four_stars_without_environment_override(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
             self.assertEqual(Settings.from_env().daily_document_min_stars, 4)
             self.assertFalse(Settings.from_env().daily_document_fulltext)
             with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT': 'true'}):
                 self.assertTrue(Settings.from_env().daily_document_fulltext)
+
+    def test_settings_constructor_defaults_to_four_stars(self):
+        from dataclasses import MISSING, fields
+
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            configured = Settings.from_env()
+        required = {f.name: getattr(configured, f.name) for f in fields(Settings)
+                    if f.default is MISSING and f.default_factory is MISSING}
+        self.assertEqual(Settings(**required).daily_document_min_stars, 4)
+
+    def test_example_document_numeric_defaults_match_constructor_and_environment(self):
+        from dataclasses import MISSING, fields
+
+        example = dict(line.split('=', 1) for line in
+                       (ROOT / '.env.example').read_text().splitlines()
+                       if line.strip() and not line.startswith('#') and '=' in line)
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            configured = Settings.from_env()
+        required = {f.name: getattr(configured, f.name) for f in fields(Settings)
+                    if f.default is MISSING and f.default_factory is MISSING}
+        defaults = Settings(**required)
+        for name in ('daily_document_min_stars', 'daily_document_max_attempts'):
+            with self.subTest(name=name):
+                self.assertEqual(int(example['NEWS_OFFICER_' + name.upper()]),
+                                 getattr(defaults, name))
+                self.assertEqual(getattr(configured, name), getattr(defaults, name))
+
+    def test_daily_delivery_configuration_defaults_and_overrides(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.daily_chat_ids, ())
+        self.assertFalse(settings.daily_release_notes)
+        self.assertFalse(settings.daily_require_chat_ids)
+        self.assertEqual(settings.daily_time.strftime('%H:%M'), '08:30')
+        with patch.dict(os.environ, {**self.base_environment(),
+                'NEWS_OFFICER_DAILY_CHAT_IDS': ' oc_one, oc_two ,',
+                'NEWS_OFFICER_DAILY_RELEASE_NOTES': 'true',
+                'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS': 'True',
+                'NEWS_OFFICER_DAILY_TIME': '08:00'}, clear=True):
+            settings = Settings.from_env()
+        self.assertEqual(settings.daily_chat_ids, ('oc_one', 'oc_two'))
+        self.assertTrue(settings.daily_release_notes)
+        self.assertTrue(settings.daily_require_chat_ids)
+        self.assertEqual(settings.daily_time.strftime('%H:%M'), '08:00')
+
+    def test_document_max_attempts_default_override_and_invalid_fallback(self):
+        for value, expected in ((None, 3), ('2', 2), ('0', 3), ('-1', 3), ('bad', 3), ('', 3)):
+            env = self.base_environment()
+            if value is not None:
+                env['NEWS_OFFICER_DAILY_DOCUMENT_MAX_ATTEMPTS'] = value
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                self.assertEqual(Settings.from_env().daily_document_max_attempts, expected)
+
+    def test_daily_health_budget_defaults_override_and_invalid_fallback(self):
+        for value, expected in ((None, 2700), ('5400', 5400), ('0', 2700), ('bad', 2700)):
+            env = self.base_environment()
+            if value is not None:
+                env['NEWS_OFFICER_DAILY_HEALTH_BUDGET_SECONDS'] = value
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                self.assertEqual(Settings.from_env().daily_health_budget_seconds, expected)
 
     def base_environment(self):
         return {

@@ -94,9 +94,11 @@ class BackgroundWatchdogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_worker_registers_and_cleans_up_background_deadlines(self):
         for kind, payload, budget in [('daily', {}, 2700), ('daily', {'prepare_only': True}, 900),
-                                      ('document', {}, 3600)]:
+                                      ('document', {}, 3600), ('daily', {'configured_budget': 5400}, 5400)]:
             with self.subTest(kind=kind, payload=payload):
                 runtime = object.__new__(NewsOfficerRuntime)
+                if payload.get('configured_budget'):
+                    runtime.settings = SimpleNamespace(daily_health_budget_seconds=payload['configured_budget'])
                 runtime.active_jobs, runtime.background_jobs = {}, {}
                 runtime.wake_workers = {kind: asyncio.Event()}
                 runtime.store = Mock()
@@ -173,3 +175,87 @@ class CandidateCheckpointTests(unittest.TestCase):
         service.max_daily_summaries = 1
         self.assertEqual(len(service.build_daily(self.now)), 1)
         self.assertIn(second.id, [e.id for e in self.store.due_daily_transcripts()])
+
+
+class SchedulerIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_enrichment_failure_preserves_ticks_traceback_and_cancellation(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime.settings = SimpleNamespace(timezone=UTC, daily_time=datetime.min.time(),
+            manual_digest_id='', daily_reader_mode=True)
+        runtime.store = Mock()
+        runtime._has_daily_recipients = Mock(return_value=True)
+        runtime._document_audience = Mock()
+        runtime.document_compiler = Mock()
+        runtime._wake_worker = Mock()
+        ticks = 0
+
+        async def sleep(_):
+            nonlocal ticks
+            ticks += 1
+            if ticks == 2:
+                raise asyncio.CancelledError
+
+        async def thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with patch('news_officer.runtime.asyncio.to_thread', side_effect=thread), \
+                patch('news_officer.runtime.asyncio.sleep', side_effect=sleep), \
+                patch('news_officer.daily_enrichment.enqueue_enrichment',
+                      side_effect=ValueError('sensitive-value')) as enrichment, \
+                self.assertLogs('news_officer.runtime', level='ERROR') as logs, \
+                self.assertRaises(asyncio.CancelledError):
+            await runtime._scheduler()
+        self.assertEqual(enrichment.call_count, 2)
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(runtime.store.enqueue.call_count, 2)
+        self.assertTrue(all(record.exc_info for record in logs.records))
+        self.assertIn('Traceback', logs.output[0])
+        self.assertNotIn('sensitive-value', ''.join(logs.output))
+
+    def test_scheduler_failure_rate_limit_uses_independent_keys_and_clock(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime._scheduler_clock = Mock(return_value=0)
+        with patch('news_officer.runtime.logger.error') as log:
+            runtime._log_scheduler_failure(ValueError('first'))
+            runtime._scheduler_clock.return_value = 599
+            runtime._log_scheduler_failure(ValueError('first'))
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_count, 1)
+            runtime._log_scheduler_failure(ValueError('second'), site='other_step')
+            runtime._log_scheduler_failure(TypeError('first'))
+            self.assertEqual(log.call_count, 3)
+            runtime._scheduler_clock.return_value = 600
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_count, 4)
+            self.assertEqual(log.call_args.args[2], 2)
+            self.assertIsNotNone(log.call_args.kwargs['exc_info'])
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_count, 4)
+            runtime._scheduler_clock.return_value = 1200
+            runtime._log_scheduler_failure(ValueError('first'))
+            self.assertEqual(log.call_args.args[2], 1)
+
+    def test_scheduler_limiter_ignores_message_and_caps_oldest_keys(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime._scheduler_clock = Mock(return_value=0)
+        with patch('news_officer.runtime.logger.error') as log:
+            runtime._log_scheduler_failure(ValueError('request 1'), site='fetch')
+            runtime._log_scheduler_failure(ValueError('request 2'), site='fetch')
+            self.assertEqual(log.call_count, 1)
+            runtime._log_scheduler_failure(ValueError('request 2'), site='parse')
+            self.assertEqual(log.call_count, 2)
+            for index in range(255):
+                runtime._log_scheduler_failure(ValueError(str(index)), site=f'step_{index}')
+            self.assertEqual(len(runtime._scheduler_failures), 256)
+            self.assertNotIn((ValueError, 'fetch'), runtime._scheduler_failures)
+            self.assertIn((ValueError, 'parse'), runtime._scheduler_failures)
+            runtime._log_scheduler_failure(ValueError('new request'), site='fetch')
+            self.assertEqual(len(runtime._scheduler_failures), 256)
+            self.assertNotIn((ValueError, 'parse'), runtime._scheduler_failures)
+
+    async def test_cancelled_step_propagates(self):
+        runtime = object.__new__(NewsOfficerRuntime)
+        runtime.settings = SimpleNamespace(timezone=UTC)
+        runtime._has_daily_recipients = Mock(side_effect=asyncio.CancelledError)
+        with self.assertRaises(asyncio.CancelledError):
+            await runtime._scheduler()

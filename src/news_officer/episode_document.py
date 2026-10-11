@@ -2,9 +2,11 @@
 
 import hashlib
 import json
+import logging
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from .daily_document import DailyDocumentCompiler, read_tree, tree_signature
 from .document_transcript import fulltext_identity, render_fulltext
@@ -12,15 +14,21 @@ from .library import LibraryError
 from .models import IncomingMessage
 from .shownotes import VERSION, note_identity, text_node
 
+logger = logging.getLogger(__name__)
+
 
 def stars(markdown):
     match = re.search(r'(?m)^推荐星级：([★☆]{5})', markdown)
     return match[1].count('★') if match else 0
 
 
+class DocumentRetryStopped(ValueError):
+    """A document revision exhausted its durable budget or same-day deadline."""
+
+
 class SelectedEpisodeCompiler(DailyDocumentCompiler):
-    def __init__(self, *args, min_stars=4, request_authorizer=None, include_fulltext=False,
-                 transcript_writer=None, **kwargs):
+    def __init__(self, *args, min_stars=4, request_authorizer=None, max_attempts=3,
+                 timezone=None, today=None, include_fulltext=False, transcript_writer=None, **kwargs):
         super().__init__(*args, **kwargs)
         if min_stars not in range(1, 6):
             raise ValueError('Document minimum stars must be 1–5')
@@ -28,6 +36,90 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         self.request_authorizer = request_authorizer
         self.include_fulltext = include_fulltext
         self.transcript_writer = transcript_writer
+        self.max_attempts = max_attempts
+        self.today = today or (lambda: datetime.now(timezone or ZoneInfo('Asia/Shanghai')).date().isoformat())
+
+    def _migrate_attempt(self, record):
+        # The pre-merge notes-only revision used note_identity directly. Keep
+        # its durable budget when adopting main's composite document identity.
+        if self.include_fulltext:
+            return
+        identity = self.document_identity(record)
+        with self.store._connect() as db:
+            db.execute('UPDATE episode_document_attempts SET revision=? WHERE episode_id=? AND revision=? '
+                       'AND NOT EXISTS (SELECT 1 FROM episode_document_attempts WHERE episode_id=? AND revision=?)',
+                       (identity, record.episode.id, note_identity(record), record.episode.id, identity))
+
+    def _attempt_available(self, record, today):
+        self._migrate_attempt(record)
+        with self.store._connect() as db:
+            row = db.execute('SELECT * FROM episode_document_attempts WHERE episode_id=? AND revision=?',
+                             (record.episode.id, self.document_identity(record))).fetchone()
+            if row and row['status'] != 'completed' and (
+                    row['day'] != today or row['attempts'] >= self.max_attempts):
+                db.execute("UPDATE episode_document_attempts SET status='failed' WHERE episode_id=? AND revision=?",
+                           (record.episode.id, self.document_identity(record)))
+                return False
+        return not row or row['status'] != 'failed'
+
+    def retry_available(self, payload, today):
+        if payload.get('mode') == 'requested_episode':
+            record = self.store.get_verified_transcript(payload['episode_id'])
+            return bool(record and self._attempt_available(record, today))
+        base = payload['base_job']
+        day = payload.get('day') or payload['scheduled_for'][:10]
+        _, records, _ = self.snapshot(base)
+        if payload.get('mode') == 'daily_episode':
+            records = [(i, r) for i, r in records if r.episode.id == payload['episode_id']]
+        for _, record in records:
+            self._migrate_attempt(record)
+        if day != today:
+            with self.store._connect() as db:
+                for _, record in records:
+                    pair = (record.episode.id, self.document_identity(record))
+                    db.execute('INSERT OR IGNORE INTO episode_document_attempts(episode_id,revision,day) VALUES (?,?,?)',
+                               (*pair, day))
+                    db.execute("UPDATE episode_document_attempts SET status='failed' WHERE episode_id=? AND revision=? AND status!='completed'", pair)
+            return False
+        available = [self._attempt_available(record, today) for _, record in records]
+        with self.store._connect() as db:
+            states = [db.execute('SELECT status FROM episode_document_attempts WHERE episode_id=? AND revision=?',
+                                 (record.episode.id, self.document_identity(record))).fetchone()
+                      for _, record in records]
+        unfinished = any(ok and (not state or state['status'] != 'completed')
+                         for ok, state in zip(available, states, strict=True))
+        return day == today and (all(available) or unfinished)
+
+    def _claim_attempt(self, record, day, claimed):
+        identity = self.document_identity(record)
+        pair = (record.episode.id, identity)
+        if pair in claimed:
+            return
+        with self.store._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT OR IGNORE INTO episode_document_attempts(episode_id,revision,day) VALUES (?,?,?)',
+                       (*pair, day))
+            row = db.execute('SELECT * FROM episode_document_attempts WHERE episode_id=? AND revision=?', pair).fetchone()
+            if row['status'] == 'completed':
+                return  # A verified publication can be replayed without regenerating it.
+            stopped = row['status'] == 'failed' or row['day'] != self.today() or row['attempts'] >= self.max_attempts
+            if stopped:
+                db.execute("UPDATE episode_document_attempts SET status='failed' WHERE episode_id=? AND revision=?", pair)
+            else:
+                db.execute('UPDATE episode_document_attempts SET attempts=attempts+1 WHERE episode_id=? AND revision=?', pair)
+        if stopped:
+            raise DocumentRetryStopped('Episode document retry budget or deadline reached')
+        claimed.add(pair)
+
+    def _finish_attempts(self, claimed):
+        with self.store._connect() as db:
+            for pair in claimed:
+                db.execute("UPDATE episode_document_attempts SET status=CASE WHEN attempts>=? THEN 'failed' "
+                           "ELSE 'pending' END WHERE episode_id=? AND revision=? AND status!='completed'",
+                           (self.max_attempts, *pair))
+
+    def _stop_job(self, key):
+        self.store.fail(key, 'DocumentRetryStopped', 1, max_attempts=1)
 
     def _replace_legacy_appendix(self, token, document):
         base = document.get('replacement_base')
@@ -95,7 +187,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         with self.store._connect() as db:
             requested = db.execute(
                 "SELECT job_key,payload_json FROM jobs WHERE kind='document' AND status='failed' "
-                "AND json_extract(payload_json,'$.mode')='requested_episode'").fetchall()
+                "AND json_extract(payload_json,'$.mode') IN ('requested_episode','inline_daily_retry')").fetchall()
             pending = db.execute(
                 "SELECT job_key,payload_json FROM jobs WHERE kind='document' AND status!='completed' "
                 "AND json_extract(payload_json,'$.mode')='selected_episodes' "
@@ -103,25 +195,34 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
             jobs = db.execute("SELECT job_key FROM jobs WHERE kind='daily' AND analysis_complete=1 "
                               "AND status='completed' AND EXISTS (SELECT 1 FROM outbox o "
                               "WHERE o.job_key=jobs.job_key AND o.status='sent') ORDER BY job_key").fetchall()
-        retried = sum(int(self.store.enqueue(r[0], 'document', json.loads(r[1]))) for r in requested
-                      if self.request_allowed(json.loads(r[1])))
+        retried = 0
+        for row in requested:
+            payload = json.loads(row[1])
+            if not self.retry_available(payload, today):
+                self._stop_job(row[0])
+                continue
+            if payload.get('mode') == 'inline_daily_retry' or self.request_allowed(payload):
+                retried += int(self.store.enqueue(row[0], 'document', payload))
         if requested_only:
             return retried
         if pending:
-            return retried + int(self.store.enqueue(pending[0], 'document', json.loads(pending[1])))
-        active, count = set(self.store.list_subscriptions()), retried
+            if self.retry_available(json.loads(pending[1]), today):
+                return retried + int(self.store.enqueue(pending[0], 'document', json.loads(pending[1])))
+            self._stop_job(pending[0])
+        count = retried
         for row in jobs:
             if self.store.get_job_result(row[0], 'daily:inline-documents') is not None:
                 continue
             match = re.fullmatch(r'daily:(\d{4}-\d{2}-\d{2})', row[0])
             if not match or not cutoff <= match[1] <= today:
                 continue
-            audience = [t for t in (self.store.get_job_result(row[0], 'daily:recipients') or {}).get('targets', [])
-                        if tuple(t) in active]
+            audience = self._audience(
+                (self.store.get_job_result(row[0], 'daily:recipients') or {}).get('targets', []))
             if not audience:
                 continue
             revision, selected, _ = self.snapshot(row[0])
-            if selected:
+            payload = {'mode': 'selected_episodes', 'day': match[1], 'base_job': row[0]}
+            if selected and self.retry_available(payload, today):
                 count += self.store.enqueue(f'episode-documents:{match[1]}:{revision[:20]}', 'document',
                     {'mode': 'selected_episodes', 'day': match[1], 'base_job': row[0],
                      'revision': revision, 'targets': audience})
@@ -130,6 +231,21 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         return count
 
     def publish(self, job):
+        claimed = set()
+        try:
+            return self._publish(job, claimed)
+        except Exception as error:
+            safe_error = RuntimeError(type(error).__name__)
+            logger.warning('Episode document compilation deferred',
+                           exc_info=(RuntimeError, safe_error, error.__traceback__))
+            self._finish_attempts(claimed)
+            if claimed and not self.retry_available(job.payload, self.today()):
+                raise DocumentRetryStopped('Episode document retry budget or deadline reached') from None
+            raise
+        finally:
+            self._finish_attempts(claimed)
+
+    def _publish(self, job, claimed):
         # A deployment may inherit a pending combined-edition job. Retire that
         # obsolete workflow without deleting or rewriting its historical doc.
         requested = job.payload.get('mode') == 'requested_episode'
@@ -148,8 +264,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         else:
             day = job.payload['day']
             date.fromisoformat(day)
-            active = set(self.store.list_subscriptions())
-            targets = [t for t in job.payload['targets'] if tuple(t) in active]
+            targets = self._audience(job.payload['targets'])
             revision, records, _ = self.snapshot(job.payload['base_job'])
             if enrichment:
                 from .daily_enrichment import enrichment_bundle
@@ -166,12 +281,19 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 revision = self.document_identity(records[0][1])
         if not targets:
             return None
+        if not self.retry_available(job.payload, self.today()):
+            raise DocumentRetryStopped('Document retry budget or deadline reached')
+        deferred = False
         bundle = self.store.get_job_result(job.key, 'episodes:content')
         if bundle is None:
             if not requested and not enrichment and revision != job.payload['revision']:
                 return None
             documents = []
             for item, record in records:
+                if not self._attempt_available(record, self.today()):
+                    deferred = True
+                    continue
+                self._claim_attempt(record, self.today() if requested else day, claimed)
                 identity = note_identity(record)
                 key = 'episode:' + record.episode.id
                 published = record.episode.published_at.isoformat()[:10] if record.episode.published_at else day
@@ -196,7 +318,15 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 if identity not in entries:
                     if nodes:
                         nodes.append(text_node('补充精读（原稿版本更新）', 'heading1'))
-                    nodes.extend(self._notes(record, digest, fulltext_attached=self.include_fulltext))
+                    try:
+                        episode_nodes = self._notes(record, digest, fulltext_attached=self.include_fulltext)
+                    except Exception:
+                        if requested or enrichment:
+                            raise
+                        logger.warning('Episode document validation failed; deferred', exc_info=True)
+                        deferred = True
+                        continue
+                    nodes.extend(episode_nodes)
                     entries.append(identity)
                 if self.include_fulltext:
                     appendix_id = fulltext_identity(record)
@@ -219,8 +349,11 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     raise LibraryError('日报文档原稿版本在编译期间发生变化')
             elif not requested and self.snapshot(job.payload['base_job'])[0] != revision:
                 return None
-            bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
-                                                {'documents': documents})
+            bundle = {'documents': documents}
+            if not deferred:
+                bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents', bundle)
+        if not requested:
+            targets = self._audience(targets)
         links = []
         for document in bundle['documents']:
             # An older pending batch must not bypass a newly raised threshold.
@@ -230,12 +363,16 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 raise ValueError('全文发布授权已关闭，停止写入冻结的全文文档')
             if any('完整文字稿（归档原文' in str(n.get('heading2', {})) for n in document['nodes']):
                 raise ValueError('旧任务冻结了未翻译原文，请使用新的中文全文任务')
+            record = next(r for _, r in records if r.episode.id == document['key'].removeprefix('episode:'))
+            self._claim_attempt(record, self.today() if requested else day, claimed)
             row = self._document(document['key'], document['title'])
             token = row['document_id']
             self._replace_legacy_appendix(token, document)
             self._write(token, document['nodes'])
             self._verify_speaker_labels(token, document['nodes'])
             for kind, identity in targets:
+                if not requested and not self._audience([(kind, identity)]):
+                    continue
                 self.api.request('POST', f'/drive/v1/permissions/{token}/members',
                     params={'type': 'docx', 'need_notification': False},
                     data={'member_type': 'openchat' if kind == 'chat_id' else 'openid',
@@ -245,13 +382,19 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     "notification_job=CASE WHEN notification_job='' THEN ? ELSE notification_job END WHERE day=?",
                     (json.dumps(document['nodes'], ensure_ascii=False), json.dumps(document['entries']),
                      document['revision'], '' if requested else job.key, document['key']))
+                db.execute("UPDATE episode_document_attempts SET status='completed' WHERE episode_id=? AND revision=?",
+                           (record.episode.id, document['revision']))
                 notified = db.execute('SELECT notification_job FROM daily_documents WHERE day=?', (document['key'],)).fetchone()[0]
             if requested or enrichment or job.kind == 'daily' or notified == job.key:
                 links.append({'title': document['title'], 'stars': document['stars'],
                               'episode_id': document['key'].removeprefix('episode:'),
                               'url': f'https://www.feishu.cn/docx/{token}'})
+        if not requested:
+            targets = self._audience(targets)
         result = {'title': '播客重点总结已整理成文档' if requested else f'{day} 重点播客精读',
                   'documents': links, 'count': len(links), 'notify': bool(links), 'targets': targets}
+        if deferred:
+            result['deferred'] = True
         if requested:
             result['reply_to'] = job.payload['message_id']
             result['reply_in_thread'] = job.payload['reply_in_thread']

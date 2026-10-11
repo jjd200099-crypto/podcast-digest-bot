@@ -117,7 +117,7 @@ def _parse_iso_duration(value: str) -> float | None:
 
 def _parse_datetime(value: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        return datetime.fromisoformat(value.strip())
     except ValueError:
         return None
 

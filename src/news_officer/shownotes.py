@@ -82,6 +82,17 @@ def transcript_evidence(text):
     return result
 
 
+_CONTRAST_WORDS = frozenset(('but', 'not', 'however', 'although', 'though',
+                             'except', 'yet', 'unless', 'without', 'never', 'no'))
+_CHINESE_CONTRAST_WORDS = ('但是', '没有', '然而', '除非', '但', '不', '没', '却')
+
+
+def _contrast_word(word, *, following=False):
+    return (word.casefold() in _CONTRAST_WORDS
+            or any(word.startswith(marker) if following else word.endswith(marker)
+                   for marker in _CHINESE_CONTRAST_WORDS))
+
+
 def validate_notes(value, evidence):
     notes = EpisodeNotes.model_validate(value)
     if notes.participants != '原稿未明确标注' and not notes.participant_evidence_ids:
@@ -104,16 +115,51 @@ def validate_notes(value, evidence):
                     raise ValueError('Invalid comparison table row')
                 if any(key not in evidence for key in row.evidence_ids):
                     raise ValueError('Unknown table evidence')
-    words = 0
+    evidence_keys = list(evidence)
+    quote_words = []
     for quote in notes.quotes:
-        if (quote.evidence_id not in evidence or not quote.text.strip()
-                or quote.text not in evidence[quote.evidence_id]['text']):
+        if quote.evidence_id not in evidence or not quote.text.strip():
             raise ValueError('Quote not found in cited transcript')
+        if quote.text not in evidence[quote.evidence_id]['text']:
+            index = evidence_keys.index(quote.evidence_id)
+            neighbors = evidence_keys[max(0, index - 1):index] + evidence_keys[index + 1:index + 2]
+            actual = next((key for key in neighbors if quote.text in evidence[key]['text']), None)
+            if actual is None:
+                raise ValueError('Quote not found in cited transcript')
+            quote.evidence_id = actual
         if quote.part_index >= len(notes.parts):
             raise ValueError('Quote part does not exist')
-        words += len(re.findall(r"\w+(?:['’-]\w+)*", quote.text))
-    if words > 25:
-        raise ValueError('Quote budget exceeded')
+        quote_words.append(list(re.finditer(r"\w+(?:['’-]\w+)*", quote.text)))
+    remaining, retained = 25, []
+    for quote, words in zip(notes.quotes, quote_words):
+        if remaining < 4:
+            break
+        if len(words) > remaining:
+            # Include boundary punctuation, but never split a regex-matched word.
+            limit = words[remaining].start()
+            boundaries = [match.end() for match in re.finditer(r'[.,;:!?。，；：！？]', quote.text[:limit])
+                          if match.start() >= words[3].end()]
+            end = boundaries[-1] if boundaries else words[remaining - 1].end()
+            kept = [word for word in words if word.end() <= end]
+            next_word = words[len(kept)]
+            if (_contrast_word(kept[-1].group())
+                    or _contrast_word(next_word.group(), following=True)):
+                # Retreat before the incomplete clause; never retain a hanging
+                # contrast/negation, including adjacent markers such as "but not".
+                safe_count = len(kept) - 1
+                while safe_count and _contrast_word(words[safe_count - 1].group()):
+                    safe_count -= 1
+                if safe_count < 4:
+                    continue
+                safe_end = words[safe_count - 1].end()
+                earlier = [boundary for boundary in boundaries if boundary <= safe_end]
+                end = earlier[-1] if earlier else safe_end
+            quote.text = quote.text[:end].strip()
+            if quote.text not in evidence[quote.evidence_id]['text']:
+                raise ValueError('Quote not found in cited transcript')
+        retained.append(quote)
+        remaining -= len(re.findall(r"\w+(?:['’-]\w+)*", quote.text))
+    notes.quotes = retained
     for correction in notes.corrections:
         if (correction.evidence_id not in evidence or not correction.original.strip()
                 or correction.original not in evidence[correction.evidence_id]['text']):
@@ -164,7 +210,7 @@ class ShownotesWriter:
                     raise ValueError('Incomplete model output')
                 return validate_notes(parsed.model_dump(), evidence)
             except ValueError as error:
-                repair = '\n上次输出未通过校验：' + str(error)[:250]
+                repair = '\n上次输出未通过校验：' + str(error)[:250] + '。引文总词数 ≤25、逐条核对 evidence_id；每条引文必须逐字连续出现在对应原文中。'
         raise ValueError('Shownotes validation failed')
 
 

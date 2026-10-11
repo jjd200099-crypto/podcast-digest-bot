@@ -514,7 +514,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-open-ids", default="")
     parser.add_argument("--group-chat-ids", default="")
     parser.add_argument("--openai-model", default="gpt-5.6-terra")
-    parser.add_argument("--daily-time", default="08:30")
+    parser.add_argument("--daily-time", default="08:30",
+                        help="HH:MM，写入 NEWS_OFFICER_DAILY_TIME（默认 08:30，可配置）")
     parser.add_argument("--timezone", default="Asia/Shanghai")
     parser.add_argument("--lookback-hours", type=int, default=72)
     parser.add_argument("--max-summaries", type=int, default=3)

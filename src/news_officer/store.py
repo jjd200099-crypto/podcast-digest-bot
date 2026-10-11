@@ -58,6 +58,10 @@ class Store:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS episode_document_attempts (
+                    episode_id TEXT NOT NULL, revision TEXT NOT NULL, day TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
+                    PRIMARY KEY (episode_id, revision));
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_key TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
@@ -434,7 +438,7 @@ class Store:
             )
             return result.rowcount
 
-    def enqueue(self, key: str, kind: str, payload: dict) -> bool:
+    def enqueue(self, key: str, kind: str, payload: dict, *, document_max_attempts: int = 3) -> bool:
         now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -452,17 +456,20 @@ class Store:
                 return True
             # A daily job that exhausted its immediate retries may be revived
             # later the same day by the scheduler. Its immutable results and
-            # outbox are deliberately retained and resumed.
+            # outbox are deliberately retained and resumed. Document attempts
+            # remain cumulative across hourly revival.
             if kind not in {"daily", "document"}:
                 return False
             revived = connection.execute(
                 """
                 UPDATE jobs
-                SET status = 'pending', attempts = 0, updated_at = ?
+                SET status = 'pending', attempts = CASE WHEN kind='document' THEN attempts ELSE 0 END, updated_at = ?
                 WHERE job_key = ? AND kind IN ('daily','document') AND status = 'failed'
                     AND available_at <= ?
+                    AND (json_extract(payload_json,'$.mode') != 'daily_episode'
+                         OR json_extract(payload_json,'$.mode') IS NULL OR attempts < ?)
                 """,
-                (now, key, now),
+                (now, key, now, document_max_attempts),
             )
             return revived.rowcount == 1
 
@@ -794,6 +801,18 @@ class Store:
             )
             for row in rows
         ]
+
+    def outbox_send_uncertain(self, item_id: int) -> bool:
+        with self._connect() as connection:
+            error = connection.execute(
+                'SELECT last_error FROM outbox WHERE id=?', (item_id,)).fetchone()[0]
+        # Missing bookkeeping (including a crash) and legacy errors are uncertain.
+        return not str(error or '').startswith('definite:')
+
+    def outbox_created_at(self, item_id: int) -> str:
+        with self._connect() as connection:
+            return str(connection.execute(
+                'SELECT created_at FROM outbox WHERE id=?', (item_id,)).fetchone()[0])
 
     def mark_outbox_attempt(self, item_id: int) -> None:
         with self._connect() as connection:

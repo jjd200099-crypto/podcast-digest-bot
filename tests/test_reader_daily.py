@@ -47,6 +47,125 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Podwise', archived)
         self.assertNotIn('播客追踪状态', archived)
 
+    async def test_missing_compiler_threshold_defaults_to_four_for_real_daily_selection(self):
+        instance, job, _ = self.setup_job(
+            [self.item('four', 4), self.item('five', 5), self.item('three', 3)])
+        instance.document_compiler = None
+        await instance._handle_daily_job(job)
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        self.assertEqual(set(bundle['enrichment']['eligible']), {'four', 'five'})
+
+    async def test_reader_omits_release_notes_even_when_opted_in(self):
+        from news_officer.daily_archive import read_daily_digest
+
+        for enabled in (False, True):
+            day = '2026-10-04' if not enabled else '2026-10-05'
+            instance, job, _ = self.setup_job([self.item(day)], key=f'daily:{day}',
+                payload={'scheduled_for': f'{day}T08:30:00+08:00'})
+            instance.settings.daily_release_notes = enabled
+            await instance._handle_daily_job(job)
+            self.assertNotIn('功能更新', body(self.messenger.attempts[-1]))
+            self.assertNotIn('功能更新', read_daily_digest(self.store, day)['markdown'])
+            self.store.complete(job.key)
+
+    async def test_chat_allowlist_skips_invalid_ids_and_private_subscriptions(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance.settings.daily_chat_ids = ('oc_good', 'bad', 'ou_private', 'oc_bad space', 'oc_good')
+        with self.assertLogs('news_officer.runtime', level='WARNING'):
+            await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
+        self.assertEqual(instance._daily_targets(job), [('chat_id', 'oc_good')])
+        self.store.remove_subscription('open_id', 'ou_test')
+        self.assertTrue(instance._has_daily_recipients())
+
+    async def test_unconfigured_allowlist_preserves_valid_subscriptions(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        self.store.add_subscription('chat_id', 'oc_other')
+        self.store.add_subscription('open_id', 'invalid')
+        with self.assertLogs('news_officer.runtime', level='WARNING'):
+            await instance._handle_daily_job(job)
+        self.assertEqual({(i.target_type, i.target_id) for i in self.messenger.attempts},
+                         {('open_id', 'ou_test'), ('chat_id', 'oc_other')})
+
+    async def test_required_allowlist_fails_closed_without_sending(self):
+        for allowlist in ((), ('bad', 'ou_private', 'oc_bad space')):
+            instance, job, podcast = self.setup_job([self.item('selected')], key=f'daily:req-{len(allowlist)}')
+            instance.settings.daily_chat_ids = allowlist
+            instance.settings.daily_require_chat_ids = True
+            with self.assertRaisesRegex(RuntimeError, 'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS'):
+                await instance._handle_daily_job(job)
+            self.assertEqual(self.messenger.attempts, [])
+            self.assertEqual(self.store.outbox_items(job.key), [])
+            self.assertIsNone(self.store.get_job_result(job.key, 'daily:recipients'))
+            self.assertEqual(podcast.calls, 0)
+            with self.assertRaises(RuntimeError):
+                instance._daily_targets(job)
+            # The scheduler must not crash; the job itself fails loudly instead.
+            self.assertTrue(instance._has_daily_recipients())
+            self.assertEqual(instance._valid_daily_targets([('open_id', 'ou_test')]), [])
+        # A prepare-only warm-up fails too instead of silently spending capacity.
+        instance, job, _ = self.setup_job([], key='daily:prepare:req', payload={
+            'prepare_only': True, 'scheduled_for': '2099-01-01T08:30:00+08:00'})
+        instance.settings.daily_chat_ids = ()
+        instance.settings.daily_require_chat_ids = True
+        with self.assertRaises(RuntimeError):
+            await instance._handle_daily_job(job)
+
+    async def test_required_allowlist_with_valid_id_sends_only_to_it(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance.settings.daily_chat_ids = ('oc_good',)
+        instance.settings.daily_require_chat_ids = True
+        await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
+
+    async def test_require_flag_defaults_off_so_unset_allowlist_still_delivers(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        self.assertFalse(getattr(instance.settings, 'daily_require_chat_ids', False))
+        await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('open_id', 'ou_test')])
+
+    async def test_subscription_fallback_warns_once_per_job(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            instance._daily_candidates(job)
+            instance._daily_candidates(job)
+        warnings = [line for line in logs.output if 'NEWS_OFFICER_DAILY_CHAT_IDS is not set' in line]
+        self.assertEqual(len(warnings), 1)
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            instance._daily_candidates(Job('daily:other', 'daily', {}, 1))
+        self.assertEqual(sum('is not set' in line for line in logs.output), 1)
+        instance.settings.daily_chat_ids = ('oc_good',)
+        with self.assertNoLogs('news_officer.runtime', level='WARNING'):
+            instance._daily_candidates(Job('daily:third', 'daily', {}, 1))
+
+    async def test_private_subscription_entries_never_receive_with_allowlist(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        # Same writes as FEISHU_USER_OPEN_IDS seeding and the private 'subscribe' command.
+        self.store.seed_subscriptions(('ou_seed',), ('oc_seeded_group',))
+        self.store.add_subscription('open_id', 'ou_command', source='command')
+        instance.settings.daily_chat_ids = ('oc_good',)
+        # A snapshot frozen before the allowlist existed still names old open_ids.
+        self.store.save_job_result(job.key, 'daily:recipients', 'delivery_targets', {'targets': [
+            ['open_id', 'ou_test'], ['open_id', 'ou_old'], ['chat_id', 'oc_seeded_group'],
+            ['chat_id', 'oc_good']]})
+        await instance._handle_daily_job(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
+        self.assertEqual([(i.target_type, i.target_id) for i in self.store.outbox_items(job.key)],
+                         [('chat_id', 'oc_good')])
+        self.assertEqual(instance._daily_targets(job), [('chat_id', 'oc_good')])
+
+    async def test_allowlist_blocks_previously_frozen_private_outbox(self):
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance._persist_daily_items(job, [self.item('selected')])
+        instance._prepare_daily_outbox_and_terminal_states(job)
+        instance.settings.daily_chat_ids = ('oc_good',)
+        await instance._drain_outbox(job)
+        self.assertEqual(self.messenger.attempts, [])
+
     async def test_later_arrivals_wait_for_next_edition(self):
         instance, job, podcast = self.setup_job([self.item('current')])
         podcast.build_pending.return_value = [self.item('previous')]
@@ -71,6 +190,76 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         await instance._handle_daily_job(job)
         self.assertIn('补齐旧节目', body(self.messenger.attempts[0]))
 
+    def oversized_item(self, name, extra):
+        from test_reliability import attachment_for
+        item = self.item(name)
+        record = self.store.get_verified_transcript(name)
+        message = item.message.replace('推荐星级：', extra + '\n\n推荐星级：')
+        with self.store._connect() as db:
+            db.execute('DELETE FROM episode_digests WHERE episode_id=?', (name,))
+        self.store.save_transcript_digest(name, message, record.content_sha256, record.record_revision_sha256)
+        return DailyItem(item.episode, 'summarized', message, attachment_for(record, message))
+
+    async def test_oversized_daily_keeps_each_summary_and_link_in_one_send(self):
+        from news_officer.operations import business_snapshot
+        items = [self.oversized_item(name, '次要段落。' * 15000) for name in ('one', 'two')]
+        instance, job, _ = self.setup_job(items)
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(self.messenger.attempts), 1)
+        content = self.messenger.attempts[0].content
+        for name in ('one', 'two'):
+            self.assertIn(name + ' 的核心判断', content)
+            self.assertIn('https://example.test/' + name, content)
+        self.assertNotIn('次要段落', content)
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        self.assertTrue(all('次要段落' not in section['template'] for section in bundle['enrichment']['sections']))
+        self.assertTrue(any('daily_message_degraded' in w for w in business_snapshot(self.store.path)['warnings']))
+
+    async def test_oversized_first_paragraph_keeps_complete_first_sentence(self):
+        from news_officer.daily_report import compact_reader_episode
+        content = '**节目**\n\n完整的核心判断。' + '次要解释。' * 30000 + '\n\n[收听节目](https://example.test/one)'
+        result = compact_reader_episode(content, 3, 'https://example.test/one')
+        self.assertIn('完整的核心判断。', result)
+        self.assertNotIn('次要解释', result)
+        self.assertIn('https://example.test/one', result)
+
+    async def test_plaintext_fallback_warns_without_changing_body(self):
+        from news_officer.daily_report import reader_episode
+        from news_officer.operations import business_snapshot
+        item = self.oversized_item('one', '完整次要段落。' * 2000)
+        instance, job, _ = self.setup_job([item])
+        await instance._handle_daily_job(job)
+        self.assertEqual(len(self.messenger.attempts), 1)
+        part = self.messenger.attempts[0]
+        self.assertEqual(part.msg_type, 'text')
+        self.assertTrue(json.loads(part.content)['text'].endswith(reader_episode(item.message)))
+        self.assertTrue(any('daily_message_plaintext_fallback' in w for w in business_snapshot(self.store.path)['warnings']))
+
+    async def test_indivisible_summary_overflow_stops_and_warns(self):
+        from news_officer.operations import business_snapshot
+        instance, job, _ = self.setup_job([self.item('one')])
+        # A sentence without any boundary cannot be safely shortened.
+        with (patch('news_officer.daily_report.reader_episode', return_value=
+                    '**节目**\n\n' + '核心判断' * 20000 + '\n\n[收听节目](https://example.test/one)'),
+              self.assertRaisesRegex(ValueError, 'single-message capacity')):
+            await instance._handle_daily_job(job)
+        self.assertEqual(self.messenger.attempts, [])
+        self.assertEqual(self.store.outbox_items(job.key), [])
+        self.assertTrue(any('daily_message_capacity_exceeded' in w for w in business_snapshot(self.store.path)['warnings']))
+
+    async def test_document_label_matches_fulltext_setting(self):
+        from news_officer.daily_enrichment import _content
+        for enabled in (False, True):
+            instance, job, _ = self.setup_job([self.item(str(enabled), 5)], key=f'daily:fulltext-{enabled}')
+            instance.settings.daily_document_fulltext = enabled
+            await instance._handle_daily_job(job)
+            bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+            _, content = _content(bundle, {str(enabled): {'url': 'https://example.test/doc'}}, bundle['deliveries'][0])
+            self.assertIn('精读和完整中文对谈' if enabled else '精读', content)
+            if not enabled:
+                self.assertNotIn('完整中文对谈', content)
+            self.store.complete(job.key)
+
     async def test_platform_overflow_never_silently_sends_multiple_messages(self):
         instance, job, _ = self.setup_job([self.item('one')])
         with (patch('news_officer.runtime.combined_delivery_parts', return_value=[
@@ -79,6 +268,8 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
             await instance._handle_daily_job(job)
         self.assertEqual(self.messenger.attempts, [])
         self.assertEqual(self.store.outbox_items(job.key), [])
+        from news_officer.operations import business_snapshot
+        self.assertTrue(any('daily_message_capacity_exceeded' in w for w in business_snapshot(self.store.path)['warnings']))
 
     async def test_source_failure_retries_without_group_status_spam(self):
         instance, job, podcast = self.setup_job([])
@@ -144,6 +335,98 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_daily_receipt(message, 'bot', now.date(), now.timestamp()-1, now.timestamp()+1))
         self.assertFalse(is_daily_receipt(message, 'bot', (now-timedelta(days=1)).date(), 0, now.timestamp()+1))
 
+    async def test_allowlist_blocks_frozen_document_outbox(self):
+        instance, _, _ = self.setup_job([])
+        job = Job('document:old', 'document', {'mode': 'selected_episodes'}, 1)
+        self.store.enqueue(job.key, job.kind, job.payload)
+        for kind, target in [('open_id', 'ou_old'), ('chat_id', 'oc_other'), ('chat_id', 'oc_good')]:
+            self.store.ensure_outbox(job_key=job.key, group_key='document:link',
+                delivery_key=target, operation='send', target_id=target, target_type=kind,
+                reply_in_thread=False, parts=[('text', 'link', target)])
+        instance.settings.daily_chat_ids = ('oc_good',)
+        await instance._drain_outbox(job)
+        self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
+                         [('chat_id', 'oc_good')])
+
+    async def test_daily_body_never_calls_document_compiler(self):
+        instance, job, podcast = self.setup_job([self.item('selected', 5)])
+        compiler = Mock(min_stars=5)
+        compiler.publish.side_effect = ValueError('Shownotes validation failed')
+        instance.document_compiler = compiler
+        await instance._handle_daily_job(job)
+        compiler.publish.assert_not_called()
+        compiler.snapshot.assert_not_called()
+        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
+        self.assertEqual(len(self.messenger.attempts), 1)
+        self.assertEqual(podcast.calls, 1)
+
+    async def test_legacy_inline_snapshot_changed_is_deferred(self):
+        instance, job, _ = self.setup_job([self.item('selected', 5)])
+        compiler = Mock()
+        compiler.snapshot.return_value = ('revision', ['selected'], [])
+        compiler.publish.return_value = None
+        instance.document_compiler = compiler
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            self.assertEqual(instance._inline_daily_documents(job, datetime.now(UTC)), [])
+        self.assertTrue(any(r.exc_info for r in logs.records))
+        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
+
+    async def test_inline_library_error_returns_empty_then_normal_result_is_cached(self):
+        from news_officer.library import LibraryError
+
+        instance, job, _ = self.setup_job([self.item('selected', 5)])
+        compiler = Mock()
+        compiler.snapshot.side_effect = [LibraryError('retry'), ('revision', ['selected'], [])]
+        documents = [{'title': 'Selected', 'url': 'https://example.test/doc'}]
+        compiler.publish.return_value = {'documents': documents}
+        instance.document_compiler = compiler
+        when = datetime.now(UTC)
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            self.assertEqual(instance._inline_daily_documents(job, when), [])
+        self.assertTrue(logs.records[0].exc_info)
+        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
+        self.assertEqual(instance._inline_daily_documents(job, when), documents)
+        self.assertEqual(instance._inline_daily_documents(job, when), documents)
+        compiler.publish.assert_called_once()
+
+    async def test_worker_failure_logs_stack_without_sensitive_error_message(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        instance, job, _ = self.setup_job([])
+        instance.wake_workers = {'daily': asyncio.Event()}
+        error = ValueError('secret-token-in-url')
+        error.__cause__ = RuntimeError('secret-token-in-chain')
+        instance._handle_daily_job = AsyncMock(side_effect=error)
+        instance._failure_notice = AsyncMock()
+        with (patch.object(self.store, 'claim_next', side_effect=[job, asyncio.CancelledError()]),
+              self.assertLogs('news_officer.runtime', level='ERROR') as logs,
+              self.assertRaises(asyncio.CancelledError)):
+            await instance._worker('daily')
+        self.assertTrue(logs.records[0].exc_info)
+        output = '\n'.join(logs.output)
+        self.assertIn('Traceback', output)
+        self.assertIn('_worker', output)
+        self.assertNotIn('secret-token-in-url', output)
+        self.assertNotIn('secret-token-in-chain', output)
+
+
+    async def test_invalid_optional_allowlist_logs_and_operations_warns(self):
+        import os
+
+        from news_officer.operations import business_snapshot
+
+        instance, _, _ = self.setup_job([])
+        instance.settings.daily_chat_ids = ('bad', 'ou_wrong')
+        instance.settings.daily_require_chat_ids = False
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            self.assertFalse(instance._has_daily_recipients())
+        self.assertTrue(any('daily_allowlist_invalid' in r.getMessage() for r in logs.records))
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_CHAT_IDS': 'bad,ou_wrong',
+                                    'NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS': 'false'}, clear=True):
+            warnings = business_snapshot(self.store.path)['warnings']
+        self.assertTrue(any(w.startswith('daily_allowlist_invalid:') for w in warnings))
+
     async def test_reader_omits_release_updates_without_claiming_them(self):
         instance, job, _ = self.setup_job([self.item('selected')], payload={
             'scheduled_for': '2026-10-11T08:30:00+08:00'})
@@ -151,3 +434,18 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('功能更新', body(self.messenger.attempts[0]))
         with self.store._connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM daily_release_announcements').fetchone()[0], 0)
+
+    async def test_mixed_allowlist_warning_reaches_operations(self):
+        import os
+
+        from news_officer.operations import business_snapshot
+        instance, job, _ = self.setup_job([self.item('selected')])
+        instance.settings.daily_chat_ids = ('oc_good', 'invalid')
+        instance.settings.daily_require_chat_ids = True
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            await instance._handle_daily_job(job)
+        self.assertTrue(any('daily_allowlist_invalid:' in r.getMessage() for r in logs.records))
+        self.assertEqual([r.target_id for r in self.messenger.attempts], ['oc_good'])
+        with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_CHAT_IDS': 'oc_good,invalid'}, clear=True):
+            self.assertTrue(any(w.startswith('daily_allowlist_invalid:')
+                for w in business_snapshot(self.store.path)['warnings']))

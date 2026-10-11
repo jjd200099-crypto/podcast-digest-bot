@@ -1,9 +1,10 @@
 # Daily editorial policy: relevance-density-priority-v4
 
-All configured sources are scanned inside the existing 24-hour window. Rating
-happens only after a complete transcript has been obtained and archived. Every
-verified episode continues to receive a summary, including low-star episodes,
-ordered by stars descending. This preserves the all-updates coverage contract;
+All configured sources are scanned inside the configured discovery window
+(`NEWS_OFFICER_LOOKBACK_HOURS=24` for a 24-hour window; code default: 72). Rating
+happens only after a complete transcript has been obtained and archived.
+Verified episodes below the recommendation tier are archived without a summary
+in the daily body. Recommended episodes receive summaries ordered by stars descending;
 `selected` denotes the recommended tier, not a discovery or transcript filter.
 Already delivered messages are not rewritten.
 
@@ -37,7 +38,7 @@ no daily quota; zero compilation-worthy episodes is a valid outcome.
 | Internal rating (not displayed) | Code gate: relevance / density | Reader action |
 |---|---|---|
 | ★★★★★ | Both exactly 5 | 值得编译 — automatically create an individual Feishu document |
-| ★★★★☆ | Priority topic; otherwise both at least 4, or relevance ≥3 and density 5 | 值得看全文 |
+| ★★★★☆ | Priority topic; otherwise both at least 4, or relevance ≥3 and density 5 | 值得看全文 — automatically create an individual Feishu document |
 | ★★★☆☆ | Both at least 3, below the above gates | 看摘要 |
 | ★★☆☆☆ | Both at least 2, below the above gates | 无关 |
 | ★☆☆☆☆ | Otherwise | 无关 |
@@ -68,16 +69,18 @@ disables the grounded rating pass, not complete-transcript validation.
 The brief retains coherent Chinese paragraphs and a short recommendation reason.
 The archived summary retains its internal five-star encoding for ordering, audit
 and compilation gates. Delivery replaces that line with only the reader action:
-值得编译 / 值得看全文 / 看摘要 / 无关. No stars or numeric subscores are displayed,
+值得编译 / 值得看全文 / 看摘要 for recommended daily content. No stars or numeric subscores are displayed,
 including document-link notifications. Here 无关 means not recommended for this
 research brief: relevance OR information density is insufficient and no priority rule applies. A missing or
 unverified transcript remains pending/unrated, never automatically 无关.
 
-`NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **4**: both worth-reading
-and exceptional episodes get a document. Production should also set it to 4
-explicitly, since older environment overrides win over code defaults. In reader
-mode, compilation finishes before the single brief is frozen; document links
-are included in that same message. Frozen
+`NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS` defaults to **4**: every
+值得看全文（4★）and 值得编译（5★）episode gets an individual detailed document;
+3★ and below do not. Use this environment variable to adjust the threshold;
+environment overrides take precedence over code defaults. In default reader mode, the daily message is sent before compilation. Independent
+episode jobs edit the original receipt after verification and permission checks.
+One same-day links-only followup uses the frozen, revalidated audience after all
+episode jobs finish or stop. Legacy non-reader mode sends a separate link notice. Frozen
 older document batches cannot bypass the current threshold. A user's explicit
 request for a detailed episode document still bypasses the star threshold.
 

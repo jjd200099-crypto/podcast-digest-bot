@@ -21,6 +21,8 @@ from lark_channel import (
 
 from .config import Settings
 from .daily_report import coverage_report
+from .daily_targets import allowlist_warnings, filter_daily_targets, valid_allowlist
+from .episode_document import DocumentRetryStopped
 from .feishu import (
     FeishuMessenger,
     combined_delivery_parts,
@@ -39,6 +41,10 @@ from .transcript_view import RENDERER_VERSION
 logger = logging.getLogger(__name__)
 
 
+class ReceiptReconcilePending(RuntimeError):
+    """Keep delivery pending without noisy worker error logs or failure notices."""
+
+
 class NewsOfficerRuntime:
     def __init__(
         self,
@@ -48,8 +54,11 @@ class NewsOfficerRuntime:
         router: CommandRouter,
         podcast_service: PodcastService,
         research_agent=None,
+        scheduler_clock=time.monotonic,
     ):
         self.settings = settings
+        self._scheduler_clock = scheduler_clock
+        self._scheduler_failures = {}
         self.store = store
         self.messenger = messenger
         self.router = router
@@ -278,39 +287,126 @@ class NewsOfficerRuntime:
             return ""
         return str(canonical["file_key"])
 
+    def _daily_allowlist(self) -> tuple[str, ...]:
+        return tuple(getattr(getattr(self, "settings", None), "daily_chat_ids", ()) or ())
+
+    def _daily_require(self) -> bool:
+        return bool(getattr(getattr(self, "settings", None), "daily_require_chat_ids", False))
+
+    def _require_daily_allowlist(self) -> None:
+        """Fail loudly (no send) when a required allowlist is missing/invalid."""
+        if self._daily_require():
+            for warning in allowlist_warnings(self._daily_allowlist(), require=True):
+                logger.warning('%s', warning)
+        if self._daily_require() and not valid_allowlist(self._daily_allowlist()):
+            raise RuntimeError(
+                "NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS is true but NEWS_OFFICER_DAILY_CHAT_IDS "
+                "is empty or has no valid oc_ chat ids; refusing to send the daily"
+            )
+
+    def _daily_candidates(self, job: Job | None = None) -> list[tuple[str, str]]:
+        chats = self._daily_allowlist()
+        if chats:
+            if not self._daily_require():
+                for warning in allowlist_warnings(chats):
+                    logger.warning('%s', warning)
+            return [('chat_id', chat) for chat in dict.fromkeys(chats)]
+        self._require_daily_allowlist()
+        if job is not None:
+            warned = self.__dict__.setdefault("_daily_fallback_warned", set())
+            if job.key not in warned:
+                warned.add(job.key)
+                logger.warning(
+                    "NEWS_OFFICER_DAILY_CHAT_IDS is not set; daily %s falls back to all active "
+                    "subscriptions. Set it and NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS=true to fail closed.",
+                    job.key)
+        return self.store.list_subscriptions()
+
+    def _valid_daily_targets(self, targets) -> list[tuple[str, str]]:
+        return filter_daily_targets(
+            targets, self._daily_allowlist(), require=self._daily_require(),
+            on_invalid=lambda kind: logger.warning(
+                "Skipping daily recipient with invalid ID format (type=%s)", kind))
+
+    def _document_audience(self, targets) -> list[tuple[str, str]]:
+        """Document-link audience: re-validate against the allowlist when one is enforced."""
+        targets = [(str(t[0]), str(t[1])) for t in targets]
+        if self._daily_allowlist() or self._daily_require():
+            return self._valid_daily_targets(targets)
+        active = set(self.store.list_subscriptions())
+        return [t for t in targets if t in active]
+
+    def _has_daily_recipients(self) -> bool:
+        try:
+            self._require_daily_allowlist()
+            return bool(self._valid_daily_targets(self._daily_candidates()))
+        except RuntimeError:
+            # Let the daily job itself fail loudly instead of crashing the
+            # scheduler (and every other worker) on a configuration error.
+            return True
+
     def _daily_targets(self, job: Job) -> list[tuple[str, str]]:
         """Freeze one DB-backed recipient snapshot for the whole daily job."""
 
+        self._require_daily_allowlist()
         persisted = self.store.get_job_result(job.key, "daily:recipients")
         if persisted is None:
-            targets = self.store.list_subscriptions()
+            targets = self._valid_daily_targets(self._daily_candidates(job))
             persisted = self.store.save_job_result(
                 job.key,
                 "daily:recipients",
                 "delivery_targets",
                 {"targets": [list(target) for target in targets]},
             )
-        return [
+        return self._valid_daily_targets([
             (str(target[0]), str(target[1]))
             for target in persisted.get("targets", ())
-        ]
+        ])
 
     async def _drain_outbox(self, job: Job) -> None:
         failures: list[tuple[str, Exception]] = []
         blocked_deliveries: set[str] = set()
         for item in await asyncio.to_thread(self.store.pending_outbox, job.key):
+            if (item.operation == "send"
+                    and (job.kind == "daily" or (job.kind == "document"
+                         and job.payload.get("mode") != "requested_episode"))
+                    and not self._valid_daily_targets([(item.target_type, item.target_id)])):
+                continue
             # Keep parts ordered within one recipient, while allowing a bad
             # recipient to never block every other user/group in the broadcast.
             if item.delivery_key in blocked_deliveries:
                 continue
+            uncertain = await asyncio.to_thread(self.store.outbox_send_uncertain, item.id)
             await asyncio.to_thread(self.store.mark_outbox_attempt, item.id)
             try:
-                remote_message_id = await asyncio.to_thread(
-                    self.messenger.deliver, item
-                )
+                remote_message_id = ''
+                reconcile = getattr(self.messenger, 'reconcile_delivery', None)
+                if item.attempts and uncertain and callable(reconcile):
+                    created_at = await asyncio.to_thread(self.store.outbox_created_at, item.id)
+                    try:
+                        remote_message_id = await asyncio.to_thread(reconcile, item, created_at)
+                    except Exception as error:  # Absence must be confirmed.
+                        from .operations import record_warning
+                        await asyncio.to_thread(record_warning, self.store, job.key,
+                            'uncertain_delivery_unreconciled',
+                            job.payload.get('scheduled_for', '')[:10],
+                            target=(item.target_type, item.target_id))
+                        self._log_scheduler_failure(error, site='receipt_reconcile', warning=True,
+                                                    message='Receipt reconcile pending/uncertain send')
+                        raise ReceiptReconcilePending('Uncertain receipt unavailable') from error
+                    # A complete scan confirms absence. Reuse the frozen UUID:
+                    # any still-active deduplication can only prevent duplicates.
+                if not remote_message_id:
+                    remote_message_id = await asyncio.to_thread(self.messenger.deliver, item)
+                if (job.kind == 'document'
+                        and job.payload.get('mode') == 'daily_document_followup'
+                        and not str(remote_message_id or '').strip()):
+                    raise RuntimeError('Followup delivery unconfirmed: missing message receipt')
             except Exception as error:  # noqa: BLE001 - isolate failures per recipient
                 await asyncio.to_thread(
-                    self.store.mark_outbox_error, item.id, str(error)
+                    self.store.mark_outbox_error, item.id,
+                    # An explicit rejection cannot erase an earlier possible send.
+                    ('uncertain:' if getattr(error, 'uncertain', True) or (item.attempts and uncertain) else 'definite:') + type(error).__name__
                 )
                 blocked_deliveries.add(item.delivery_key)
                 failures.append((item.delivery_key, error))
@@ -322,7 +418,9 @@ class NewsOfficerRuntime:
                 )
         if failures:
             delivery_key, error = failures[0]
-            raise RuntimeError(
+            failure_type = (ReceiptReconcilePending if all(
+                isinstance(e, ReceiptReconcilePending) for _, e in failures) else RuntimeError)
+            raise failure_type(
                 f"{len(failures)} outbox delivery group(s) failed; first={delivery_key}"
             ) from error
 
@@ -568,7 +666,8 @@ class NewsOfficerRuntime:
         if job.payload.get('recovery_window_end'):
             blocks.append('停机补发：以下按原定日期的 24 小时时间窗整理，不是今天的新节目；已送达内容不重复发送。')
         feature_updates = ""
-        if not reader_mode and not catchup and not bundles:
+        if (not reader_mode and not catchup and not bundles
+                and getattr(settings, "daily_release_notes", False)):
             from .release_notes import RELEASE_NOTES, render_release_notes
             feature_updates = render_release_notes(self.store.claim_daily_release_notes(
                 job.key, when.date().isoformat(), RELEASE_NOTES))
@@ -597,7 +696,8 @@ class NewsOfficerRuntime:
             sections, eligible = [], []
             for item in summaries:
                 content = reader_episode(item.message)
-                template = reader_episode(item.message, DOCUMENT_PLACEHOLDER)
+                template = reader_episode(item.message, DOCUMENT_PLACEHOLDER,
+                    fulltext=getattr(settings, 'daily_document_fulltext', False))
                 published = item.episode.published_at
                 if published and published < start:
                     prefix = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n'
@@ -609,6 +709,32 @@ class NewsOfficerRuntime:
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')
         markdown = ("\n\n" if reader_mode else "\n\n---\n\n").join(blocks)
+        if reader_mode:
+            from .daily_report import compact_reader_episode
+            from .operations import record_warning
+            edition_title = f'🎧 播客精选 · {when:%Y-%m-%d}'
+            probe = combined_delivery_parts(markdown, job.key, title=edition_title)
+            if len(probe) != 1:
+                prefix = blocks[:-len(sections)] if sections else blocks
+                original_sections = sections
+                for level in (1, 2, 3):
+                    sections = [{**section,
+                        'body': compact_reader_episode(section['body'], level, item.episode.url),
+                        'template': compact_reader_episode(section['template'], level, item.episode.url)}
+                        for section, item in zip(original_sections, summaries)]
+                    blocks = [*prefix, *(section['body'] for section in sections)]
+                    markdown = '\n\n'.join(blocks)
+                    probe = combined_delivery_parts(markdown, job.key, title=edition_title)
+                    if len(probe) == 1:
+                        break
+                record_warning(self.store, job.key,
+                    'daily_message_degraded' if len(probe) == 1 else 'daily_message_capacity_exceeded',
+                    when.date().isoformat())
+                if len(probe) != 1:
+                    raise ValueError('Daily edition exceeds single-message capacity')
+            elif probe[0][0] == 'text':
+                record_warning(self.store, job.key, 'daily_message_plaintext_fallback',
+                               when.date().isoformat())
         group = "daily:bundle:" + hashlib.sha256(markdown.encode()).hexdigest()[:20]
         deliveries = []
         for target_type, target_id in self._daily_targets(job):
@@ -633,6 +759,36 @@ class NewsOfficerRuntime:
         })
         self._restore_daily_bundle(job, bundle)
         return items
+
+    def _inline_daily_documents(self, job, when):
+        """Resume an inherited inline retry; new dailies use independent enrichment jobs."""
+        saved = self.store.get_job_result(job.key, 'daily:inline-documents')
+        if saved is not None:
+            return saved['documents']
+        compiler = getattr(self, 'document_compiler', None)
+        documents = []
+        try:
+            if compiler is not None:
+                revision, selected, _ = compiler.snapshot(job.key)
+                if selected:
+                    result = compiler.publish(Job(job.key, 'daily', {
+                        'mode': 'selected_episodes', 'day': when.date().isoformat(),
+                        'base_job': job.key, 'revision': revision,
+                        'targets': self._daily_targets(job)}, job.attempts))
+                    if result is None:
+                        raise RuntimeError('Daily document snapshot changed; retry required')
+                    if result.get('deferred'):
+                        raise ValueError('Some episode documents failed validation; retry required')
+                    documents = result['documents']
+        except Exception:  # Legacy document failures must preserve the already sent daily.
+            logger.warning('Daily document compilation deferred', exc_info=True)
+            self.store.enqueue(f'{job.key}:inline-document-retry', 'document', {
+                'mode': 'inline_daily_retry', 'base_job': job.key,
+                'scheduled_for': when.isoformat()})
+            return []
+        saved = self.store.save_job_result(job.key, 'daily:inline-documents',
+                                           'inline_documents', {'documents': documents})
+        return saved['documents']
 
     def _prepare_daily_outbox_and_terminal_states(self, job: Job, *, finalize=False) -> list[DailyItem]:
         if self._combined_daily(job):
@@ -734,6 +890,7 @@ class NewsOfficerRuntime:
                 self.store.complete_daily_transcript(item.episode.id)
 
     async def _handle_daily_job(self, job: Job) -> None:
+        self._require_daily_allowlist()
         reader_mode = getattr(getattr(self, 'settings', None), 'daily_reader_mode', False) and self._combined_daily(job)
         if reader_mode and job.payload.get('transcript_catchup'):
             # Keep backlog rows intact; the scheduled edition will retry them.
@@ -743,7 +900,7 @@ class NewsOfficerRuntime:
             local_now = datetime.now(self.settings.timezone)
             scheduled = datetime.fromisoformat(job.payload['scheduled_for'])
             # Do not let a retry/restart start an old warm-up at delivery time.
-            if local_now >= scheduled - timedelta(minutes=30) or not self.store.has_subscriptions():
+            if local_now >= scheduled - timedelta(minutes=30) or not self._has_daily_recipients():
                 self.store.mark_analysis_complete(job.key)
                 return
             results = await asyncio.to_thread(self.podcast_service.build_daily, preparation=True)
@@ -884,7 +1041,7 @@ class NewsOfficerRuntime:
                 work.cancel()
 
     async def _failure_notice(self, job, terminal):
-        if job.kind == 'document' and job.payload.get('mode') == 'daily_episode':
+        if job.kind == 'document' and job.payload.get('mode') in {'daily_episode', 'daily_document_followup'}:
             return  # Background enrichment never adds group status messages.
         if job.kind == 'document' and terminal:
             try:
@@ -896,12 +1053,16 @@ class NewsOfficerRuntime:
                             job.payload.get('reply_in_thread', False))
                         await self._drain_outbox(job)
                     return
-                active = set(self.store.list_subscriptions())
-                content = (f"{job.payload['day']} 的播客精读文档暂未编译完成，云端会继续重试。"
+                if job.payload.get('mode') == 'inline_daily_retry':
+                    base = Job(job.payload['base_job'], 'daily', {}, job.attempts)
+                    audience = self._daily_targets(base)
+                    day = job.payload['scheduled_for'][:10]
+                else:
+                    audience = self._document_audience(job.payload['targets'])
+                    day = job.payload['day']
+                content = (f"{day} 的播客精读文档暂未编译完成，已保留失败状态。"
                            "短版日报与聊天问答不受影响；尚未完成的文档不会作为成品推送。")
-                for kind, target in job.payload['targets']:
-                    if (kind, target) not in active:
-                        continue
+                for kind, target in audience:
                     key = f"{job.key}:document-delayed:{kind}:{target}"
                     self.store.ensure_outbox(job_key=job.key, group_key='document:delayed',
                         delivery_key=key, operation='send', target_id=target, target_type=kind,
@@ -945,7 +1106,9 @@ class NewsOfficerRuntime:
                     # Blocking tool threads cannot safely be cancelled and retried
                     # in-process. Let the existing process watchdog recover the
                     # durable job after a generous whole-job deadline instead.
-                    budget = 900 if job.payload.get('prepare_only') else 2700 if kind == 'daily' else 3600
+                    budget = (900 if job.payload.get('prepare_only') else
+                              getattr(getattr(self, 'settings', None), 'daily_health_budget_seconds', 2700)
+                              if kind == 'daily' else 3600)
                     self.background_jobs[job.key] = (time.monotonic(), budget)
                 if kind == "message":
                     await self._handle_message_job(job)
@@ -955,17 +1118,18 @@ class NewsOfficerRuntime:
                     await self._handle_document_job(job)
                 else:
                     raise ValueError(f"Unknown job kind: {job.kind}")
-            except Exception as error:  # noqa: BLE001 - durable worker retry boundary
-                from .document_transcript import TranslationFailure
-                from .library import LibraryError
-                detail = (str(error) if isinstance(error, TranslationFailure)
-                          or (job.payload.get('mode') == 'daily_episode' and isinstance(error, LibraryError))
-                          else type(error).__name__)
-                logger.error("Job %s failed: %s", job.key, detail)
-                if not isinstance(error, ResearchContinuationPending) or job.attempts >= 5:
-                    await self._failure_notice(job, terminal=job.attempts >= 5)
+            except Exception as error:  # durable worker retry boundary
+                # Preserve stack frames without logging exception messages, which
+                # can contain request URLs, tokens or user content. Omit chains.
+                safe_error = RuntimeError(type(error).__name__)
+                if not isinstance(error, ReceiptReconcilePending):
+                    logger.error("Job %s failed: %s", job.key, type(error).__name__,
+                                 exc_info=(RuntimeError, safe_error, error.__traceback__))
+                if not isinstance(error, ReceiptReconcilePending) and (not isinstance(error, ResearchContinuationPending) or job.attempts >= 5):
+                    await self._failure_notice(job, terminal=job.attempts >= 5 or isinstance(error, DocumentRetryStopped))
                 await asyncio.to_thread(
-                    self.store.fail, job.key, detail, job.attempts
+                    self.store.fail, job.key, type(error).__name__, job.attempts,
+                    **({'max_attempts': 1} if isinstance(error, DocumentRetryStopped) else {})
                 )
             else:
                 await asyncio.to_thread(self.store.complete, job.key)
@@ -975,75 +1139,160 @@ class NewsOfficerRuntime:
                 if hasattr(self, 'background_jobs'):
                     self.background_jobs.pop(job.key, None)
 
+    def _log_scheduler_failure(self, error, site='_scheduler', *, warning=False, message='Scheduler step failed'):
+        now = getattr(self, '_scheduler_clock', time.monotonic)()
+        if not hasattr(self, '_scheduler_failures'):
+            self._scheduler_failures = {}
+        # Message text varies per request and may contain sensitive data.
+        key = (type(error), site)
+        if key not in self._scheduler_failures and len(self._scheduler_failures) >= 256:
+            del self._scheduler_failures[next(iter(self._scheduler_failures))]
+        previous, suppressed = self._scheduler_failures.get(key, (None, 0))
+        if previous is not None and now - previous < 600:
+            self._scheduler_failures[key] = (previous, suppressed + 1)
+            return
+        self._scheduler_failures[key] = (now, 0)
+        # Preserve stack frames without exception text or chained secrets.
+        safe_error = RuntimeError(type(error).__name__)
+        log = logger.warning if warning else logger.error
+        log(message + ': %s; 已抑制 %d 次', type(error).__name__, suppressed,
+                     exc_info=(RuntimeError, safe_error, error.__traceback__))
+
     async def _scheduler(self) -> None:
         while True:
-            local_now = datetime.now(self.settings.timezone)
-            has_subscribers = await asyncio.to_thread(self.store.has_subscriptions)
-            scheduled = local_now.replace(hour=self.settings.daily_time.hour,
-                minute=self.settings.daily_time.minute, second=0, microsecond=0)
-            if (has_subscribers and getattr(self.settings, 'daily_preparation_enabled', False)
-                    and scheduled - timedelta(hours=2) <= local_now < scheduled - timedelta(hours=1)):
-                inserted = await asyncio.to_thread(self.store.enqueue,
-                    f'daily:prepare:{scheduled.date().isoformat()}', 'daily',
-                    {'scheduled_for': scheduled.isoformat(), 'prepare_only': True})
-                if inserted:
-                    self._wake_worker('daily')
-            if has_subscribers and local_now.time() >= self.settings.daily_time:
-                jobs = [
-                    (
-                        f"daily:{local_now.date().isoformat()}",
-                        {"scheduled_for": local_now.isoformat()},
-                    )
-                ]
-                # A one-time backfill is explicit operator state, not coupled
-                # to a code version. Keeping the ID stable makes it idempotent
-                # across deploys and prevents accidental same-day re-sends.
-                manual_digest_id = self.settings.manual_digest_id
-                if manual_digest_id:
-                    jobs.append(
-                        (
-                            f"daily:manual:{manual_digest_id}",
-                            {
-                                "scheduled_for": local_now.isoformat(),
-                                "manual_digest_id": manual_digest_id,
-                            },
-                        )
-                    )
-                for key, payload in jobs:
-                    inserted = await asyncio.to_thread(
-                        self.store.enqueue,
-                        key,
-                        "daily",
-                        payload,
-                    )
-                    if inserted:
-                        logger.info("Queued daily digest %s", key)
-                        self._wake_worker("daily")
-            if (not getattr(self.settings, 'daily_reader_mode', False)
-                    and has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1)
-                    and not await asyncio.to_thread(self.store.has_unfinished_transcript_catchup)):
-                slot = int(local_now.timestamp()) // 1800
-                inserted = await asyncio.to_thread(self.store.enqueue,
-                    f'daily:transcript-catchup:{slot}', 'daily',
-                    {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
-                if inserted:
-                    self._wake_worker('daily')
-            if (getattr(self, 'document_compiler', None)
-                    and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat(),
-                        **({'requested_only': True} if getattr(self.settings, 'daily_reader_mode', False) else {}))):
-                self._wake_worker('document')
-            if (getattr(self, 'document_compiler', None)
-                    and getattr(self.settings, 'daily_reader_mode', False)):
-                from .daily_enrichment import enqueue_enrichment
-                if await asyncio.to_thread(enqueue_enrichment, self.store, local_now.date().isoformat()):
-                    self._wake_worker('document')
+            try:
+                local_now = datetime.now(self.settings.timezone)
+                has_subscribers = await asyncio.to_thread(self._has_daily_recipients)
+                scheduled = local_now.replace(hour=self.settings.daily_time.hour,
+                    minute=self.settings.daily_time.minute, second=0, microsecond=0)
+                try:
+                    if (has_subscribers and getattr(self.settings, 'daily_preparation_enabled', False)
+                            and scheduled - timedelta(hours=2) <= local_now < scheduled - timedelta(hours=1)):
+                        inserted = await asyncio.to_thread(self.store.enqueue,
+                            f'daily:prepare:{scheduled.date().isoformat()}', 'daily',
+                            {'scheduled_for': scheduled.isoformat(), 'prepare_only': True})
+                        if inserted:
+                            self._wake_worker('daily')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error, site='daily_prepare')
+                try:
+                    if has_subscribers and local_now.time() >= self.settings.daily_time:
+                        jobs = [
+                            (
+                                f"daily:{local_now.date().isoformat()}",
+                                {"scheduled_for": local_now.isoformat()},
+                            )
+                        ]
+                        # A one-time backfill is explicit operator state, not coupled
+                        # to a code version. Keeping the ID stable makes it idempotent
+                        # across deploys and prevents accidental same-day re-sends.
+                        manual_digest_id = self.settings.manual_digest_id
+                        if manual_digest_id:
+                            jobs.append(
+                                (
+                                    f"daily:manual:{manual_digest_id}",
+                                    {
+                                        "scheduled_for": local_now.isoformat(),
+                                        "manual_digest_id": manual_digest_id,
+                                    },
+                                )
+                            )
+                        for key, payload in jobs:
+                            inserted = await asyncio.to_thread(
+                                self.store.enqueue,
+                                key,
+                                "daily",
+                                payload,
+                            )
+                            if inserted:
+                                logger.info("Queued daily digest %s", key)
+                                self._wake_worker("daily")
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error, site='daily_enqueue')
+                try:
+                    if (not getattr(self.settings, 'daily_reader_mode', False)
+                            and has_subscribers and await asyncio.to_thread(self.store.due_daily_transcripts, 1)
+                            and not await asyncio.to_thread(self.store.has_unfinished_transcript_catchup)):
+                        slot = int(local_now.timestamp()) // 1800
+                        inserted = await asyncio.to_thread(self.store.enqueue,
+                            f'daily:transcript-catchup:{slot}', 'daily',
+                            {'scheduled_for': local_now.isoformat(), 'transcript_catchup': True})
+                        if inserted:
+                            self._wake_worker('daily')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error, site='transcript_catchup')
+                try:
+                    if (getattr(self, 'document_compiler', None)
+                            and await asyncio.to_thread(self.document_compiler.enqueue_ready, local_now.date().isoformat(),
+                                **({'requested_only': True} if getattr(self.settings, 'daily_reader_mode', False) else {}))):
+                        self._wake_worker('document')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error, site='document_enqueue')
+                try:
+                    if (getattr(self, 'document_compiler', None)
+                            and getattr(self.settings, 'daily_reader_mode', False)):
+                        from .daily_enrichment import enqueue_enrichment
+                        if await asyncio.to_thread(enqueue_enrichment, self.store, local_now.date().isoformat(),
+                                audience_filter=self._document_audience, compiler=self.document_compiler):
+                            self._wake_worker('document')
+                except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                    self._log_scheduler_failure(error, site='daily_enrichment')
+            except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
+                self._log_scheduler_failure(error, site='scheduler_tick')
             await asyncio.sleep(30)
 
     async def _handle_document_job(self, job):
+        if job.payload.get('mode') == 'daily_document_followup':
+            for delivery in job.payload['deliveries']:
+                kind, target = delivery['target']
+                if not self._document_audience([(kind, target)]):
+                    continue
+                key = f"{job.key}:document-link:{kind}:{target}"
+                parts = combined_delivery_parts(delivery['content'], key)
+                if len(parts) != 1:
+                    raise ValueError('Daily document links exceed single-message capacity')
+                self.store.ensure_outbox(job_key=job.key, group_key='document:link',
+                    delivery_key=key, operation='send', target_id=target, target_type=kind,
+                    reply_in_thread=False, parts=parts)
+            await self._drain_outbox(job)
+            return
+        if job.payload.get('mode') == 'inline_daily_retry':
+            base = Job(job.payload['base_job'], 'daily', {}, job.attempts)
+            await asyncio.to_thread(self._inline_daily_documents, base,
+                                    datetime.fromisoformat(job.payload['scheduled_for']))
+            if self.store.get_job_result(base.key, 'daily:inline-documents') is None:
+                if not self.document_compiler.retry_available(job.payload, self.document_compiler.today()):
+                    raise DocumentRetryStopped('Daily documents exhausted retry budget or deadline')
+                raise RuntimeError('Daily documents pending retry')
+            documents = self.store.get_job_result(base.key, 'daily:inline-documents')['documents']
+            if documents:
+                content = '\n\n'.join(
+                    f"[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
+                    for d in documents)
+                for kind, target in self._daily_targets(base):
+                    key = f"{base.key}:inline-document-link:{kind}:{target}"
+                    parts = combined_delivery_parts(content, key)
+                    if len(parts) != 1:
+                        raise ValueError('Daily document links exceed single-message capacity')
+                    self.store.ensure_outbox(job_key=job.key, group_key='document:link',
+                        delivery_key=key, operation='send', target_id=target, target_type=kind,
+                        reply_in_thread=False, parts=parts)
+                await self._drain_outbox(job)
+            return
         if job.payload.get('mode') == 'daily_episode':
-            from .daily_enrichment import publish_enrichment
-            await asyncio.to_thread(publish_enrichment, self.store, self.document_compiler, job)
-            return  # Edit the original receipt; never send a second notification.
+            from .daily_enrichment import enqueue_followup, publish_enrichment
+            try:
+                await asyncio.to_thread(publish_enrichment, self.store, self.document_compiler, job)
+            except Exception as error:
+                safe_error = RuntimeError(type(error).__name__)
+                logger.warning('Daily document compilation deferred',
+                               exc_info=(RuntimeError, safe_error, error.__traceback__))
+                raise
+            if await asyncio.to_thread(enqueue_followup, self.store, job.payload['base_job'],
+                    datetime.now(getattr(self.settings, 'timezone', ZoneInfo('Asia/Shanghai'))).date().isoformat(),
+                    audience_filter=self._document_audience):
+                self._wake_worker('document')
+            return
         if (getattr(self.settings, 'daily_reader_mode', False)
                 and job.payload.get('mode') != 'requested_episode'):
             return  # Retire old automatic notification jobs without deleting data.
@@ -1070,6 +1319,10 @@ class NewsOfficerRuntime:
                     delivery_key=key, operation='send', target_id=target, target_type=kind,
                     reply_in_thread=False, parts=combined_delivery_parts(content, key))
         await self._drain_outbox(job)
+        if result and result.get('deferred'):
+            if not self.document_compiler.retry_available(job.payload, self.document_compiler.today()):
+                raise DocumentRetryStopped('Episode documents exhausted retry budget or deadline')
+            raise ValueError('Some episode documents failed validation; retry required')
 
     async def _library_archiver(self) -> None:
         while True:
@@ -1094,7 +1347,8 @@ class NewsOfficerRuntime:
                 if encoded != previous:
                     # Business failure must alert operators, not restart the
                     # worker mid-analysis and repeatedly lose progress.
-                    log = logger.error if state["daily_overdue"] else logger.info
+                    log = (logger.error if state["daily_overdue"]
+                           else logger.warning if state.get("warnings") else logger.info)
                     log("Business delivery status: %s", encoded)
                     previous = encoded
             except Exception as error:  # noqa: BLE001 - monitoring must not kill delivery

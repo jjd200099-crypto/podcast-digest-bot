@@ -247,6 +247,12 @@ def _retry_delay(response: requests.Response, attempt: int) -> float:
     return min(8.0, 0.5 * (2**attempt))
 
 
+class SendRejected(RuntimeError):
+    """An explicit rejection means no message was sent."""
+
+    uncertain = False
+
+
 class FeishuMessenger:
     def __init__(self, app_id: str, app_secret: str):
         self.app_id = app_id
@@ -257,13 +263,24 @@ class FeishuMessenger:
 
     @staticmethod
     def _check(response: requests.Response, operation: str) -> dict:
-        response.raise_for_status()
+        # Only HTTP 4xx (including 429) and explicit platform rejection codes
+        # are definite failures. HTTP 5xx may follow an accepted send.
+        # Transport errors, malformed/missing codes and missing receipts remain
+        # uncertain by default: the platform may already have accepted the send.
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as error:
+            if 400 <= response.status_code < 500:
+                raise SendRejected(f'Feishu {operation} HTTP rejection') from error
+            raise
         body = response.json()
         if not isinstance(body, dict):
             raise TypeError(f'Feishu {operation} response is not an object')
         if body.get("code") != 0:
             code = body.get('code')
-            raise RuntimeError(f"Feishu {operation} error code: {code if isinstance(code, int) else 'unknown'}")
+            if isinstance(code, int) and not isinstance(code, bool):
+                raise SendRejected(f"Feishu {operation} error code: {code}")
+            raise RuntimeError(f"Feishu {operation} ambiguous error code")
         return body
 
     @staticmethod
@@ -393,6 +410,72 @@ class FeishuMessenger:
                     uuid=item_uuid,
                 )
             )
+
+    def reconcile_delivery(self, item: OutboxItem, created_at: str) -> str:
+        """Read back an uncertain send before replaying its immutable UUID.
+
+        Exact body, app identity, conversation and time are required. A failed
+        or incomplete scan must never be interpreted as absence of a receipt.
+        """
+        from .daily_enrichment import normalized_content
+        from .library import FeishuLibraryAPI
+
+        api = FeishuLibraryAPI(self)
+        start = datetime.fromisoformat(created_at).timestamp() - 1
+        end = time.time() + 1
+        if item.operation == 'send' and item.target_type == 'chat_id':
+            chat_id = item.target_id
+        elif item.operation == 'reply':
+            data = api.request('GET', f'/im/v1/messages/{item.target_id}')
+            parents = data.get('items', [])
+            if len(parents) != 1 or parents[0].get('message_id') != item.target_id:
+                raise RuntimeError('Cannot reconcile reply conversation')
+            chat_id = parents[0].get('chat_id')
+            if not chat_id:
+                raise RuntimeError('Cannot reconcile reply conversation')
+        else:
+            # Private receive IDs cannot be used as history container IDs.
+            # Replay only inside a conservative margin of the UUID window.
+            if end - start >= 50 * 60:
+                raise RuntimeError('Uncertain delivery outside UUID window; reconciliation unavailable')
+            return ''
+        params = {'container_id_type': 'chat', 'container_id': chat_id,
+                  'start_time': str(int(start)), 'end_time': str(int(end) + 1),
+                  'sort_type': 'ByCreateTimeDesc', 'page_size': 50}
+        desired = normalized_content(item.msg_type, item.content) if item.msg_type in {'post', 'text'} else json.loads(item.content)
+        matches = set()
+        for _ in range(20):
+            data = api.request('GET', '/im/v1/messages', params=params)
+            if not isinstance(data.get('items'), list):
+                raise TypeError('Message reconciliation history invalid')
+            for message in data['items']:
+                sender = message.get('sender') or {}
+                if (message.get('deleted') or message.get('msg_type') != item.msg_type
+                        or sender.get('sender_type') != 'app' or sender.get('id_type') != 'app_id'
+                        or sender.get('id') != self.app_id
+                        or message.get('chat_id', chat_id) != chat_id
+                        or (item.operation == 'reply' and message.get('parent_id') != item.target_id)):
+                    continue
+                try:
+                    timestamp = int(message.get('create_time', '')) / 1000
+                    content = message['body']['content']
+                    actual = normalized_content(item.msg_type, content) if item.msg_type in {'post', 'text'} else json.loads(content)
+                except (ValueError, TypeError, KeyError):
+                    raise RuntimeError('Message reconciliation receipt invalid') from None
+                if start <= timestamp <= end and actual == desired:
+                    identity = message.get('message_id')
+                    if not isinstance(identity, str) or not identity:
+                        raise RuntimeError('Message reconciliation identity missing')
+                    matches.add(identity)
+            if not data.get('has_more'):
+                if len(matches) > 1:
+                    raise RuntimeError('Message reconciliation ambiguous')
+                return next(iter(matches), '')
+            cursor = data.get('page_token')
+            if not isinstance(cursor, str) or not cursor or cursor == params.get('page_token'):
+                raise RuntimeError('Message reconciliation pagination invalid')
+            params['page_token'] = cursor
+        raise RuntimeError('Message reconciliation scan incomplete')
 
     def deliver(self, item: OutboxItem) -> str:
         """Deliver one already-frozen outbox item without re-splitting it."""

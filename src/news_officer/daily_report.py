@@ -7,7 +7,7 @@ from .models import DailyItem
 from .summarizer import remove_editorial_leadins
 
 
-def reader_episode(markdown: str, document_url: str = '') -> str:
+def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = True) -> str:
     """Group one episode's reading and listening links below its prose."""
     content = render_daily_summary(markdown, reader_mode=True)
     lines, links = [], []
@@ -21,7 +21,8 @@ def reader_episode(markdown: str, document_url: str = '') -> str:
             line = '**' + clean + '**'
         lines.append(line)
     if document_url:
-        lines.extend(['', f'[精读和完整中文对谈]({document_url})'])
+        label = '精读和完整中文对谈' if fulltext else '精读'
+        lines.extend(['', f'[{label}]({document_url})'])
     if links:
         lines.extend(['', *dict.fromkeys(links)])
     return '\n'.join(lines).strip()
@@ -134,3 +135,39 @@ def _coverage_report(items: list[DailyItem]) -> str | None:
         ]
     )
     return "\n".join(lines)
+
+
+def compact_reader_episode(content: str, level: int, listening_url: str) -> str:
+    """Drop whole optional lines/paragraphs; retain a complete summary and links."""
+    lines = [line for line in content.splitlines()
+             if not line.strip().startswith(('阅读建议：', '推荐理由：'))]
+    if level == 1:
+        result = '\n'.join(lines).strip()
+    else:
+        paragraphs = re.split(r'\n\s*\n', '\n'.join(lines).strip())
+        heading, prose, links = [], [], []
+        for paragraph in paragraphs:
+            # Preserve link lines even when metadata and prose share a paragraph.
+            body = []
+            for line in paragraph.splitlines():
+                if re.search(r'https?://', line):
+                    links.append(line)
+                elif line.strip().startswith(('**', '#', '时长：', '节目：', '补齐旧节目')):
+                    heading.append(line)
+                elif line.strip():
+                    body.append(line)
+            if body:
+                prose.append('\n'.join(body))
+        if not prose:
+            # No identifiable summary: do not manufacture or discard the body.
+            return content
+        summary = prose[0]
+        if level == 3:
+            # A whole first sentence is an extractive summary, never a byte slice.
+            sentence = re.match(r'.*?[。！？](?:[”’」』])?', summary, re.DOTALL)
+            if sentence:
+                summary = sentence.group(0)
+        result = '\n\n'.join([*heading, summary, *dict.fromkeys(links)])
+    if listening_url not in result:
+        result += f'\n\n[收听节目]({listening_url})'
+    return result

@@ -26,7 +26,7 @@ class SelectedDocuments(unittest.TestCase):
     def test_enrichment_compiles_one_episode_and_reuses_already_published_links(self):
         f = self.fixture
         f.add_episode('two')
-        self.rate('two', 4)
+        self.rate('two', 5)
         f.store.save_job_result(f.base, 'bundle', 'daily_bundle', {
             'enrichment': {'version': 1, 'eligible': ['one', 'two']},
             'deliveries': [{'target_type': 'chat_id', 'target_id': 'oc_test'}]})
@@ -55,7 +55,7 @@ class SelectedDocuments(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         f = self.fixture
-        self.compiler = SelectedEpisodeCompiler(f.store, f.api, f.writer, start_date='2026-09-21')
+        self.compiler = SelectedEpisodeCompiler(f.store, f.api, f.writer, start_date='2026-09-21', today=lambda: '2026-09-21')
         self.compiler.initialize()
         self.rate('one', 5)
         f.store.ensure_outbox(job_key=f.base, group_key='daily:bundle:test', delivery_key='daily-test',
@@ -118,7 +118,19 @@ class SelectedDocuments(unittest.TestCase):
         self.assertEqual(self.fixture.api.creates, 0)
         self.assertEqual(stars('没有评级'), 0)
 
-    def test_four_and_five_stars_are_automatically_compiled(self):
+    def test_default_selection_compiles_four_and_five_but_not_three_stars(self):
+        self.assertEqual(self.compiler.min_stars, 4)
+        self.rate('one', 4)
+        self.fixture.add_episode('five')
+        self.fixture.add_episode('three')
+        self.rate('five', 5)
+        self.rate('three', 3)
+        result = self.compiler.publish(self.job())
+        self.assertEqual([d['stars'] for d in result['documents']], [5, 4])
+        self.assertEqual(self.fixture.api.creates, 2)
+
+    def test_explicit_four_star_setting_is_supported(self):
+        self.compiler.min_stars = 4
         for rating in (1, 2, 3):
             self.rate('one', rating)
             self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
@@ -201,6 +213,40 @@ class SelectedDocuments(unittest.TestCase):
 
 
 class SelectedDelivery(unittest.IsolatedAsyncioTestCase):
+    async def test_allowlisted_never_subscribed_and_unsubscribed_receive_daily_and_links(self):
+        from types import SimpleNamespace
+
+        from test_reliability import FakeMessenger, FakePlugin, SequencePodcast, runtime
+
+        for unsubscribed in (False, True):
+            with self.subTest(unsubscribed=unsubscribed):
+                test = SelectedDocuments()
+                test.setUp()
+                self.addCleanup(test.doCleanups)
+                f = test.fixture
+                target = ('chat_id', 'oc_allowlisted')
+                if unsubscribed:
+                    f.store.add_subscription(*target)
+                    f.store.remove_subscription(*target)
+                messenger = FakeMessenger()
+                instance = runtime(f.store, messenger, SequencePodcast([]), FakePlugin())
+                instance.settings = SimpleNamespace(daily_chat_ids=(target[1],),
+                    daily_require_chat_ids=False, daily_combined_message=True)
+                instance.document_compiler = test.compiler
+                test.compiler.audience_filter = instance._document_audience
+                # Replace the fixture's old frozen recipients with the runtime snapshot.
+                with f.store._connect() as db:
+                    db.execute("DELETE FROM job_results WHERE job_key=? AND result_key='daily:recipients'", (f.base,))
+                    db.execute("UPDATE jobs SET analysis_complete=0 WHERE job_key=?", (f.base,))
+                daily = Job(f.base, 'daily', {'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1)
+                await instance._handle_daily_job(daily)
+                document = test.job()
+                self.assertIsNotNone(document)
+                await instance._handle_document_job(document)
+                self.assertNotIn(target, f.store.list_subscriptions())
+                self.assertEqual([(r.target_type, r.target_id) for r in messenger.attempts], [target, target])
+                self.assertIn('https://www.feishu.cn/docx/', messenger.attempts[-1].content)
+
     async def test_multiple_documents_share_one_notification(self):
         from test_reliability import FakeMessenger, FakePlugin, SequencePodcast, runtime
 
@@ -227,3 +273,387 @@ class SelectedDelivery(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DocumentAllowlist(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+
+    def audience(self, allowlist, require=False):
+        from types import SimpleNamespace
+
+        from test_reliability import runtime
+        owner = runtime(self.fixture.store, None, None)
+        owner.settings = SimpleNamespace(daily_chat_ids=allowlist, daily_require_chat_ids=require)
+        self.compiler.audience_filter = owner._document_audience
+        return owner
+
+    def freeze(self, targets):
+        f = self.fixture
+        for kind, target in targets:
+            f.store.add_subscription(kind, target)
+        f.store.save_job_result(f.base, 'daily:recipients', 'recipients', {'targets': [list(t) for t in targets]})
+
+    def test_frozen_old_open_id_is_revalidated_against_allowlist(self):
+        self.freeze([('open_id', 'ou_old'), ('chat_id', 'oc_test'), ('chat_id', 'oc_extra')])
+        self.audience(('oc_test',))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
+        job = self.fixture.store.claim_next('document')
+        self.assertEqual(job.payload['targets'], [['chat_id', 'oc_test']])
+        # A payload frozen before the allowlist is also filtered at publish time.
+        job.payload['targets'] = [['open_id', 'ou_old'], ['chat_id', 'oc_test']]
+        self.assertEqual(self.compiler._audience(job.payload['targets']), [('chat_id', 'oc_test')])
+
+    def test_no_allowlisted_audience_means_no_document_job_or_publish(self):
+        self.freeze([('open_id', 'ou_old'), ('chat_id', 'oc_test')])
+        self.audience(('oc_other',))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        job = Job('episode-documents:x', 'document', {'mode': 'selected_episodes', 'day': '2026-09-21',
+            'base_job': self.fixture.base, 'revision': 'r', 'targets': [['open_id', 'ou_old']]}, 1)
+        self.assertIsNone(self.compiler.publish(job))
+        self.assertEqual(self.fixture.api.creates, 0)
+
+    def test_required_but_empty_allowlist_blocks_documents(self):
+        self.freeze([('chat_id', 'oc_test')])
+        self.audience((), require=True)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+
+    def test_without_allowlist_documents_keep_subscription_behavior(self):
+        self.freeze([('chat_id', 'oc_test')])
+        self.audience(())
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 1)
+
+    def test_allowlisted_chat_does_not_need_subscription_for_documents(self):
+        self.audience(('oc_new',))
+        self.assertNotIn(('chat_id', 'oc_new'), self.fixture.store.list_subscriptions())
+        self.assertEqual(self.compiler._audience([['chat_id', 'oc_new']]), [('chat_id', 'oc_new')])
+
+    def test_failed_inline_retry_is_revived_even_in_requested_only_mode(self):
+        payload = {'mode': 'inline_daily_retry', 'base_job': self.fixture.base,
+                   'scheduled_for': '2026-09-21T08:30:00+08:00'}
+        self.fixture.store.enqueue('inline-retry', 'document', payload)
+        self.fixture.store.fail('inline-retry', 'ValueError', 5, failed_daily_requeue_seconds=0)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21', requested_only=True), 1)
+        self.assertEqual(self.fixture.store.claim_next('document').key, 'inline-retry')
+
+
+class InlineFollowup(unittest.IsolatedAsyncioTestCase):
+    async def test_followup_is_durable_links_only_and_revalidates_frozen_targets(self):
+        from types import SimpleNamespace
+
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_test',), daily_require_chat_ids=True)
+        with f.store._connect() as db:
+            db.execute("UPDATE job_results SET payload_json=? WHERE job_key=? AND result_key='daily:recipients'",
+                       (json.dumps({'targets': [['chat_id', 'oc_test'], ['chat_id', 'oc_removed']]}), f.base))
+        documents = [{'title': 'one', 'url': 'https://www.feishu.cn/docx/one'}]
+        owner.document_compiler = test.compiler
+        test.compiler.audience_filter = owner._document_audience
+        job = Job(f.base + ':inline-document-retry', 'document',
+                  {'mode': 'inline_daily_retry', 'base_job': f.base,
+                   'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1)
+        f.store.enqueue(job.key, job.kind, job.payload)
+        await owner._handle_document_job(job)
+        await owner._handle_document_job(job)
+        self.assertEqual(len(messenger.delivered), 1)
+        rows = f.store.outbox_items(job.key)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].target_id, 'oc_test')
+        self.assertNotIn('早间', rows[0].content)
+        self.assertIn(documents[0]['title'], rows[0].content)
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_other',), daily_require_chat_ids=True)
+        await owner._handle_document_job(job)
+        self.assertEqual(len(messenger.delivered), 1)
+
+    async def test_no_documents_no_followup(self):
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        f.store.save_job_result(f.base, 'daily:inline-documents', 'inline_documents', {'documents': []})
+        await owner._handle_document_job(Job('retry', 'document',
+            {'mode': 'inline_daily_retry', 'base_job': f.base,
+             'scheduled_for': '2026-09-21T08:30:00+08:00'}, 1))
+        self.assertEqual(messenger.delivered, {})
+
+
+class DocumentRetryLimits(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+    job = SelectedDocuments.job
+
+    def test_total_revision_budget_survives_revival_and_restart_and_warns(self):
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.operations import business_snapshot
+        f = self.fixture
+        f.writer.generate.side_effect = ValueError('deterministic invalid notes')
+        job = self.job()
+        for _ in range(3):
+            self.assertTrue(self.compiler.publish(job)['deferred'])
+        self.assertEqual(f.writer.generate.call_count, 3)
+        restarted = SelectedEpisodeCompiler(f.store, f.api, f.writer, today=lambda: '2026-09-21')
+        with self.assertRaises(DocumentRetryStopped):
+            restarted.publish(job)
+        self.assertEqual(restarted.enqueue_ready('2026-09-21'), 0)
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?', (job.key,)).fetchone()[0], 'failed')
+            row = db.execute('SELECT attempts,status FROM episode_document_attempts').fetchone()
+        self.assertEqual(tuple(row), (3, 'failed'))
+        self.assertIn('episode_document_retry_stopped:1', business_snapshot(f.store.path)['warnings'])
+        self.assertEqual(f.writer.generate.call_count, 3)
+
+    def test_next_day_stops_model_calls_and_reviving_inline_jobs(self):
+        from news_officer.episode_document import DocumentRetryStopped
+        f = self.fixture
+        f.writer.generate.side_effect = ValueError('invalid')
+        job = self.job()
+        self.compiler.publish(job)
+        payload = {'mode': 'inline_daily_retry', 'base_job': f.base,
+                   'scheduled_for': '2026-09-21T08:30:00+08:00'}
+        f.store.enqueue('inline', 'document', payload)
+        f.store.fail('inline', 'ValueError', 5, failed_daily_requeue_seconds=0)
+        self.compiler.today = lambda: '2026-09-22'
+        with self.assertRaises(DocumentRetryStopped):
+            self.compiler.publish(job)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-22', requested_only=True), 0)
+        self.assertEqual(f.writer.generate.call_count, 1)
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM episode_document_attempts').fetchone()[0], 'failed')
+
+    def test_new_transcript_revision_has_a_fresh_budget(self):
+        from news_officer.models import Transcript
+        f = self.fixture
+        f.writer.generate.side_effect = ValueError('invalid')
+        job = self.job()
+        for _ in range(3):
+            self.compiler.publish(job)
+        updated = f.store.save_verified_transcript(f.record.episode,
+            Transcript(f.record.transcript.text + ' revised', 'official', f.record.episode.url, True))
+        revision = self.compiler.snapshot(f.base)[0]
+        new = Job('new-revision', 'document', {**job.payload, 'revision': revision}, 1)
+        self.assertTrue(self.compiler.publish(new)['deferred'])
+        with f.store._connect() as db:
+            row = db.execute('SELECT attempts,status FROM episode_document_attempts WHERE revision=?',
+                             (self.compiler.document_identity(updated),)).fetchone()
+        self.assertEqual(tuple(row), (1, 'pending'))
+        self.assertEqual(f.writer.generate.call_count, 4)
+
+    def test_successful_siblings_do_not_revive_an_exhausted_episode(self):
+        f = self.fixture
+        f.add_episode('two')
+        self.rate('two', 5)
+        def generate(record):
+            if record.episode.id == 'one':
+                raise ValueError('invalid')
+            return fixtures.notes(record)
+        f.writer.generate.side_effect = generate
+        job = self.job()
+        for _ in range(3):
+            self.compiler.publish(job)
+        self.assertFalse(self.compiler.retry_available(job.payload, '2026-09-21'))
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21'), 0)
+        self.assertEqual(f.writer.generate.call_count, 4)
+
+
+class InlineFailureNotice(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_payload_targets_notifies_frozen_allowlisted_recipients(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        # Frozen allowed chat has no subscription. Newly allowed chat was not frozen.
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_frozen', 'oc_new'), daily_require_chat_ids=True)
+        with f.store._connect() as db:
+            db.execute("UPDATE job_results SET payload_json=? WHERE job_key=? AND result_key='daily:recipients'",
+                       (json.dumps({'targets': [['chat_id', 'oc_frozen'], ['chat_id', 'oc_removed'],
+                                                ['open_id', 'ou_old']]}), f.base))
+        job = Job('inline-notice', 'document', {'mode': 'inline_daily_retry', 'base_job': f.base,
+                  'scheduled_for': '2026-09-21T08:30:00+08:00'}, 5)
+        f.store.enqueue(job.key, job.kind, job.payload)
+        with patch('news_officer.runtime.logger.warning') as warning:
+            await owner._failure_notice(job, terminal=True)
+            warning.assert_not_called()
+        await owner._failure_notice(job, terminal=True)
+        self.assertEqual(len(messenger.delivered), 1)
+        self.assertEqual([(r.target_type, r.target_id) for r in messenger.attempts],
+                         [('chat_id', 'oc_frozen')])
+        self.assertIn('2026-09-21', messenger.attempts[0].content)
+
+    async def test_notice_rechecks_allowlist_immediately_before_delivery(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from test_reliability import FakeMessenger, runtime
+        test = SelectedDocuments()
+        test.setUp()
+        self.addCleanup(test.doCleanups)
+        f = test.fixture
+        messenger = FakeMessenger()
+        owner = runtime(f.store, messenger, None)
+        owner.settings = SimpleNamespace(daily_chat_ids=('oc_test',), daily_require_chat_ids=True)
+        job = Job('inline-notice', 'document', {'mode': 'inline_daily_retry', 'base_job': f.base,
+                  'scheduled_for': '2026-09-21T08:30:00+08:00'}, 5)
+        f.store.enqueue(job.key, job.kind, job.payload)
+        original = f.store.ensure_outbox
+        def change_allowlist(**kwargs):
+            result = original(**kwargs)
+            owner.settings = SimpleNamespace(daily_chat_ids=('oc_other',), daily_require_chat_ids=True)
+            return result
+        with patch.object(f.store, 'ensure_outbox', side_effect=change_allowlist):
+            await owner._failure_notice(job, terminal=True)
+        self.assertEqual(messenger.delivered, {})
+
+
+class CompleteDocumentBudget(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+    job = SelectedDocuments.job
+
+    def test_pre_merge_notes_revision_budget_is_not_reset(self):
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.shownotes import note_identity
+        f = self.fixture
+        job = self.job()
+        with f.store._connect() as db:
+            db.execute("INSERT INTO episode_document_attempts VALUES (?,?,?,3,'failed')",
+                       (f.record.episode.id, note_identity(f.record), '2026-09-21'))
+        with self.assertRaises(DocumentRetryStopped):
+            self.compiler.publish(job)
+        f.writer.generate.assert_not_called()
+        with f.store._connect() as db:
+            rows = db.execute('SELECT revision,attempts,status FROM episode_document_attempts').fetchall()
+        self.assertEqual([tuple(r) for r in rows], [(self.compiler.document_identity(f.record), 3, 'failed')])
+
+    def test_translation_failures_share_the_document_revision_budget(self):
+        from unittest.mock import Mock
+
+        from news_officer.episode_document import DocumentRetryStopped
+        f = self.fixture
+        self.compiler.include_fulltext = True
+        self.compiler.transcript_writer = Mock()
+        self.compiler.transcript_writer.generate.side_effect = ValueError('invalid translation')
+        job = self.job()
+        for attempt in range(3):
+            with self.assertRaises(DocumentRetryStopped if attempt == 2 else ValueError):
+                self.compiler.publish(job)
+        with self.assertRaises(DocumentRetryStopped):
+            self.compiler.publish(job)
+        self.assertEqual(f.writer.generate.call_count, 1)
+        self.assertEqual(self.compiler.transcript_writer.generate.call_count, 3)
+        self.assertEqual(f.api.creates, 0)
+        self.assertIsNone(f.store.get_job_result(job.key, 'episodes:content'))
+        with f.store._connect() as db:
+            self.assertEqual(tuple(db.execute('SELECT attempts,status FROM episode_document_attempts').fetchone()),
+                             (3, 'failed'))
+
+
+class BackoffRecoveryCaps(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+    job = SelectedDocuments.job
+
+    def test_real_parse_calls_remain_bounded_after_backoff_and_failed_revival(self):
+        from datetime import UTC, datetime, timedelta
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.operations import business_snapshot
+        from news_officer.shownotes import ShownotesWriter
+        f = self.fixture
+        client = Mock()
+        client.responses.parse.return_value = SimpleNamespace(output_parsed=None)
+        self.compiler.writer = ShownotesWriter(client, 'test-model')
+        job = self.job()
+        now = datetime.now(UTC)
+        for attempt in range(self.compiler.max_attempts):
+            before = client.responses.parse.call_count
+            self.assertTrue(self.compiler.publish(job)['deferred'])
+            self.assertEqual(client.responses.parse.call_count - before, 3)
+            f.store.fail(job.key, 'validation', job.attempts)
+            self.assertIsNone(f.store.claim_next('document'))
+            with f.store._connect() as db:
+                due = datetime.fromisoformat(db.execute(
+                    'SELECT available_at FROM jobs WHERE job_key=?', (job.key,)).fetchone()[0])
+            now = max(now, due) + timedelta(seconds=1)
+            with patch('news_officer.store._now', return_value=now.isoformat()):
+                job = f.store.claim_next('document')
+            self.assertIsNotNone(job)
+        self.assertEqual(client.responses.parse.call_count, self.compiler.max_attempts * 3)
+        f.store.fail(job.key, 'DocumentRetryStopped', job.attempts, max_attempts=1,
+                     failed_daily_requeue_seconds=0)
+        client.responses.parse.reset_mock()
+        # Revival preserves job attempts; the revision budget still blocks model calls.
+        self.assertTrue(f.store.enqueue(job.key, 'document', job.payload))
+        revived = f.store.claim_next('document')
+        restarted = SelectedEpisodeCompiler(f.store, f.api, self.compiler.writer,
+                                            today=lambda: '2026-09-21')
+        with self.assertRaises(DocumentRetryStopped):
+            restarted.publish(revived)
+        f.store.fail(revived.key, 'DocumentRetryStopped', revived.attempts, max_attempts=1)
+        client.responses.parse.assert_not_called()
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?',
+                                        (job.key,)).fetchone()[0], 'failed')
+        self.assertIn('episode_document_retry_stopped:1', business_snapshot(f.store.path)['warnings'])
+
+    def test_cross_day_failed_recovery_after_six_day_window_never_calls_model(self):
+        from unittest.mock import Mock
+
+        from news_officer.daily_enrichment import (
+            document_recovery_jobs,
+            enqueue_enrichment,
+        )
+        from news_officer.operations import business_snapshot
+        from news_officer.shownotes import ShownotesWriter
+        f = self.fixture
+        f.store.save_job_result(f.base, 'bundle', 'daily_bundle', {
+            'group_key': 'daily:bundle:test',
+            'enrichment': {'version': 1, 'day': '2026-09-21', 'eligible': ['one']},
+            'deliveries': [{'target_type': 'chat_id', 'target_id': 'oc_test'}]})
+        from dataclasses import replace
+
+        from test_reliability import attachment_for
+
+        from news_officer.models import DailyItem
+        item = DailyItem.from_persisted_dict(f.store.get_job_result(f.base, 'one'))
+        item = replace(item, attachment=attachment_for(f.record, item.message))
+        with f.store._connect() as db:
+            db.execute('UPDATE job_results SET payload_json=? WHERE job_key=? AND result_key=?',
+                       (json.dumps(item.to_persisted_dict()), f.base, 'one'))
+        self.assertEqual(enqueue_enrichment(f.store, '2026-09-21', compiler=self.compiler), 1)
+        job = f.store.claim_next('document')
+        f.store.fail(job.key, 'outage', 5, failed_daily_requeue_seconds=0)
+        client = Mock()
+        self.compiler.writer = ShownotesWriter(client, 'test-model')
+        self.compiler.today = lambda: '2026-10-01'
+        # Terminal failed jobs never enter the hourly revival scan.
+        self.assertEqual(document_recovery_jobs(f.store, '2026-10-01', 3), [])
+        self.compiler.retry_available = Mock(wraps=self.compiler.retry_available)
+        # Even callers without a compiler must reject documents past their day.
+        self.assertEqual(enqueue_enrichment(f.store, '2026-10-01'), 0)
+        self.assertIsNone(f.store.claim_next('document'))
+        self.assertEqual(enqueue_enrichment(f.store, '2026-10-01', compiler=self.compiler), 0)
+        client.responses.parse.assert_not_called()
+        self.compiler.retry_available.assert_not_called()
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?',
+                                        (job.key,)).fetchone()[0], 'failed')
+        self.assertTrue(any('document link missing:episode=' in warning
+                            and 'day=2026-09-21' in warning
+                            for warning in business_snapshot(f.store.path)['warnings']))

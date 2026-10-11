@@ -1044,7 +1044,7 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
             record.content_sha256,
             record.record_revision_sha256,
         )
-        self.store.add_subscription("open_id", "ou")
+        self.store.add_subscription("open_id", "ou_test")
         self.store.enqueue("daily:runtime", "daily", {})
         job = self.store.claim_next("daily")
         messenger = RuntimeMessenger()
@@ -1071,7 +1071,7 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
         items = self.store.outbox_items(job.key)
         self.assertEqual([item.msg_type for item in items], ["post", "file"])
         self.assertEqual([item.part for item in items], [1, 2])
-        self.assertEqual({item.delivery_key for item in items}, {"daily:runtime:open_id:ou"})
+        self.assertEqual({item.delivery_key for item in items}, {"daily:runtime:open_id:ou_test"})
 
         await instance._drain_outbox(job)
         self.assertEqual(
@@ -1462,7 +1462,7 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
             "https://example.test/missing",
             "Show",
         )
-        self.store.add_subscription("open_id", "ou")
+        self.store.add_subscription("open_id", "ou_test")
         self.store.enqueue("daily:missing-archive", "daily", {})
         job = self.store.claim_next("daily")
         messenger = RuntimeMessenger()
@@ -1480,7 +1480,7 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
         digest = "推荐理由：用于验证摘要独立发送。\n1. 要点。\n推荐星级：★★★★☆（4/5，编辑推荐）"
         self.store.save_transcript_digest(record.episode.id, digest,
                                           record.content_sha256, record.record_revision_sha256)
-        self.store.add_subscription("open_id", "ou")
+        self.store.add_subscription("open_id", "ou_test")
         self.store.enqueue("daily:text-only", "daily", {})
         job = self.store.claim_next("daily")
         messenger = RuntimeMessenger()
@@ -1499,7 +1499,7 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
         digest = "SUMMARY"
         self.store.save_transcript_digest(record.episode.id, digest,
                                           record.content_sha256, record.record_revision_sha256)
-        self.store.add_subscription("open_id", "ou")
+        self.store.add_subscription("open_id", "ou_test")
         self.store.enqueue("daily:file-opt-in", "daily", {})
         job = self.store.claim_next("daily")
         messenger = RuntimeMessenger()
@@ -1521,7 +1521,7 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
             record.content_sha256,
             record.record_revision_sha256,
         )
-        self.store.add_subscription("open_id", "ou")
+        self.store.add_subscription("open_id", "ou_test")
         self.store.enqueue("daily:legacy-item", "daily", {})
         job = self.store.claim_next("daily")
         self.store.save_job_result(
@@ -1559,7 +1559,7 @@ class TranscriptRuntimeTests(TranscriptFixture, unittest.IsolatedAsyncioTestCase
             original.content_sha256,
             original.record_revision_sha256,
         )
-        self.store.add_subscription("open_id", "ou")
+        self.store.add_subscription("open_id", "ou_test")
         self.store.enqueue("daily:revision-change", "daily", {})
         job = self.store.claim_next("daily")
         messenger = RuntimeMessenger()

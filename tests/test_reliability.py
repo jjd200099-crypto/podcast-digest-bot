@@ -82,6 +82,7 @@ class FakeMessenger:
         if item.group_key in self.fail_groups_once:
             self.fail_groups_once.remove(item.group_key)
             raise ConnectionError("response lost after delivery")
+        return 'om_' + item.uuid
 
 
 class SequencePodcast:

@@ -265,7 +265,7 @@ def _latest_videos_from_feed(channel: str, playlist_end: int) -> list[Episode]:
             entry.findtext("atom:published", default="", namespaces=namespace) or ""
         ).strip()
         try:
-            published_at = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            published_at = datetime.fromisoformat(published)
         except ValueError:
             published_at = None
         if published_at is not None and published_at.tzinfo is None:

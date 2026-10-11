@@ -14,6 +14,14 @@ def _csv(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
+def _positive_int(value: str, default: int) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _clock(value: str) -> time:
     try:
         hour, minute = (int(part) for part in value.split(":"))
@@ -40,6 +48,9 @@ class Settings:
     max_daily_candidates: int
     lookback_hours: int
     manual_digest_id: str
+    daily_chat_ids: tuple[str, ...] = ()
+    daily_release_notes: bool = False
+    daily_require_chat_ids: bool = False
     research_agent_enabled: bool = False
     library_folder_token: str = ""
     research_user_open_ids: tuple[str, ...] = ()
@@ -68,6 +79,8 @@ class Settings:
     daily_document_start_date: str = ''
     daily_document_folder: str = ''
     daily_document_min_stars: int = 4
+    daily_health_budget_seconds: int = 2700
+    daily_document_max_attempts: int = 3
     daily_document_fulltext: bool = False
 
     @classmethod
@@ -172,6 +185,9 @@ class Settings:
             feeds_path=feeds_path,
             timezone=timezone,
             daily_time=_clock(os.environ.get("NEWS_OFFICER_DAILY_TIME", "08:30")),
+            daily_chat_ids=_csv(os.environ.get("NEWS_OFFICER_DAILY_CHAT_IDS", "")),
+            daily_release_notes=os.environ.get("NEWS_OFFICER_DAILY_RELEASE_NOTES", "false").lower() == "true",
+            daily_require_chat_ids=os.environ.get("NEWS_OFFICER_DAILY_REQUIRE_CHAT_IDS", "false").strip().lower() == "true",
             user_open_ids=user_ids,
             group_chat_ids=_csv(os.environ.get("FEISHU_GROUP_CHAT_IDS", "")),
             max_daily_summaries=max(
@@ -207,6 +223,10 @@ class Settings:
             daily_document_enabled=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT', 'false').lower() == 'true',
             daily_document_start_date=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_START_DATE', ''),
             daily_document_folder=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FOLDER', ''),
+            daily_health_budget_seconds=_positive_int(
+                os.environ.get('NEWS_OFFICER_DAILY_HEALTH_BUDGET_SECONDS', '2700'), 2700),
+            daily_document_max_attempts=_positive_int(
+                os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MAX_ATTEMPTS', '3'), 3),
             daily_document_min_stars=int(os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_MIN_STARS', '4')),
             daily_document_fulltext=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT', 'false').lower() == 'true',
         )
