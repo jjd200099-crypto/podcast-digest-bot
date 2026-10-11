@@ -239,3 +239,11 @@ class DocumentAllowlist(unittest.TestCase):
         self.audience(('oc_new',))
         self.assertNotIn(('chat_id', 'oc_new'), self.fixture.store.list_subscriptions())
         self.assertEqual(self.compiler._audience([['chat_id', 'oc_new']]), [('chat_id', 'oc_new')])
+
+    def test_failed_inline_retry_is_revived_even_in_requested_only_mode(self):
+        payload = {'mode': 'inline_daily_retry', 'base_job': self.fixture.base,
+                   'scheduled_for': '2026-09-21T08:30:00+08:00'}
+        self.fixture.store.enqueue('inline-retry', 'document', payload)
+        self.fixture.store.fail('inline-retry', 'ValueError', 5, failed_daily_requeue_seconds=0)
+        self.assertEqual(self.compiler.enqueue_ready('2026-09-21', requested_only=True), 1)
+        self.assertEqual(self.fixture.store.claim_next('document').key, 'inline-retry')

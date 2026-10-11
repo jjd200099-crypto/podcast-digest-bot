@@ -29,6 +29,7 @@ from .feishu import (
     file_delivery_part,
 )
 from .health import health_snapshot, serve_health, watch_health
+from .library import LibraryError
 from .models import DailyItem, IncomingMessage, Job, TranscriptAttachment
 from .podcast import PodcastService
 from .qa import render_transcript_attachment
@@ -688,16 +689,23 @@ class NewsOfficerRuntime:
             return saved['documents']
         compiler = getattr(self, 'document_compiler', None)
         documents = []
-        if compiler is not None:
-            revision, selected, _ = compiler.snapshot(job.key)
-            if selected:
-                result = compiler.publish(Job(job.key, 'daily', {
-                    'mode': 'selected_episodes', 'day': when.date().isoformat(),
-                    'base_job': job.key, 'revision': revision,
-                    'targets': self._daily_targets(job)}, job.attempts))
-                if result is None:
-                    raise RuntimeError('Daily document snapshot changed; retry required')
-                documents = result['documents']
+        try:
+            if compiler is not None:
+                revision, selected, _ = compiler.snapshot(job.key)
+                if selected:
+                    result = compiler.publish(Job(job.key, 'daily', {
+                        'mode': 'selected_episodes', 'day': when.date().isoformat(),
+                        'base_job': job.key, 'revision': revision,
+                        'targets': self._daily_targets(job)}, job.attempts))
+                    if result is None:
+                        raise RuntimeError('Daily document snapshot changed; retry required')
+                    documents = result['documents']
+        except (ValueError, LibraryError):
+            logger.warning('Daily document compilation deferred', exc_info=True)
+            self.store.enqueue(f'{job.key}:inline-document-retry', 'document', {
+                'mode': 'inline_daily_retry', 'base_job': job.key,
+                'scheduled_for': when.isoformat()})
+            return []
         saved = self.store.save_job_result(job.key, 'daily:inline-documents',
                                            'inline_documents', {'documents': documents})
         return saved['documents']
@@ -1090,6 +1098,13 @@ class NewsOfficerRuntime:
             await asyncio.sleep(30)
 
     async def _handle_document_job(self, job):
+        if job.payload.get('mode') == 'inline_daily_retry':
+            base = Job(job.payload['base_job'], 'daily', {}, job.attempts)
+            await asyncio.to_thread(self._inline_daily_documents, base,
+                                    datetime.fromisoformat(job.payload['scheduled_for']))
+            if self.store.get_job_result(base.key, 'daily:inline-documents') is None:
+                raise RuntimeError('Daily documents pending retry')
+            return
         if (getattr(self.settings, 'daily_reader_mode', False)
                 and job.payload.get('mode') != 'requested_episode'):
             return  # Retire old automatic notification jobs without deleting data.

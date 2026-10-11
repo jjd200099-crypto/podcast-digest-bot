@@ -64,7 +64,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         with self.store._connect() as db:
             requested = db.execute(
                 "SELECT job_key,payload_json FROM jobs WHERE kind='document' AND status='failed' "
-                "AND json_extract(payload_json,'$.mode')='requested_episode'").fetchall()
+                "AND json_extract(payload_json,'$.mode') IN ('requested_episode','inline_daily_retry')").fetchall()
             pending = db.execute(
                 "SELECT job_key,payload_json FROM jobs WHERE kind='document' AND status!='completed' "
                 "AND json_extract(payload_json,'$.mode')='selected_episodes' "
@@ -73,7 +73,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                               "AND status='completed' AND EXISTS (SELECT 1 FROM outbox o "
                               "WHERE o.job_key=jobs.job_key AND o.status='sent') ORDER BY job_key").fetchall()
         retried = sum(int(self.store.enqueue(r[0], 'document', json.loads(r[1]))) for r in requested
-                      if self.request_allowed(json.loads(r[1])))
+                      if json.loads(r[1]).get('mode') == 'inline_daily_retry'
+                      or self.request_allowed(json.loads(r[1])))
         if requested_only:
             return retried
         if pending:

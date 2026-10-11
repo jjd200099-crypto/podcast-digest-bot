@@ -268,3 +268,54 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         await instance._drain_outbox(job)
         self.assertEqual([(i.target_type, i.target_id) for i in self.messenger.attempts],
                          [('chat_id', 'oc_good')])
+
+    async def test_inline_value_error_delivers_body_and_retries_without_freezing_empty(self):
+        instance, job, podcast = self.setup_job([self.item('selected', 5)])
+        compiler = Mock()
+        compiler.snapshot.return_value = ('revision', ['selected'], [])
+        compiler.publish.side_effect = [ValueError('Shownotes validation failed'),
+            {'documents': [{'title': 'Selected', 'url': 'https://example.test/doc'}]}]
+        instance.document_compiler = compiler
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            await instance._handle_daily_job(job)
+        warnings = [r for r in logs.records if 'compilation deferred' in r.getMessage()]
+        self.assertTrue(warnings[0].exc_info)
+        self.assertIn('Traceback', '\n'.join(logs.output))
+        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
+        self.assertEqual(len(self.messenger.attempts), 1)
+        self.assertNotIn('https://example.test/doc', self.messenger.attempts[0].content)
+        retry = self.store.claim_next('document')
+        self.assertEqual(retry.payload['mode'], 'inline_daily_retry')
+        await instance._handle_document_job(retry)
+        self.assertEqual(self.store.get_job_result(job.key, 'daily:inline-documents')['documents'],
+                         [{'title': 'Selected', 'url': 'https://example.test/doc'}])
+        self.assertEqual(podcast.calls, 1)
+        self.assertEqual(len(self.messenger.attempts), 1)
+
+    async def test_inline_snapshot_changed_still_raises(self):
+        instance, job, _ = self.setup_job([self.item('selected', 5)])
+        compiler = Mock()
+        compiler.snapshot.return_value = ('revision', ['selected'], [])
+        compiler.publish.return_value = None
+        instance.document_compiler = compiler
+        with self.assertRaisesRegex(RuntimeError, 'snapshot changed'):
+            instance._inline_daily_documents(job, datetime.now(UTC))
+        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
+
+    async def test_inline_library_error_returns_empty_then_normal_result_is_cached(self):
+        from news_officer.library import LibraryError
+
+        instance, job, _ = self.setup_job([self.item('selected', 5)])
+        compiler = Mock()
+        compiler.snapshot.side_effect = [LibraryError('retry'), ('revision', ['selected'], [])]
+        documents = [{'title': 'Selected', 'url': 'https://example.test/doc'}]
+        compiler.publish.return_value = {'documents': documents}
+        instance.document_compiler = compiler
+        when = datetime.now(UTC)
+        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
+            self.assertEqual(instance._inline_daily_documents(job, when), [])
+        self.assertTrue(logs.records[0].exc_info)
+        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
+        self.assertEqual(instance._inline_daily_documents(job, when), documents)
+        self.assertEqual(instance._inline_daily_documents(job, when), documents)
+        compiler.publish.assert_called_once()
