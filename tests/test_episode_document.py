@@ -560,3 +560,95 @@ class CompleteDocumentBudget(unittest.TestCase):
         with f.store._connect() as db:
             self.assertEqual(tuple(db.execute('SELECT attempts,status FROM episode_document_attempts').fetchone()),
                              (3, 'failed'))
+
+
+class BackoffRecoveryCaps(unittest.TestCase):
+    setUp = SelectedDocuments.setUp
+    rate = SelectedDocuments.rate
+    job = SelectedDocuments.job
+
+    def test_real_parse_calls_remain_bounded_after_backoff_and_failed_revival(self):
+        from datetime import UTC, datetime, timedelta
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.operations import business_snapshot
+        from news_officer.shownotes import ShownotesWriter
+        f = self.fixture
+        client = Mock()
+        client.responses.parse.return_value = SimpleNamespace(output_parsed=None)
+        self.compiler.writer = ShownotesWriter(client, 'test-model')
+        job = self.job()
+        now = datetime.now(UTC)
+        for attempt in range(self.compiler.max_attempts):
+            before = client.responses.parse.call_count
+            self.assertTrue(self.compiler.publish(job)['deferred'])
+            self.assertEqual(client.responses.parse.call_count - before, 3)
+            f.store.fail(job.key, 'validation', job.attempts)
+            self.assertIsNone(f.store.claim_next('document'))
+            with f.store._connect() as db:
+                due = datetime.fromisoformat(db.execute(
+                    'SELECT available_at FROM jobs WHERE job_key=?', (job.key,)).fetchone()[0])
+            now = max(now, due) + timedelta(seconds=1)
+            with patch('news_officer.store._now', return_value=now.isoformat()):
+                job = f.store.claim_next('document')
+            self.assertIsNotNone(job)
+        self.assertEqual(client.responses.parse.call_count, self.compiler.max_attempts * 3)
+        f.store.fail(job.key, 'DocumentRetryStopped', job.attempts, max_attempts=1,
+                     failed_daily_requeue_seconds=0)
+        client.responses.parse.reset_mock()
+        # #47 can revive a failed job after its cooldown, resetting only job attempts.
+        self.assertTrue(f.store.enqueue(job.key, 'document', job.payload))
+        revived = f.store.claim_next('document')
+        restarted = SelectedEpisodeCompiler(f.store, f.api, self.compiler.writer,
+                                            today=lambda: '2026-09-21')
+        with self.assertRaises(DocumentRetryStopped):
+            restarted.publish(revived)
+        f.store.fail(revived.key, 'DocumentRetryStopped', revived.attempts, max_attempts=1)
+        client.responses.parse.assert_not_called()
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?',
+                                        (job.key,)).fetchone()[0], 'failed')
+        self.assertIn('episode_document_retry_stopped:1', business_snapshot(f.store.path)['warnings'])
+
+    def test_cross_day_failed_recovery_after_six_day_window_never_calls_model(self):
+        from unittest.mock import Mock
+
+        from news_officer.daily_enrichment import enqueue_enrichment
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.operations import business_snapshot
+        from news_officer.shownotes import ShownotesWriter
+        f = self.fixture
+        f.store.save_job_result(f.base, 'bundle', 'daily_bundle', {
+            'group_key': 'daily:bundle:test',
+            'enrichment': {'version': 1, 'day': '2026-09-21', 'eligible': ['one']},
+            'deliveries': [{'target_type': 'chat_id', 'target_id': 'oc_test'}]})
+        from dataclasses import replace
+
+        from test_reliability import attachment_for
+
+        from news_officer.models import DailyItem
+        item = DailyItem.from_persisted_dict(f.store.get_job_result(f.base, 'one'))
+        item = replace(item, attachment=attachment_for(f.record, item.message))
+        with f.store._connect() as db:
+            db.execute('UPDATE job_results SET payload_json=? WHERE job_key=? AND result_key=?',
+                       (json.dumps(item.to_persisted_dict()), f.base, 'one'))
+        self.assertEqual(enqueue_enrichment(f.store, '2026-09-21', compiler=self.compiler), 1)
+        job = f.store.claim_next('document')
+        f.store.fail(job.key, 'outage', 5, failed_daily_requeue_seconds=0)
+        client = Mock()
+        self.compiler.writer = ShownotesWriter(client, 'test-model')
+        self.compiler.today = lambda: '2026-10-01'
+        # Exercise #47's recovery without the scheduler guard, then the guarded path.
+        self.assertEqual(enqueue_enrichment(f.store, '2026-10-01'), 1)
+        revived = f.store.claim_next('document')
+        with self.assertRaises(DocumentRetryStopped):
+            self.compiler.publish(revived)
+        f.store.fail(revived.key, 'DocumentRetryStopped', revived.attempts, max_attempts=1)
+        self.assertEqual(enqueue_enrichment(f.store, '2026-10-01', compiler=self.compiler), 0)
+        client.responses.parse.assert_not_called()
+        with f.store._connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?',
+                                        (job.key,)).fetchone()[0], 'failed')
+        self.assertIn('episode_document_retry_stopped:1', business_snapshot(f.store.path)['warnings'])

@@ -374,6 +374,10 @@ class NewsOfficerRuntime:
                 remote_message_id = await asyncio.to_thread(
                     self.messenger.deliver, item
                 )
+                if (job.kind == 'document'
+                        and job.payload.get('mode') == 'daily_document_followup'
+                        and not str(remote_message_id or '').strip()):
+                    raise RuntimeError('Followup delivery unconfirmed: missing message receipt')
             except Exception as error:  # noqa: BLE001 - isolate failures per recipient
                 await asyncio.to_thread(
                     self.store.mark_outbox_error, item.id, str(error)
