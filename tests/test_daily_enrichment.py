@@ -114,6 +114,40 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.messenger.attempts), 1)
         self.assertEqual(self.api.puts, [])
 
+    async def test_legacy_document_modes_cancel_unsent_outbox_without_sending(self):
+        instance, _, _ = self.setup_job([])
+        instance.messenger = Mock()
+        instance.document_compiler = Mock()
+        for mode in ('daily_document_followup', 'inline_daily_retry', 'unknown_legacy'):
+            with self.subTest(mode=mode):
+                key = 'legacy:' + mode
+                self.store.enqueue(key, 'document', {'mode': mode})
+                self.store.ensure_outbox(
+                    job_key=key, group_key='legacy', delivery_key=key,
+                    operation='send', target_id='test-target', target_type='chat_id',
+                    reply_in_thread=False,
+                    parts=[('text', 'pending', key + ':pending'),
+                           ('text', 'sent', key + ':sent')])
+                pending, sent = self.store.outbox_items(key)
+                self.store.mark_outbox_sent(sent.id, 'test-receipt')
+                job = self.store.claim_next('document')
+                self.assertEqual(job.key, key)
+
+                await instance._handle_document_job(job)
+
+                with self.store._connect() as db:
+                    rows = db.execute(
+                        'SELECT id,status FROM outbox WHERE job_key=?', (key,)).fetchall()
+                    self.assertEqual({row['id']: row['status'] for row in rows},
+                                     {pending.id: 'cancelled', sent.id: 'sent'})
+                self.store.complete(job.key)
+                with self.store._connect() as db:
+                    self.assertEqual(db.execute(
+                        'SELECT status FROM jobs WHERE job_key=?', (key,)
+                    ).fetchone()[0], 'completed')
+        instance.messenger.deliver.assert_not_called()
+        instance.document_compiler.publish.assert_not_called()
+
     async def test_bad_target_isolated_without_document_retry(self):
         from news_officer.operations import business_snapshot
         self.store.add_subscription('chat_id', 'oc_bad')

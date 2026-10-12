@@ -841,6 +841,18 @@ class Store:
                 (now, now, remote_message_id, remote_message_id, item_id),
             )
 
+    def cancel_unsent_outbox(self, job_key: str) -> None:
+        """Retire unsent deliveries while preserving confirmed sent rows."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE outbox
+                SET status = 'cancelled', updated_at = ?, last_error = NULL
+                WHERE job_key = ? AND status NOT IN ('sent', 'cancelled')
+                """,
+                (_now(), job_key),
+            )
+
     def mark_outbox_error(self, item_id: int, error: str) -> None:
         with self._connect() as connection:
             connection.execute(
