@@ -39,7 +39,7 @@ def document_recovery_jobs(store, today, max_attempts):
             "AND last_error!='DocumentRetryStopped'))", (max_attempts, today)).fetchall()
 
 
-def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
+def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None, followup_enabled=False):
     """Resume each episode separately, only after the original send succeeded."""
     max_attempts = compiler.max_attempts if compiler else 3
     recovery = {row['job_key'] for row in document_recovery_jobs(store, today, max_attempts)}
@@ -92,7 +92,7 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
                 continue
             count += store.enqueue(key, 'document', payload,
                 document_max_attempts=max_attempts)
-        count += enqueue_followup(store, base, today, audience_filter=audience_filter)
+        count += enqueue_followup(store, base, today, audience_filter=audience_filter, enabled=followup_enabled)
     return count
 
 
@@ -230,8 +230,10 @@ def _audience(store, targets, audience_filter):
     return [tuple(t) for t in targets if tuple(t) in active]
 
 
-def enqueue_followup(store, base, today, *, audience_filter=None):
+def enqueue_followup(store, base, today, *, audience_filter=None, enabled=False):
     """One links-only receipt after all same-day episode jobs finish or fail."""
+    if not enabled:
+        return 0
     bundle = enrichment_bundle(store, base)
     if not bundle or bundle['enrichment']['day'] != today:
         return 0

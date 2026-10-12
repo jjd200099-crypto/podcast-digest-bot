@@ -1,7 +1,7 @@
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import test_episode_document as fixtures
 from test_reliability import FakeMessenger, runtime
@@ -18,7 +18,7 @@ class FollowupRecovery(unittest.IsolatedAsyncioTestCase):
         self.store = self.f.store
         self.messenger = FakeMessenger()
         self.settings = SimpleNamespace(daily_chat_ids=('oc_test', 'oc_other'),
-                                        daily_require_chat_ids=True)
+                                        daily_require_chat_ids=True, daily_document_followup=True)
         self.owner = self.restart()
         self.store.save_job_result(self.f.base, 'bundle', 'daily_bundle', {
             'group_key': 'daily:bundle:test',
@@ -40,7 +40,8 @@ class FollowupRecovery(unittest.IsolatedAsyncioTestCase):
 
     def enqueue(self):
         return enqueue_followup(self.store, self.f.base, '2026-09-21',
-                                audience_filter=self.owner._document_audience)
+                                audience_filter=self.owner._document_audience,
+                                enabled=self.settings.daily_document_followup)
 
     def receipts(self):
         with self.store._connect() as db:
@@ -52,6 +53,27 @@ class FollowupRecovery(unittest.IsolatedAsyncioTestCase):
             due = db.execute('SELECT available_at FROM jobs WHERE job_key=?',
                              (self.job.key,)).fetchone()[0]
         return max(datetime.now(UTC), datetime.fromisoformat(due)) + timedelta(seconds=1)
+
+    async def test_disabled_existing_job_completes_without_outbox_or_send(self):
+        self.settings.daily_document_followup = False
+        with patch.object(self.owner, '_drain_outbox', new_callable=AsyncMock) as drain:
+            await self.owner._handle_document_job(self.job)
+            drain.assert_not_awaited()
+        self.store.complete(self.job.key)
+        self.assertEqual(self.store.outbox_items(self.job.key), [])
+        self.assertEqual(self.messenger.attempts, [])
+        self.assertEqual(self.enqueue(), 0)
+
+    async def test_disabled_retry_cancels_pending_outbox_preserving_history(self):
+        with patch.object(self.owner, '_drain_outbox', new_callable=AsyncMock):
+            await self.owner._handle_document_job(self.job)
+        before = [r.uuid for r in self.store.outbox_items(self.job.key)]
+        self.settings.daily_document_followup = False
+        await self.restart()._handle_document_job(self.job)
+        self.store.complete(self.job.key)
+        self.assertEqual([r.uuid for r in self.store.outbox_items(self.job.key)], before)
+        self.assertTrue(all(r['status'] == 'cancelled' for r in self.receipts()))
+        self.assertEqual(self.messenger.attempts, [])
 
     async def test_lost_receipt_backoff_restart_and_failed_revival_keep_one_message_per_group(self):
         self.messenger.fail_groups_once.add('document:link')

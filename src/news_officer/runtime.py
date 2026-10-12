@@ -1233,7 +1233,8 @@ class NewsOfficerRuntime:
                             and getattr(self.settings, 'daily_reader_mode', False)):
                         from .daily_enrichment import enqueue_enrichment
                         if await asyncio.to_thread(enqueue_enrichment, self.store, local_now.date().isoformat(),
-                                audience_filter=self._document_audience, compiler=self.document_compiler):
+                                audience_filter=self._document_audience, compiler=self.document_compiler,
+                                followup_enabled=getattr(self.settings, 'daily_document_followup', False)):
                             self._wake_worker('document')
                 except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
                     self._log_scheduler_failure(error, site='daily_enrichment')
@@ -1243,6 +1244,9 @@ class NewsOfficerRuntime:
 
     async def _handle_document_job(self, job):
         if job.payload.get('mode') == 'daily_document_followup':
+            if not getattr(self.settings, 'daily_document_followup', False):
+                await asyncio.to_thread(self.store.retire_document_followup, job.key)
+                return
             for delivery in job.payload['deliveries']:
                 kind, target = delivery['target']
                 if not self._document_audience([(kind, target)]):
@@ -1290,7 +1294,8 @@ class NewsOfficerRuntime:
                 raise
             if await asyncio.to_thread(enqueue_followup, self.store, job.payload['base_job'],
                     datetime.now(getattr(self.settings, 'timezone', ZoneInfo('Asia/Shanghai'))).date().isoformat(),
-                    audience_filter=self._document_audience):
+                    audience_filter=self._document_audience,
+                    enabled=getattr(self.settings, 'daily_document_followup', False)):
                 self._wake_worker('document')
             return
         if (getattr(self.settings, 'daily_reader_mode', False)
