@@ -454,6 +454,36 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.analysis_complete(job.key))
         self.assertEqual(self.store.outbox_items(job.key), [])
 
+    def test_cancel_unsent_outbox_preserves_sent_and_other_jobs(self):
+        for key in ('document:legacy', 'document:other'):
+            self.store.enqueue(key, 'document', {'mode': 'daily_document_followup'})
+            self.store.ensure_outbox(
+                job_key=key, group_key='legacy', delivery_key=key,
+                operation='send', target_id='test-target', target_type='chat_id',
+                reply_in_thread=False,
+                parts=[('text', 'pending', key + ':pending'),
+                       ('text', 'sent', key + ':sent'),
+                       ('text', 'cancelled', key + ':cancelled')])
+        pending, sent, cancelled = self.store.outbox_items('document:legacy')
+        self.store.mark_outbox_error(pending.id, 'definite: failed')
+        self.store.mark_outbox_sent(sent.id, 'test-receipt')
+        with self.store._connect() as db:
+            db.execute("UPDATE outbox SET status='cancelled' WHERE id=?", (cancelled.id,))
+            before = {row['id']: dict(row) for row in db.execute('SELECT * FROM outbox')}
+        with self.assertRaises(RuntimeError):
+            self.store.complete('document:legacy')
+
+        self.store.cancel_unsent_outbox('document:legacy')
+        self.store.cancel_unsent_outbox('document:legacy')  # Idempotent retirement.
+
+        with self.store._connect() as db:
+            after = {row['id']: dict(row) for row in db.execute('SELECT * FROM outbox')}
+        self.assertEqual(after[pending.id]['status'], 'cancelled')
+        self.assertIsNone(after[pending.id]['last_error'])
+        for item_id in before.keys() - {pending.id}:
+            self.assertEqual(after[item_id], before[item_id])
+        self.store.complete('document:legacy')
+
     def test_outbox_is_immutable_and_persists_every_part(self):
         self.store.enqueue("message:1", "message", {"text": "x"})
         parts = delivery_parts("# Title\n\nRead [source](https://example.com)", "fixed")

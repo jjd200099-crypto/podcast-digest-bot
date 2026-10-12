@@ -1215,6 +1215,7 @@ class NewsOfficerRuntime:
             return
         if (getattr(self.settings, 'daily_reader_mode', False)
                 and job.payload.get('mode') != 'requested_episode'):
+            await asyncio.to_thread(self.store.cancel_unsent_outbox, job.key)
             return  # Retire old automatic notification jobs without deleting data.
         result = await asyncio.to_thread(self.document_compiler.publish, job)
         if result and result['notify']:
