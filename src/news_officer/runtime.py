@@ -691,8 +691,12 @@ class NewsOfficerRuntime:
             from .episode_document import stars
             sections, eligible = [], []
             for item in summaries:
-                content = reader_episode(item.message)
-                template = reader_episode(item.message, DOCUMENT_PLACEHOLDER,
+                compact = getattr(settings, 'daily_compact_paragraphs', False)
+                rewriter = getattr(self.podcast_service, 'summarizer', None) if compact else None
+                if not callable(getattr(rewriter, 'rewrite_paragraphs', None)):
+                    rewriter = None
+                content = reader_episode(item.message, rewriter=rewriter, compact=compact)
+                template = reader_episode(content, DOCUMENT_PLACEHOLDER,
                     fulltext=getattr(settings, 'daily_document_fulltext', False))
                 published = item.episode.published_at
                 if published and published < start:

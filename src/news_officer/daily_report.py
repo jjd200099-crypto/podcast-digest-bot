@@ -1,5 +1,8 @@
 """Explain an incomplete digest without pretending there were no releases."""
 
+import json
+import math
+import os
 import re
 from collections import Counter
 
@@ -7,9 +10,179 @@ from .models import DailyItem
 from .summarizer import remove_editorial_leadins
 
 
-def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = True) -> str:
+def source_numbers(text):
+    """Extract numeric expressions without an episode-specific vocabulary."""
+    compact = re.sub(r'\s+', '', text)
+    numerals = r'[零〇一二三四五六七八九十百千万亿两]+'
+    values = set(re.findall(r'\d+(?:[.,]\d+)*|' + numerals +
+                            r'(?=[个年月周日天人项倍亿万岁秒分])', compact))
+    for start, end in re.findall('(' + numerals + r')[到至](' + numerals + ')', compact):
+        values.update((start, end))
+    return values
+
+
+def missing_source_numbers(source, notes):
+    """Keep digit boundaries; Chinese quantities can share a written numeral."""
+    missing = source_numbers(source) - source_numbers(notes)
+    compact = re.sub(r'\s+', '', notes)
+    return {value for value in missing if value.isascii() or value not in compact}
+
+
+def summary_paragraph_spans(markdown):
+    """Locate prose only, retaining every surrounding byte of the layout."""
+    return [match for match in re.finditer(r'(?m)^[^\n]+$', markdown)
+            if match.group().strip() and not match.group().strip().startswith(
+                ('#', '**', '节目：', '时长：', '链接：', '推荐理由：', '阅读建议：', '['))]
+
+
+def required_prose_names(source):
+    """Protect attribution and numbered names, allowing secondary examples to go."""
+    names = re.findall(r'[A-Z][A-Za-z0-9]*(?:[ -][A-Za-z0-9]+)*', source)
+    required = {name for name in names if re.search(r'\d', name)}
+    if names and source.startswith(names[0]):
+        required.add(names[0])
+    required.update(re.findall(r'([A-Z][A-Za-z]*(?: [A-Z][A-Za-z]*)?)\s*(?:认为|称|说|表示|主张|提醒|建议)', source))
+    return sorted(required)
+
+
+def claim_owner_counts(source):
+    """Keep distinct attributed claims from silently changing their owner."""
+    return Counter(re.findall(r'([A-Z][A-Za-z]*(?: [A-Z][A-Za-z]*)?)\s*(?:也|更)?(?:认为|称|说|表示|主张|提醒|建议|强调)', source))
+
+
+def compact_ratio():
+    """Ratio is configurable only for the opt-in compact edition."""
+    ratio = float(os.environ.get('NEWS_OFFICER_DAILY_COMPACT_TARGET_RATIO', '0.4'))
+    if not 0 < ratio < 1:
+        raise ValueError('Compact target ratio must be between zero and one')
+    return ratio
+
+
+def validate_conditionals(source, short):
+    """Protect conditional scope against telegraphic clipping."""
+    for connector in ('若', '如果', '否则', '只有', '除非'):
+        if connector in source and connector not in short:
+            raise ValueError('Retain conditional connector: ' + connector)
+    duration = r'(?:数|几|多|\d+|[一二三四五六七八九十两]+)(?:天|周|月|年)'
+    for match in re.finditer(duration + r'(?:或' + duration + r')?([\u4e00-\u9fff]{2,4})(?=若|如果)', short):
+        if not match.group(1).startswith('的'):
+            raise ValueError('Use 的 between a duration modifier and the activity noun in a conditional subject: ' + match.group())
+    source_clauses = re.findall(r'(?:若|如果)[^。！？；]+', source)
+    short_clauses = re.findall(r'(?:若|如果)[^。！？；]+', short)
+    if len(short_clauses) < len(source_clauses):
+        raise ValueError('Retain all conditional antecedents')
+    for index, clause in enumerate(short_clauses):
+        if not re.search(r'则|那么|才|就|，', clause):
+            raise ValueError('Conditional needs explicit result connector 则/才/就 or comma')
+        if (index < len(source_clauses) and re.search(r'能(?!力)', re.split(r'，|则|那么|就|才', source_clauses[index], maxsplit=1)[0])
+                and not re.search(r'能(?!力)', re.split(r'，|则|那么|就|才', clause, maxsplit=1)[0])):
+            raise ValueError('Retain conditional modal 能 and grammatical function words')
+
+
+def validate_unclipped_prose(source, short):
+    """Reject novel contractions made by deleting the middle of verb phrases."""
+    verbs = '降低|提高|减少|增加|推动|削弱|建立|完成|保持|解决|发展|进行'
+    for phrase in re.findall(r'(?:' + verbs + r')[\u4e00-\u9fff]{2}', source):
+        clipped = phrase[0] + phrase[-1]
+        if clipped in short and clipped not in source:
+            raise ValueError('Do not clip grammatical verb/object phrase: ' + phrase + '; keep function words and complete words')
+
+
+def compact_paragraphs(markdown, rewriter=None, audit=None):
+    """Compress prose with validation; fallback selects complete source sentences."""
+    spans = summary_paragraph_spans(markdown)
+    originals = [span.group() for span in spans]
+    if not originals:
+        return markdown
+    ratio = compact_ratio()
+    errors = []
+    paragraphs = None
+    for _ in range(6):
+        if rewriter is None:
+            break
+        candidate = None
+        try:
+            candidate = rewriter.rewrite_paragraphs(originals, errors)
+            if not isinstance(candidate, list) or len(candidate) != len(originals):
+                raise ValueError('Keep the original paragraph count')
+            candidate = [re.sub(r'(?<=[\u4e00-\u9fff，。；：]) +| +(?=[\u4e00-\u9fff，。；：])', '', p).strip()
+                         if isinstance(p, str) else p for p in candidate]
+            if not all(isinstance(p, str) for p in candidate):
+                raise ValueError('Paragraphs must be strings')
+            issues = []
+            source_length = sum(map(len, originals))
+            output_length = sum(map(len, candidate))
+            if not ratio * .85 <= output_length / source_length <= ratio * 1.15:
+                issues.append(f'Use natural prose at ratio {ratio}: source={source_length}, output={output_length}, allowed={math.ceil(source_length * ratio * .85)}–{math.floor(source_length * ratio * 1.15)}; cut at least {max(0, output_length - round(source_length * ratio))} characters to reach target, including EVERY English letter, punctuation and space')
+            for source, short in zip(originals, candidate, strict=True):
+                if (not isinstance(short, str) or not short.strip() or '\n' in short
+                        or re.match(r'\s*(?:[-•#*]|\d+[.、)])', short)):
+                    issues.append('Keep natural prose paragraphs without bullets or extra newlines')
+                    continue
+                for validate in (validate_conditionals, validate_unclipped_prose):
+                    try:
+                        validate(source, short)
+                    except ValueError as error:
+                        issues.append(str(error))
+                if missing_source_numbers(source, short):
+                    issues.append('Missing source numbers: ' + str(sorted(missing_source_numbers(source, short))))
+                if source_numbers(short) - source_numbers(source):
+                    issues.append('Do not introduce numbers')
+                source_owners, short_owners = claim_owner_counts(source), claim_owner_counts(short)
+                for owner, count in source_owners.items():
+                    if short_owners[owner] < count:
+                        issues.append(f'Retain distinct claim ownership: {owner} needs {count} explicit attributions; do not attach the later claim to another subject')
+                names = required_prose_names(source)
+                if any(name not in short for name in names):
+                    issues.append('Keep required English proper nouns in their original spelling')
+                for hedge in ('认为', '可能', '若', '称', '不认同', '仅'):
+                    required = bool(re.search(r'(?<!不)仅', source)) if hedge == '仅' else hedge in source
+                    present = bool(re.search(r'(?<!不)仅', short)) if hedge == '仅' else hedge in short
+                    if required and not present:
+                        issues.append('Retain attribution/hedging: ' + hedge)
+            if issues:
+                raise ValueError('\n'.join(issues))
+            paragraphs = candidate
+            break
+        except ValueError as error:
+            errors.append(str(error) + '\nPrevious candidate to revise: ' + json.dumps(candidate, ensure_ascii=False))
+        except Exception as error:  # noqa: BLE001 - Do not retry transport failures here.
+            errors.append(str(error))
+            break
+    fallback = paragraphs is None
+    if fallback:
+        paragraphs = []
+        for source in originals:
+            sentences = re.findall(r'[^。！？]+[。！？]?(?:[”’」』])?', source)
+            # Whole sentences preserve attribution and conditional scope. Protect all
+            # numeric, English-name and hedge sentences before filling the budget.
+            chosen = {0}
+            for index, sentence in enumerate(sentences):
+                if (source_numbers(sentence) or re.search(r'[A-Z]', sentence)
+                        or any(word in sentence for word in ('认为', '可能', '若', '如果', '否则', '只有', '除非', '则', '称', '不认同', '仅'))):
+                    chosen.add(index)
+            for index in range(len(sentences)):
+                if sum(len(sentences[i]) for i in chosen) >= len(source) * ratio:
+                    break
+                chosen.add(index)
+            paragraphs.append(''.join(sentence for index, sentence in enumerate(sentences) if index in chosen))
+    result = markdown
+    for span, short in reversed(list(zip(spans, paragraphs, strict=True))):
+        result = result[:span.start()] + short + result[span.end():]
+    if audit is not None:
+        audit.append({'model': getattr(rewriter, 'model', None), 'fallback': fallback,
+                      'target_ratio': ratio, 'validation_errors': errors, 'before_lengths': list(map(len, originals)),
+                      'after_lengths': list(map(len, paragraphs)), 'paragraphs': paragraphs,
+                      'missing_numbers': sorted(missing_source_numbers(' '.join(originals), ' '.join(paragraphs)))})
+    return result
+
+
+def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = True,
+                   rewriter=None, rewrite_audit=None, compact: bool = False) -> str:
     """Group one episode's reading and listening links below its prose."""
     content = render_daily_summary(markdown, reader_mode=True)
+    if compact:
+        content = compact_paragraphs(content, rewriter, rewrite_audit)
     lines, links = [], []
     for line in content.splitlines():
         clean = line.strip().removeprefix('**').removesuffix('**').strip()
@@ -17,6 +190,11 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
             value = clean.split('：', 1)[1].strip()
             links.append(f'[收听节目]({value})' if re.fullmatch(r'https?://\S+', value) else value)
             continue
+        if compact and clean.startswith('节目：'):
+            names = clean[3:].split('｜')
+            if len(names) == 2 and names[0].strip() == names[1].strip():
+                clean = '节目：' + names[0].strip()
+                line = clean
         if clean.startswith('节目：') or (not any(v.strip() for v in lines) and clean and not clean.startswith('#')):
             line = '**' + clean + '**'
         lines.append(line)
@@ -25,7 +203,36 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
         lines.extend(['', f'[{label}]({document_url})'])
     if links:
         lines.extend(['', *dict.fromkeys(links)])
-    return '\n'.join(lines).strip()
+    rendered = '\n'.join(lines).strip()
+    if compact:
+        metadata = []
+        body = []
+        for line in lines:
+            if line.strip().startswith(('推荐理由：', '阅读建议：')):
+                metadata.append(line.strip())
+            else:
+                body.append(line)
+        duration = next((i for i, line in enumerate(body) if line.strip().startswith('时长：')), None)
+        metadata.sort(key=lambda line: not line.startswith('推荐理由：'))
+        if duration is not None:
+            body[duration + 1:duration + 1] = metadata
+        else:
+            body = metadata + body
+        rendered = '\n'.join(body).strip()
+        rendered = re.sub(r'\n{3,}', '\n\n', rendered)
+    return rendered
+
+
+def render_reader_daily(items, documents, *, fulltext: bool = True, ab_preview: bool = False,
+                        rewriter=None, rewrite_audit=None, compact: bool = False) -> str:
+    """Render fresh episode results without consulting any frozen delivery."""
+    blocks = [reader_episode(item.message, episode_document_url(item.episode, documents),
+                             fulltext=fulltext, rewriter=rewriter, rewrite_audit=rewrite_audit,
+                             compact=compact) for item in ranked_daily_items(items)
+              if item.status == 'summarized']
+    if ab_preview:
+        blocks.insert(0, 'A/B 测试版，不是正式日报')
+    return '\n\n'.join(blocks)
 
 
 def episode_document_url(episode, documents):
