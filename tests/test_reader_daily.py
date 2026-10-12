@@ -360,35 +360,6 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.messenger.attempts), 1)
         self.assertEqual(podcast.calls, 1)
 
-    async def test_legacy_inline_snapshot_changed_is_deferred(self):
-        instance, job, _ = self.setup_job([self.item('selected', 5)])
-        compiler = Mock()
-        compiler.snapshot.return_value = ('revision', ['selected'], [])
-        compiler.publish.return_value = None
-        instance.document_compiler = compiler
-        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
-            self.assertEqual(instance._inline_daily_documents(job, datetime.now(UTC)), [])
-        self.assertTrue(any(r.exc_info for r in logs.records))
-        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
-
-    async def test_inline_library_error_returns_empty_then_normal_result_is_cached(self):
-        from news_officer.library import LibraryError
-
-        instance, job, _ = self.setup_job([self.item('selected', 5)])
-        compiler = Mock()
-        compiler.snapshot.side_effect = [LibraryError('retry'), ('revision', ['selected'], [])]
-        documents = [{'title': 'Selected', 'url': 'https://example.test/doc'}]
-        compiler.publish.return_value = {'documents': documents}
-        instance.document_compiler = compiler
-        when = datetime.now(UTC)
-        with self.assertLogs('news_officer.runtime', level='WARNING') as logs:
-            self.assertEqual(instance._inline_daily_documents(job, when), [])
-        self.assertTrue(logs.records[0].exc_info)
-        self.assertIsNone(self.store.get_job_result(job.key, 'daily:inline-documents'))
-        self.assertEqual(instance._inline_daily_documents(job, when), documents)
-        self.assertEqual(instance._inline_daily_documents(job, when), documents)
-        compiler.publish.assert_called_once()
-
     async def test_worker_failure_logs_stack_without_sensitive_error_message(self):
         import asyncio
         from unittest.mock import AsyncMock
@@ -409,7 +380,6 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('_worker', output)
         self.assertNotIn('secret-token-in-url', output)
         self.assertNotIn('secret-token-in-chain', output)
-
 
     async def test_invalid_optional_allowlist_logs_and_operations_warns(self):
         import os

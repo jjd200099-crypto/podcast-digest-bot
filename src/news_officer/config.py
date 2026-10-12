@@ -82,8 +82,6 @@ class Settings:
     daily_health_budget_seconds: int = 2700
     daily_document_max_attempts: int = 3
     daily_document_fulltext: bool = False
-    # Only controls the second message; original message EDIT and documents are unaffected.
-    daily_document_followup: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -222,8 +220,6 @@ class Settings:
             daily_transcript_attachments=os.environ.get(
                 "NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS", "false"
             ).lower() == "true",
-            daily_document_followup=os.environ.get(
-                'NEWS_OFFICER_DAILY_DOCUMENT_FOLLOWUP', 'false').strip().lower() == 'true',
             daily_document_enabled=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT', 'false').lower() == 'true',
             daily_document_start_date=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_START_DATE', ''),
             daily_document_folder=os.environ.get('NEWS_OFFICER_DAILY_DOCUMENT_FOLDER', ''),

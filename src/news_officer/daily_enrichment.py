@@ -39,7 +39,7 @@ def document_recovery_jobs(store, today, max_attempts):
             "AND last_error!='DocumentRetryStopped'))", (max_attempts, today)).fetchall()
 
 
-def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None, followup_enabled=False):
+def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
     """Resume each episode separately, only after the original send succeeded."""
     max_attempts = compiler.max_attempts if compiler else 3
     recovery = {row['job_key'] for row in document_recovery_jobs(store, today, max_attempts)}
@@ -92,7 +92,6 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None, fol
                 continue
             count += store.enqueue(key, 'document', payload,
                 document_max_attempts=max_attempts)
-        count += enqueue_followup(store, base, today, audience_filter=audience_filter, enabled=followup_enabled)
     return count
 
 
@@ -228,48 +227,3 @@ def _audience(store, targets, audience_filter):
         return [tuple(t) for t in audience_filter(targets)]
     active = set(store.list_subscriptions())
     return [tuple(t) for t in targets if tuple(t) in active]
-
-
-def enqueue_followup(store, base, today, *, audience_filter=None, enabled=False):
-    """One links-only receipt after all same-day episode jobs finish or fail."""
-    if not enabled:
-        return 0
-    bundle = enrichment_bundle(store, base)
-    if not bundle or bundle['enrichment']['day'] != today:
-        return 0
-    if not store.outbox_group_sent(base, bundle['group_key']):
-        return 0
-    ready = store.list_job_results(base, 'daily_document_ready')
-    documents = {d['episode_id'] for r in ready for d in r['documents']}
-    eligible = set(bundle['enrichment']['eligible'])
-    if not documents & eligible:
-        return 0
-    with store._connect() as db:
-        failed = {row[0] for row in db.execute(
-            "SELECT json_extract(payload_json,'$.episode_id') FROM jobs WHERE kind='document' "
-            "AND status='failed' AND json_extract(payload_json,'$.mode')='daily_episode' "
-            "AND json_extract(payload_json,'$.base_job')=?", (base,))}
-    if not eligible <= documents | failed:
-        return 0
-    targets = _audience(store, [(d['target_type'], d['target_id']) for d in bundle['deliveries']], audience_filter)
-    deliveries = []
-    for target in targets:
-        try:
-            links = {d['episode_id']: d for r in ready if target in {tuple(t) for t in r['targets']}
-                     for d in r['documents'] if d['episode_id'] in eligible}
-            if links:
-                content = '\n\n'.join(
-                    f"[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
-                    for _, d in sorted(links.items()))
-                deliveries.append({'target': target, 'content': content})
-        except Exception as error:
-            safe_error = RuntimeError(type(error).__name__)
-            logger.warning('Daily enrichment followup target failed',
-                           exc_info=(RuntimeError, safe_error, error.__traceback__))
-            record_warning(store, base, 'daily_enrichment_target_failed', bundle['enrichment']['day'],
-                           target=target)
-    if not deliveries:
-        return 0
-    return int(store.enqueue(f'daily-document-followup:{today}', 'document', {
-        'mode': 'daily_document_followup', 'day': today, 'base_job': base,
-        'deliveries': deliveries}))

@@ -517,15 +517,6 @@ class Store:
                 attempts=int(row["attempts"]) + 1,
             )
 
-    def retire_document_followup(self, key: str) -> None:
-        """Preserve historical receipts and cancel unsent parts of a disabled followup."""
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE outbox SET status='cancelled',updated_at=? WHERE job_key=? AND status='pending' "
-                "AND EXISTS (SELECT 1 FROM jobs WHERE jobs.job_key=outbox.job_key "
-                "AND kind='document' AND json_extract(payload_json,'$.mode')='daily_document_followup')",
-                (_now(), key))
-
     def complete(self, key: str) -> None:
         with self._connect() as connection:
             result = connection.execute(

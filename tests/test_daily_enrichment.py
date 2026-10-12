@@ -78,22 +78,41 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.store.save_job_result(base, 'daily:document:' + episode, 'daily_document_ready', value)
         return value
 
-    async def test_default_followup_disabled_with_ready_documents_preserves_edit(self):
-        from news_officer.daily_enrichment import enqueue_followup
+    async def test_enrichment_only_edits_original_with_ready_documents(self):
         _, base = await self.prepare()
         self.ready(base.key, 'one')
         self.ready(base.key, 'two')
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 0)
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 2)
         with self.store._connect() as db:
             self.assertEqual(db.execute(
-                "SELECT count(*) FROM jobs WHERE job_key LIKE 'daily-document-followup:%'"
+                "SELECT count(*) FROM jobs WHERE job_key LIKE 'daily-document-followup:%' OR job_key LIKE '%inline-document-retry%'"
             ).fetchone()[0], 0)
         update_daily_message(self.store, self.api, base.key)
         self.assertEqual(len(self.api.puts), 1)
         self.assertIn('https://www.feishu.cn/docx/one', self.api.puts[0]['content'])
         self.assertIn('https://www.feishu.cn/docx/two', self.api.puts[0]['content'])
         self.assertEqual(len(self.messenger.attempts), 1)
+
+    async def test_unknown_legacy_document_modes_complete_without_sending(self):
+        instance, _ = await self.prepare()
+        instance.settings.daily_reader_mode = True
+        instance.document_compiler = Mock()
+        for mode in ('daily_document_followup', 'inline_daily_retry', 'unknown_legacy'):
+            with self.subTest(mode=mode):
+                key = 'legacy:' + mode
+                self.store.enqueue(key, 'document', {'mode': mode})
+                job = self.store.claim_next('document')
+                self.assertEqual(job.key, key)
+                await instance._handle_document_job(job)
+                self.store.complete(job.key)
+                self.assertEqual(self.store.outbox_items(key), [])
+                with self.store._connect() as db:
+                    self.assertEqual(db.execute(
+                        'SELECT status FROM jobs WHERE job_key=?', (key,)
+                    ).fetchone()[0], 'completed')
+        instance.document_compiler.publish.assert_not_called()
+        self.assertEqual(len(self.messenger.attempts), 1)
+        self.assertEqual(self.api.puts, [])
 
     async def test_bad_target_isolated_without_document_retry(self):
         from news_officer.operations import business_snapshot
@@ -127,20 +146,6 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('oc_bad', str(warnings))
         with self.store._connect() as db:
             self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?', (job.key,)).fetchone()[0], 'completed')
-
-    async def test_bad_followup_data_does_not_block_other_target(self):
-        from news_officer.daily_enrichment import enqueue_followup
-        self.store.add_subscription('chat_id', 'oc_bad')
-        _, base = await self.prepare()
-        self.ready(base.key, 'one')
-        self.ready(base.key, 'two')
-        self.store.save_job_result(base.key, 'bad-target-data', 'daily_document_ready', {
-            'targets': [['chat_id', 'oc_bad']],
-            'documents': [{'episode_id': 'one', 'title': 'one'}]})
-        with self.assertLogs('news_officer.daily_enrichment', level='WARNING'):
-            self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 1)
-        job = self.store.claim_next('document')
-        self.assertEqual([d['target'] for d in job.payload['deliveries']], [['open_id', 'ou_test']])
 
     async def test_reserved_edit_budget_warns_without_put(self):
         from news_officer.operations import business_snapshot
@@ -327,9 +332,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         clock.now.return_value = datetime.fromisoformat('2026-10-11T09:00:00+08:00')
         from test_daily_document import notes
 
-        from news_officer.daily_enrichment import enqueue_followup
         instance, base = await self.prepare()
-        instance.settings.daily_document_followup = True
         compiler = self.compiler(instance)
         def generate(record):
             value = notes(record)
@@ -353,22 +356,16 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.document_api.creates, 1)
         self.assertEqual(len(self.api.puts), 1)
         self.assertEqual(len(self.messenger.attempts), 1)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 0)
         self.writer.generate.side_effect = notes
         await instance._handle_document_job(bad)
         self.store.complete(bad.key)
-        followup = self.store.claim_next('document')
-        self.assertEqual(followup.payload['mode'], 'daily_document_followup')
-        await instance._handle_document_job(followup)
-        await instance._handle_document_job(followup)
-        self.store.complete(followup.key)
-        self.assertEqual(len(self.messenger.attempts), 2)
-        content = self.messenger.attempts[-1].content
-        self.assertEqual(content.count('https://www.feishu.cn/docx/'), 2)
-        self.assertNotIn('早间', content)
-        self.assertNotIn('核心判断', content)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 0)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-12', enabled=True), 0)
+        self.assertIsNone(self.store.claim_next('document'))
+        self.assertEqual(len(self.api.puts), 2)
+        self.assertEqual(len(self.messenger.attempts), 1)
+        with self.store._connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT count(*) FROM jobs WHERE job_key LIKE 'daily-document-followup:%' "
+                "OR job_key LIKE '%inline-document-retry%'").fetchone()[0], 0)
         self.assertEqual(self.store.outbox_items(base.key)[0].content, self.original)
 
     async def test_library_failure_is_bounded_after_notes_are_cached(self):
@@ -394,25 +391,6 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(db.execute('SELECT status FROM jobs WHERE job_key=?', (job.key,)).fetchone()[0], 'failed')
         self.assertIn('episode_document_retry_stopped:1', business_snapshot(self.store.path)['warnings'])
 
-    async def test_successful_links_follow_up_once_when_sibling_stops(self):
-        from news_officer.daily_enrichment import enqueue_followup
-        instance, base = await self.prepare()
-        instance.settings.daily_document_followup = True
-        self.ready(base.key, 'two')
-        enqueue_enrichment(self.store, '2026-10-11')
-        jobs = [self.store.claim_next('document'), self.store.claim_next('document')]
-        failed = next(j for j in jobs if j.payload['episode_id'] == 'one')
-        self.store.fail(failed.key, 'DocumentRetryStopped', 1, max_attempts=1)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 1)
-        followup = self.store.claim_next('document')
-        await instance._handle_document_job(followup)
-        await instance._handle_document_job(followup)
-        self.store.complete(followup.key)
-        self.assertEqual(len(self.messenger.attempts), 2)
-        self.assertIn('/docx/two', self.messenger.attempts[-1].content)
-        self.assertNotIn('/docx/one', self.messenger.attempts[-1].content)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 0)
-
     async def test_same_day_deadline_stops_independent_jobs_and_warns(self):
         from news_officer.operations import business_snapshot
         instance, _ = await self.prepare()
@@ -425,9 +403,8 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('episode_document_retry_stopped:2', business_snapshot(self.store.path)['warnings'])
 
     @patch('news_officer.runtime.datetime', wraps=datetime)
-    async def test_allowlist_overrides_subscription_for_enqueue_edit_and_followup(self, clock):
+    async def test_allowlist_overrides_subscription_for_enqueue_and_edit(self, clock):
         clock.now.return_value = datetime.fromisoformat('2026-10-11T09:00:00+08:00')
-        from news_officer.daily_enrichment import enqueue_followup
         instance, job, _ = self.setup_job([self.item('one', 5)], key='daily:2026-10-11',
             payload={'scheduled_for': '2026-10-11T08:30:00+08:00'})
         instance.settings.daily_chat_ids = ('oc_frozen',)
@@ -437,7 +414,6 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
             db.execute("UPDATE outbox SET remote_message_id='om_original' WHERE job_key=?", (job.key,))
             rows = db.execute('SELECT * FROM outbox WHERE job_key=?', (job.key,)).fetchall()
         self.api = MessageAPI(rows)
-        instance.settings.daily_document_followup = True
         compiler = self.compiler(instance)
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11', compiler=compiler,
             audience_filter=instance._document_audience), 1)
@@ -445,21 +421,11 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         await instance._handle_document_job(document)
         self.store.complete(document.key)
         self.assertEqual(len(self.api.puts), 1)
-        followup = self.store.claim_next('document')
-        self.assertEqual(followup.payload['deliveries'][0]['target'], ['chat_id', 'oc_frozen'])
-        # Newly allowed recipients are never added to the original frozen audience.
+        self.assertIsNone(self.store.claim_next('document'))
         instance.settings.daily_chat_ids = ('oc_new',)
-        await instance._handle_document_job(followup)
-        self.assertEqual(len(self.messenger.attempts), 1)
         update_daily_message(self.store, self.api, job.key, audience_filter=instance._document_audience)
         self.assertEqual(len(self.api.puts), 1)
-        self.assertEqual(enqueue_followup(self.store, job.key, '2026-10-11', enabled=True,
-            audience_filter=instance._document_audience), 0)
-        instance.settings.daily_chat_ids = ('oc_frozen', 'oc_new')
-        await instance._handle_document_job(followup)
-        await instance._handle_document_job(followup)
-        self.assertEqual(len(self.messenger.attempts), 2)
-        self.assertEqual(self.messenger.attempts[-1].target_id, 'oc_frozen')
+        self.assertEqual(len(self.messenger.attempts), 1)
         self.assertNotIn(('chat_id', 'oc_frozen'), self.store.list_subscriptions())
 
     async def test_allowlist_rechecked_immediately_before_edit_put(self):
@@ -478,7 +444,6 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.api.request = revoke_on_read
         update_daily_message(self.store, self.api, base.key, audience_filter=audience)
         self.assertEqual(self.api.puts, [])
-
 
     async def test_revival_preserves_attempts_and_respects_configured_cap(self):
         instance, _ = await self.prepare()
