@@ -12,6 +12,12 @@ from news_officer.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_document_followup_defaults_off_and_can_be_enabled(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            self.assertFalse(Settings.from_env().daily_document_followup)
+            with patch.dict(os.environ, {'NEWS_OFFICER_DAILY_DOCUMENT_FOLLOWUP': 'true'}):
+                self.assertTrue(Settings.from_env().daily_document_followup)
+
     def test_bounded_discovery_topics_and_opt_in_preparation(self):
         env = {**self.base_environment(), 'NEWS_OFFICER_DISCOVERY_TOPICS': 'OpenAI, Fireworks',
                'NEWS_OFFICER_DAILY_PREPARATION': 'true'}

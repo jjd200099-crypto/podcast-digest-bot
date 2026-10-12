@@ -78,6 +78,23 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.store.save_job_result(base, 'daily:document:' + episode, 'daily_document_ready', value)
         return value
 
+    async def test_default_followup_disabled_with_ready_documents_preserves_edit(self):
+        from news_officer.daily_enrichment import enqueue_followup
+        _, base = await self.prepare()
+        self.ready(base.key, 'one')
+        self.ready(base.key, 'two')
+        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 0)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 2)
+        with self.store._connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT count(*) FROM jobs WHERE job_key LIKE 'daily-document-followup:%'"
+            ).fetchone()[0], 0)
+        update_daily_message(self.store, self.api, base.key)
+        self.assertEqual(len(self.api.puts), 1)
+        self.assertIn('https://www.feishu.cn/docx/one', self.api.puts[0]['content'])
+        self.assertIn('https://www.feishu.cn/docx/two', self.api.puts[0]['content'])
+        self.assertEqual(len(self.messenger.attempts), 1)
+
     async def test_bad_target_isolated_without_document_retry(self):
         from news_officer.operations import business_snapshot
         self.store.add_subscription('chat_id', 'oc_bad')
@@ -121,7 +138,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
             'targets': [['chat_id', 'oc_bad']],
             'documents': [{'episode_id': 'one', 'title': 'one'}]})
         with self.assertLogs('news_officer.daily_enrichment', level='WARNING'):
-            self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 1)
+            self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 1)
         job = self.store.claim_next('document')
         self.assertEqual([d['target'] for d in job.payload['deliveries']], [['open_id', 'ou_test']])
 
@@ -312,6 +329,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
 
         from news_officer.daily_enrichment import enqueue_followup
         instance, base = await self.prepare()
+        instance.settings.daily_document_followup = True
         compiler = self.compiler(instance)
         def generate(record):
             value = notes(record)
@@ -335,7 +353,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.document_api.creates, 1)
         self.assertEqual(len(self.api.puts), 1)
         self.assertEqual(len(self.messenger.attempts), 1)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 0)
+        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 0)
         self.writer.generate.side_effect = notes
         await instance._handle_document_job(bad)
         self.store.complete(bad.key)
@@ -349,8 +367,8 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(content.count('https://www.feishu.cn/docx/'), 2)
         self.assertNotIn('早间', content)
         self.assertNotIn('核心判断', content)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 0)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-12'), 0)
+        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 0)
+        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-12', enabled=True), 0)
         self.assertEqual(self.store.outbox_items(base.key)[0].content, self.original)
 
     async def test_library_failure_is_bounded_after_notes_are_cached(self):
@@ -379,12 +397,13 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_links_follow_up_once_when_sibling_stops(self):
         from news_officer.daily_enrichment import enqueue_followup
         instance, base = await self.prepare()
+        instance.settings.daily_document_followup = True
         self.ready(base.key, 'two')
         enqueue_enrichment(self.store, '2026-10-11')
         jobs = [self.store.claim_next('document'), self.store.claim_next('document')]
         failed = next(j for j in jobs if j.payload['episode_id'] == 'one')
         self.store.fail(failed.key, 'DocumentRetryStopped', 1, max_attempts=1)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 1)
+        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 1)
         followup = self.store.claim_next('document')
         await instance._handle_document_job(followup)
         await instance._handle_document_job(followup)
@@ -392,7 +411,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.messenger.attempts), 2)
         self.assertIn('/docx/two', self.messenger.attempts[-1].content)
         self.assertNotIn('/docx/one', self.messenger.attempts[-1].content)
-        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11'), 0)
+        self.assertEqual(enqueue_followup(self.store, base.key, '2026-10-11', enabled=True), 0)
 
     async def test_same_day_deadline_stops_independent_jobs_and_warns(self):
         from news_officer.operations import business_snapshot
@@ -418,6 +437,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
             db.execute("UPDATE outbox SET remote_message_id='om_original' WHERE job_key=?", (job.key,))
             rows = db.execute('SELECT * FROM outbox WHERE job_key=?', (job.key,)).fetchall()
         self.api = MessageAPI(rows)
+        instance.settings.daily_document_followup = True
         compiler = self.compiler(instance)
         self.assertEqual(enqueue_enrichment(self.store, '2026-10-11', compiler=compiler,
             audience_filter=instance._document_audience), 1)
@@ -433,7 +453,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.messenger.attempts), 1)
         update_daily_message(self.store, self.api, job.key, audience_filter=instance._document_audience)
         self.assertEqual(len(self.api.puts), 1)
-        self.assertEqual(enqueue_followup(self.store, job.key, '2026-10-11',
+        self.assertEqual(enqueue_followup(self.store, job.key, '2026-10-11', enabled=True,
             audience_filter=instance._document_audience), 0)
         instance.settings.daily_chat_ids = ('oc_frozen', 'oc_new')
         await instance._handle_document_job(followup)
