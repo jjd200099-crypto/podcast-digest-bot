@@ -79,8 +79,7 @@ unverified transcript remains pending/unrated, never automatically 无关.
 3★ and below do not. Use this environment variable to adjust the threshold;
 environment overrides take precedence over code defaults. In default reader mode, the daily message is sent before compilation. Independent
 episode jobs edit the original receipt after verification and permission checks.
-One same-day links-only followup uses the frozen, revalidated audience after all
-episode jobs finish or stop. Legacy non-reader mode sends a separate link notice. Frozen
+Legacy non-reader mode sends a separate link notice. Frozen
 older document batches cannot bypass the current threshold. A user's explicit
 request for a detailed episode document still bypasses the star threshold.
 

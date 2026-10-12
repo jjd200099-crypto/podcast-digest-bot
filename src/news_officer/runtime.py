@@ -398,10 +398,6 @@ class NewsOfficerRuntime:
                     # any still-active deduplication can only prevent duplicates.
                 if not remote_message_id:
                     remote_message_id = await asyncio.to_thread(self.messenger.deliver, item)
-                if (job.kind == 'document'
-                        and job.payload.get('mode') == 'daily_document_followup'
-                        and not str(remote_message_id or '').strip()):
-                    raise RuntimeError('Followup delivery unconfirmed: missing message receipt')
             except Exception as error:  # noqa: BLE001 - isolate failures per recipient
                 await asyncio.to_thread(
                     self.store.mark_outbox_error, item.id,
@@ -760,36 +756,6 @@ class NewsOfficerRuntime:
         self._restore_daily_bundle(job, bundle)
         return items
 
-    def _inline_daily_documents(self, job, when):
-        """Resume an inherited inline retry; new dailies use independent enrichment jobs."""
-        saved = self.store.get_job_result(job.key, 'daily:inline-documents')
-        if saved is not None:
-            return saved['documents']
-        compiler = getattr(self, 'document_compiler', None)
-        documents = []
-        try:
-            if compiler is not None:
-                revision, selected, _ = compiler.snapshot(job.key)
-                if selected:
-                    result = compiler.publish(Job(job.key, 'daily', {
-                        'mode': 'selected_episodes', 'day': when.date().isoformat(),
-                        'base_job': job.key, 'revision': revision,
-                        'targets': self._daily_targets(job)}, job.attempts))
-                    if result is None:
-                        raise RuntimeError('Daily document snapshot changed; retry required')
-                    if result.get('deferred'):
-                        raise ValueError('Some episode documents failed validation; retry required')
-                    documents = result['documents']
-        except Exception:  # Legacy document failures must preserve the already sent daily.
-            logger.warning('Daily document compilation deferred', exc_info=True)
-            self.store.enqueue(f'{job.key}:inline-document-retry', 'document', {
-                'mode': 'inline_daily_retry', 'base_job': job.key,
-                'scheduled_for': when.isoformat()})
-            return []
-        saved = self.store.save_job_result(job.key, 'daily:inline-documents',
-                                           'inline_documents', {'documents': documents})
-        return saved['documents']
-
     def _prepare_daily_outbox_and_terminal_states(self, job: Job, *, finalize=False) -> list[DailyItem]:
         if self._combined_daily(job):
             return self._prepare_combined_daily(job, finalize=finalize)
@@ -1041,7 +1007,7 @@ class NewsOfficerRuntime:
                 work.cancel()
 
     async def _failure_notice(self, job, terminal):
-        if job.kind == 'document' and job.payload.get('mode') in {'daily_episode', 'daily_document_followup'}:
+        if job.kind == 'document' and job.payload.get('mode') == 'daily_episode':
             return  # Background enrichment never adds group status messages.
         if job.kind == 'document' and terminal:
             try:
@@ -1053,13 +1019,8 @@ class NewsOfficerRuntime:
                             job.payload.get('reply_in_thread', False))
                         await self._drain_outbox(job)
                     return
-                if job.payload.get('mode') == 'inline_daily_retry':
-                    base = Job(job.payload['base_job'], 'daily', {}, job.attempts)
-                    audience = self._daily_targets(base)
-                    day = job.payload['scheduled_for'][:10]
-                else:
-                    audience = self._document_audience(job.payload['targets'])
-                    day = job.payload['day']
+                audience = self._document_audience(job.payload['targets'])
+                day = job.payload['day']
                 content = (f"{day} 的播客精读文档暂未编译完成，已保留失败状态。"
                            "短版日报与聊天问答不受影响；尚未完成的文档不会作为成品推送。")
                 for kind, target in audience:
@@ -1233,8 +1194,7 @@ class NewsOfficerRuntime:
                             and getattr(self.settings, 'daily_reader_mode', False)):
                         from .daily_enrichment import enqueue_enrichment
                         if await asyncio.to_thread(enqueue_enrichment, self.store, local_now.date().isoformat(),
-                                audience_filter=self._document_audience, compiler=self.document_compiler,
-                                followup_enabled=getattr(self.settings, 'daily_document_followup', False)):
+                                audience_filter=self._document_audience, compiler=self.document_compiler):
                             self._wake_worker('document')
                 except Exception as error:  # noqa: BLE001 - scheduler isolation boundary
                     self._log_scheduler_failure(error, site='daily_enrichment')
@@ -1243,48 +1203,8 @@ class NewsOfficerRuntime:
             await asyncio.sleep(30)
 
     async def _handle_document_job(self, job):
-        if job.payload.get('mode') == 'daily_document_followup':
-            if not getattr(self.settings, 'daily_document_followup', False):
-                await asyncio.to_thread(self.store.retire_document_followup, job.key)
-                return
-            for delivery in job.payload['deliveries']:
-                kind, target = delivery['target']
-                if not self._document_audience([(kind, target)]):
-                    continue
-                key = f"{job.key}:document-link:{kind}:{target}"
-                parts = combined_delivery_parts(delivery['content'], key)
-                if len(parts) != 1:
-                    raise ValueError('Daily document links exceed single-message capacity')
-                self.store.ensure_outbox(job_key=job.key, group_key='document:link',
-                    delivery_key=key, operation='send', target_id=target, target_type=kind,
-                    reply_in_thread=False, parts=parts)
-            await self._drain_outbox(job)
-            return
-        if job.payload.get('mode') == 'inline_daily_retry':
-            base = Job(job.payload['base_job'], 'daily', {}, job.attempts)
-            await asyncio.to_thread(self._inline_daily_documents, base,
-                                    datetime.fromisoformat(job.payload['scheduled_for']))
-            if self.store.get_job_result(base.key, 'daily:inline-documents') is None:
-                if not self.document_compiler.retry_available(job.payload, self.document_compiler.today()):
-                    raise DocumentRetryStopped('Daily documents exhausted retry budget or deadline')
-                raise RuntimeError('Daily documents pending retry')
-            documents = self.store.get_job_result(base.key, 'daily:inline-documents')['documents']
-            if documents:
-                content = '\n\n'.join(
-                    f"[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
-                    for d in documents)
-                for kind, target in self._daily_targets(base):
-                    key = f"{base.key}:inline-document-link:{kind}:{target}"
-                    parts = combined_delivery_parts(content, key)
-                    if len(parts) != 1:
-                        raise ValueError('Daily document links exceed single-message capacity')
-                    self.store.ensure_outbox(job_key=job.key, group_key='document:link',
-                        delivery_key=key, operation='send', target_id=target, target_type=kind,
-                        reply_in_thread=False, parts=parts)
-                await self._drain_outbox(job)
-            return
         if job.payload.get('mode') == 'daily_episode':
-            from .daily_enrichment import enqueue_followup, publish_enrichment
+            from .daily_enrichment import publish_enrichment
             try:
                 await asyncio.to_thread(publish_enrichment, self.store, self.document_compiler, job)
             except Exception as error:
@@ -1292,11 +1212,6 @@ class NewsOfficerRuntime:
                 logger.warning('Daily document compilation deferred',
                                exc_info=(RuntimeError, safe_error, error.__traceback__))
                 raise
-            if await asyncio.to_thread(enqueue_followup, self.store, job.payload['base_job'],
-                    datetime.now(getattr(self.settings, 'timezone', ZoneInfo('Asia/Shanghai'))).date().isoformat(),
-                    audience_filter=self._document_audience,
-                    enabled=getattr(self.settings, 'daily_document_followup', False)):
-                self._wake_worker('document')
             return
         if (getattr(self.settings, 'daily_reader_mode', False)
                 and job.payload.get('mode') != 'requested_episode'):
