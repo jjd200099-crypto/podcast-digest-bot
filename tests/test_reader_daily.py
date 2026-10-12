@@ -1,5 +1,6 @@
 import json
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -8,7 +9,7 @@ from test_combined_daily import body
 
 from news_officer.daily_archive import read_daily_digest
 from news_officer.delivery_watchdog import is_daily_receipt
-from news_officer.models import DailyItem, Episode, Job
+from news_officer.models import DailyItem, Episode, Job, Transcript
 
 
 class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
@@ -21,6 +22,38 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         instance.settings.daily_reader_mode = True
         podcast.build_pending = Mock(return_value=[])
         return instance, job, podcast
+
+    async def test_compact_flag_reuses_one_rewrite_in_enrichment_template(self):
+        episode = Episode('flag', 'Show', 'https://example.test/flag', 'Show',
+                          published_at=datetime.now(UTC))
+        selected = DailyItem(episode, 'summarized', ('## Guest｜产品\n节目：Show｜Show\n\n公司认为需求可能增长。'
+                            '团队强调评测。后段讨论风险。仍需验证。\n推荐理由：评测和风险。\n推荐星级：★★★★☆'))
+        record = self.store.save_verified_transcript(episode,
+            Transcript('Complete source', 'official', episode.url, True))
+        self.store.save_transcript_digest(selected.episode.id, selected.message,
+            record.content_sha256, record.record_revision_sha256)
+        selected = replace(selected, attachment=fixtures.attachment_for(record, selected.message))
+        instance, job, podcast = self.setup_job([selected])
+        model = Mock(model='mock-model')
+        model.rewrite_paragraphs.return_value = ['公司认为需求可能增长。']
+        podcast.summarizer = model
+        instance.settings.daily_compact_paragraphs = True
+        await instance._handle_daily_job(job)
+        model.rewrite_paragraphs.assert_called_once()
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        section = bundle['enrichment']['sections'][0]
+        for key in ('body', 'template'):
+            self.assertNotIn('• ', section[key])
+            self.assertIn('公司认为需求可能增长。', section[key])
+            self.assertNotIn('Show｜Show', section[key])
+
+    async def test_default_reader_does_not_rewrite(self):
+        selected = self.item('default')
+        instance, job, podcast = self.setup_job([selected])
+        podcast.summarizer = Mock()
+        await instance._handle_daily_job(job)
+        podcast.summarizer.rewrite_paragraphs.assert_not_called()
+        self.assertNotIn('• ', body(self.messenger.attempts[0]))
 
     async def test_only_editorial_content_in_one_message_and_archive(self):
         selected = self.item('selected')
