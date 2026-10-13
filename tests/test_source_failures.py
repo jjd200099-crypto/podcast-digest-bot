@@ -482,7 +482,7 @@ class SourceFailureTests(unittest.TestCase):
 
         self.assertEqual({candidate.id for candidate in candidates}, {"rss:0", "rss:1"})
 
-    def test_summary_quota_reserves_b_then_backfills_a_if_b_has_no_transcript(self):
+    def test_summary_quota_uses_stable_score_order_without_source_reservation(self):
         self.feeds.write_text('{"sources": []}')
         candidates = [
             Episode(
@@ -513,7 +513,7 @@ class SourceFailureTests(unittest.TestCase):
 
         self.assertEqual(
             [item.episode.id for item in items if item.status == "summarized"],
-            ["a1", "a2", "b1"],
+            ["a1", "a2", "a3"],
         )
 
         with (

@@ -7,6 +7,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from .models import Episode, Transcript
+from .strict_selection import strict_selection_enabled
 
 TAKEAWAY_COUNT = 10
 TAKEAWAY_HARD_MAX_CHARS = 120
@@ -180,7 +181,7 @@ class TranscriptSummarizer:
 
     def cache_identity(self) -> str:
         # Prompt/validator edits automatically invalidate prepared summaries.
-        return hashlib.sha256(Path(__file__).read_bytes() + self.model.encode()).hexdigest()
+        return hashlib.sha256(Path(__file__).read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode()).hexdigest()
 
     def summarize(self, episode: Episode, transcript: Transcript) -> str:
         if not transcript.verified_complete:
@@ -204,6 +205,9 @@ class TranscriptSummarizer:
 8. 最后一行写“推荐星级：★★★★☆”，总共5颗星、实心星1–5颗。只按相关度和信息密度判断，不设置其他评分维度。相关度优先 model frontier、AI research、成功 AI 公司创始人的一手深度访谈（例如 Fireworks），其中 OpenAI、Anthropic 等基础模型实验室的实质讨论，或热门 AI 独角兽创始人作为主要嘉宾（例如用户指定的 Fireworks），是必收录内容，至少四星“值得看全文”，不因信息偏薄降为无关；广告、顺带提名、普通 API 使用不算。信息密度仍需如实评价，名气不等于高质量。五星只给同时高度相关且信息极其密集、值得深度编译的少数节目，允许当天没有五星；四星值得看全文，三星看摘要即可；一二星相关度或密度不足。不要输出分项分数和公式。程序会统一补上阅读建议，星级不是收益预测。
 9. 保留必要的英文产品名；美元金额使用 $ 前缀。不要把多个概念用顿号堆成一口气读不完的句子。
 """
+        if strict_selection_enabled():
+            instructions += ('\n严格筛选模式：对于包含大量非 AI 内容的混合主题节目（例如量子计算、制药），'
+                             '日报摘要只聚焦 AI 相关部分，不总结非 AI 段落；标题、正文和推荐理由均遵守此范围。\n')
         prompt = f"""节目：{episode.title}
 频道/主播：{episode.show}
 节目链接：{episode.url}
