@@ -87,3 +87,34 @@ python -m news_officer.backup --output /data/backups/UNIQUE_SNAPSHOT --verify-on
 ## 发现观察池
 
 关键词可以通过 `NEWS_OFFICER_DISCOVERY_TOPICS` 配置，仍受总扫描预算约束。列表外频道在 30 天内有两期不同的“值得看全文”或更高内容后，其已核验 Podwise 频道编号进入最多 20 个观察目录；后续继续检查日期目录。重复处理同一期不累计次数，过期自动退出。此观察池不改正式订阅，不执行 Podwise follow 或付费转写。
+
+### Free YouTube transcript fallback
+
+YouTube captions use this order: transcript API (direct, or
+`YOUTUBE_TRANSCRIPT_PROXY_URL` when configured), transcript API through rotating
+free public proxies, existing yt-dlp captions, then existing read-only Podwise
+lookup. Podwise processing and credit safety are unchanged. No paid proxy/service
+or local transcription is used. Successful API and yt-dlp steps are logged without
+proxy URLs or credentials. Existing duration, coverage and text checks still apply.
+English manual captions are preferred, then generated English; the existing
+English/Chinese language fallback remains available.
+
+Free rotation is enabled by default. Configuration:
+
+| Variable | Default |
+| --- | --- |
+| `YOUTUBE_FREE_PROXY_ENABLED` | `true` (`false`, `0`, `no`, `off` disable) |
+| `YOUTUBE_FREE_PROXY_LISTS` | proxifly HTTP, TheSpeedX HTTP, monosans HTTP and SOCKS5 raw GitHub lists; comma-separated override |
+| `YOUTUBE_FREE_PROXY_WORKERS` | `32` |
+| `YOUTUBE_FREE_PROXY_REQUEST_TIMEOUT` | `8` seconds per HTTP request |
+| `YOUTUBE_FREE_PROXY_MAX_CANDIDATES` | `300` |
+| `YOUTUBE_FREE_PROXY_TOTAL_BUDGET` | `120` seconds, including list downloads |
+
+Invalid numeric values fall back to defaults. Lists are deduplicated and shuffled;
+up to 32 successful proxies are remembered in process and tried before downloading
+lists next time. Restarting clears this memory. The first validated success wins;
+queued work is cancelled and active requests finish under their timeouts. TLS
+verification stays enabled, including SOCKS requests. Blocked IPs and proxy errors
+try another candidate. Disabled/missing transcripts and unavailable videos stop
+API rotation and fall through to yt-dlp and Podwise. Free proxies are unreliable;
+exhausting the budget returns to the existing fallback/retry behavior.

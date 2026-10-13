@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from xml.etree import ElementTree
 
 import requests
 
+from .free_proxies import DEFINITIVE_ERRORS, TimeoutSession, fetch_with_free_proxies
 from .models import Episode, Transcript
 
 YOUTUBE_HOSTS = {
@@ -476,9 +478,12 @@ class YouTubeTranscriptProvider:
         except YouTubeFinalSkip:
             raise
         except Exception as error:  # noqa: BLE001 - transcript errors are logged and skipped
-            logging.getLogger(__name__).warning("YouTube transcript API failed for %s: %s", episode.url, error)
+            logging.getLogger(__name__).warning("YouTube transcript API failed for %s (%s)", episode.url, type(error).__name__)
         try:
-            return self._fetch_captions(episode)
+            transcript = self._fetch_captions(episode)
+            if transcript:
+                logging.getLogger(__name__).info("YouTube transcript succeeded via yt-dlp")
+            return transcript
         except YouTubeFinalSkip:
             raise
         except Exception as error:  # noqa: BLE001 - transcript errors are logged and skipped
@@ -487,7 +492,7 @@ class YouTubeTranscriptProvider:
 
     def _fetch_api(self, episode: Episode) -> Transcript | None:
         """Read timed transcript API captions using the session proxy."""
-        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api import NoTranscriptFound, YouTubeTranscriptApi
 
         url = episode.url if is_youtube_url(episode.url) else str(episode.metadata.get("youtube_url") or "")
         video_id = youtube_video_id(url)
@@ -502,20 +507,45 @@ class YouTubeTranscriptProvider:
             duration = enriched.duration_seconds
         if duration and duration < 900:
             raise YouTubeFinalSkip("YouTube video shorter than 15 minutes")
-        with requests.Session() as session:
-            snippets = YouTubeTranscriptApi(http_client=session).fetch(
-                video_id, languages=["en", "en-US", "zh-Hans", "zh", "zh-Hant"]
-            )
-        # Without real duration we cannot verify full-video coverage.
         if not duration:
             return None
-        text = _merge_caption_chunks([snippet.text for snippet in snippets])
-        intervals = [(s.start, s.start + s.duration) for s in snippets]
-        if (intervals_cover_episode(intervals, duration)
-                and len(text) >= max(5_000, round(duration / 60) * 300)
-                and 60 <= len(text.split()) / (duration / 60) <= 260):
-            return Transcript(text, self.name, url, True, snippets.language_code)
-        return None
+
+        def fetch(proxy: str | None, timeout: float, deadline: float | None = None):
+            from youtube_transcript_api.proxies import GenericProxyConfig
+
+            config = GenericProxyConfig(http_url=proxy, https_url=proxy) if proxy else None
+            with TimeoutSession(timeout, deadline) as session:
+                api = YouTubeTranscriptApi(http_client=session, proxy_config=config)
+                try:
+                    snippets = api.fetch(video_id, languages=["en", "en-US"])
+                except NoTranscriptFound:  # NoTranscriptFound: retain Chinese fallback
+                    snippets = api.fetch(
+                        video_id, languages=["zh-Hans", "zh", "zh-Hant"]
+                    )
+            text = _merge_caption_chunks([snippet.text for snippet in snippets])
+            intervals = [(s.start, s.start + s.duration) for s in snippets]
+            if (intervals_cover_episode(intervals, duration)
+                    and len(text) >= max(5_000, round(duration / 60) * 300)
+                    and 60 <= len(text.split()) / (duration / 60) <= 260):
+                return Transcript(text, self.name, url, True, snippets.language_code)
+            return None
+
+        try:
+            result = fetch(os.getenv("YOUTUBE_TRANSCRIPT_PROXY_URL") or None, 8)
+            if result:
+                logging.getLogger(__name__).info("YouTube transcript succeeded via primary API")
+                return result
+        except DEFINITIVE_ERRORS:
+            return None
+        except Exception as error:  # noqa: BLE001 - continue through free fallbacks
+            logging.getLogger(__name__).info("YouTube primary API unavailable (%s)", type(error).__name__)
+        try:
+            result = fetch_with_free_proxies(fetch)
+            if result:
+                logging.getLogger(__name__).info("YouTube transcript succeeded via free proxy API")
+            return result
+        except DEFINITIVE_ERRORS:
+            return None
 
     def _fetch_captions(self, episode: Episode) -> Transcript | None:
         youtube_url = (
