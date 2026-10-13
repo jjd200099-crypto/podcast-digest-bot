@@ -192,3 +192,9 @@ previously frozen send byte for byte.
 `NEWS_OFFICER_STRICT_SELECTION=false`（默认关闭）保留原有评分与阅读建议。设为 `true` 后采用 `strict-selection-v2` 独立评分缓存和严格规则：仅松散相关于 AI/投资，或个人观点、未经核验推测主导的节目低于三星收录线；模型同时判断 AI 内容占比、证据质量和阅读建议；AI 内容仅占整期小部分时最多三星，建议“值得看摘要”，不生成精读文档，低证据不标为“值得看全文”。priority 在相关度不足 4 时取消，不要求模型抬分；四星保底仅适用于相关度至少 4、信息密度至少 3 且证据不低的节目，并受实际阅读判断约束。无论开关，`NEWS_OFFICER_MAX_SUMMARIES>0` 均先评估全部候选，再按星级降序取前 N，平分保持发现顺序；默认 0 不限数量。
 
 只读回测：`PYTHONPATH=src python scripts/backtest_selection.py /path/state.sqlite3 2026-10-01 2026-10-07`。默认只读取 SQLite（`mode=ro`），不调用服务或写入数据库。加 `--rescore --model MODEL` 可显式调用现有 `EditorialPolicy.assess` 分别使用旧、新规则评分（会向 LLM 发送存档全文并产生费用），评分缓存为不写入的内存接口。输出存档星级、相关度、密度、priority、去掉保底后的星级及保底是否抬分、新旧重评分、入选与理由。使用 `jobs` 日报时间、`job_results` 的 daily_item、执行时间内的 `editorial_reviews` 与 `episode_transcripts` 重建候选；历史未保存的发现结果无法恢复，时间窗口归属为近似。历史全文被替换后可能与原评分不匹配，此时去保底星级显示 `?`。
+
+### 完整对谈的新排版（默认关闭）
+
+`NEWS_OFFICER_DEEPREAD_NEW_STYLE=true` 为飞书精读启用“核心内容＋QA 整理”：详细核心 bullets、按原始顺序编号的话题章节、真实说话人姓名、保留第一人称与完整实质对谈。删除广告、开场重复剪辑及无信息语气词，修复可确认的 ASR 错误，English 专有名词保持 English。未确认的身份保留原稿标签。
+
+开关关闭时保留原精读提示词、渲染结果与缓存标识。启用时使用独立版本缓存；QA 已包含完整实质对谈，因此不再重复追加旧全文附录。已有机器人生成的文档切换排版前会冻结旧块并核对回读，发现人工修改则停止替换。仍需开启原有文档功能并遵守原有收件人授权。源文字稿归档保持完整，删除广告仅发生在派生阅读文档中。
