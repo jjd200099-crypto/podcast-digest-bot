@@ -697,7 +697,9 @@ class NewsOfficerRuntime:
                 if not callable(getattr(rewriter, 'rewrite_paragraphs', None)):
                     rewriter = None
                 content = reader_episode(episode_summary(item, compact=compact), rewriter=rewriter, compact=compact)
-                template = reader_episode(content, DOCUMENT_PLACEHOLDER,
+                # Legacy rendering groups the reading link before listening links.
+                # Compact prose is already rewritten; reuse it without another model call.
+                template = reader_episode(content if compact else item.message, DOCUMENT_PLACEHOLDER,
                     fulltext=getattr(settings, 'daily_document_fulltext', False))
                 published = item.episode.published_at
                 if published and published < start:
@@ -709,8 +711,9 @@ class NewsOfficerRuntime:
                 blocks.append(content)
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')
-        from .daily_report import clean_daily_lines
-        blocks = [clean_daily_lines(block) for block in blocks]
+        if getattr(settings, 'daily_compact_paragraphs', False):
+            from .daily_report import clean_daily_lines
+            blocks = [clean_daily_lines(block) for block in blocks]
         markdown = ("\n\n" if reader_mode else "\n\n---\n\n").join(blocks)
         if reader_mode:
             from .daily_report import compact_reader_episode
