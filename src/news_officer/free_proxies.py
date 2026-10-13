@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import math
 import os
@@ -20,6 +21,15 @@ from youtube_transcript_api import (
     TranscriptsDisabled,
     VideoUnavailable,
 )
+
+
+class ProxyBudgetExhausted(RuntimeError):
+    """Defer without charging a transcript failure."""
+
+
+class CaptionValidationFailed(ValueError):
+    """Retrieved captions are incomplete, independently of the proxy."""
+
 
 DEFINITIVE_ERRORS = (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable)
 DEFAULT_LISTS = (
@@ -88,6 +98,18 @@ class TimeoutSession(requests.Session):
         return super().request(method, url, **kwargs)
 
 
+def _public_proxy(proxy: str) -> bool:
+    # Public lists contain literal addresses. Reject hostnames as well, so DNS
+    # aliases cannot point proxy requests at local or metadata services.
+    try:
+        parts = urlsplit(proxy)
+        address = ipaddress.ip_address(parts.hostname or '')
+        return (parts.scheme in {'http', 'https', 'socks5', 'socks5h'}
+                and bool(parts.port) and address.is_global and not address.is_multicast)
+    except ValueError:
+        return False
+
+
 def _load_candidates(config: ProxyConfig, deadline: float) -> list[str]:
     candidates: list[str] = []
     with TimeoutSession(config.timeout, deadline) as session:
@@ -102,12 +124,7 @@ def _load_candidates(config: ProxyConfig, deadline: float) -> list[str]:
                     proxy = line.strip()
                     if "://" not in proxy:
                         proxy = f"{scheme}://{proxy}"
-                    parts = urlsplit(proxy)
-                    if (
-                        parts.scheme in {"http", "https", "socks5", "socks5h"}
-                        and parts.hostname
-                        and parts.port
-                    ):
+                    if _public_proxy(proxy):
                         candidates.append(proxy)
             except (requests.RequestException, ValueError):
                 logging.getLogger(__name__).debug("Public proxy list unavailable")
@@ -147,7 +164,7 @@ def _race(
                 proxy = pending.pop(future)
                 try:
                     result = future.result()
-                except DEFINITIVE_ERRORS:
+                except (*DEFINITIVE_ERRORS, CaptionValidationFailed):
                     raise
                 except Exception:  # noqa: BLE001 - failed public proxies are expected
                     result = None
@@ -182,7 +199,8 @@ def fetch_with_free_proxies(fetch: Callable[[str, float, float], T | None]) -> T
     if remaining <= 0:
         # Bound total free-proxy time per hour so many slow videos cannot stall
         # the daily run past its watchdog; later retries pick them up.
-        return None
+        logging.getLogger(__name__).info("Hourly free-proxy budget exhausted; skipping without retry charge")
+        raise ProxyBudgetExhausted("Hourly free-proxy budget exhausted")
     deadline = started + min(config.budget, remaining)
     try:
         return _fetch_with_free_proxies(fetch, config, deadline)

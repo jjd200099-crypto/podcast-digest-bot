@@ -16,6 +16,7 @@ from news_officer.youtube import YouTubeTranscriptProvider
 class FreeProxyTests(unittest.TestCase):
     def setUp(self):
         fp._WORKING.clear()
+        fp._SPENT.clear()
         self.config = fp.ProxyConfig(True, (), 2, 1, 3, 1)
 
     def test_env_defaults_and_overrides(self):
@@ -130,6 +131,25 @@ class FreeProxyTests(unittest.TestCase):
                 ["socks5://1.2.3.4:80"],
             )
 
+    def test_private_local_and_metadata_proxies_are_filtered(self):
+        blocked = ['10.0.0.1:80', '172.16.0.1:80', '192.168.1.1:80',
+                   '127.0.0.1:80', '0.0.0.0:80', '169.254.169.254:80',
+                   '169.254.1.1:80', 'localhost:80', 'local.example:80',
+                   '[::1]:80', '[fe80::1]:80', '[fc00::1]:80',
+                   '[::ffff:127.0.0.1]:80', '1.2.3.4:invalid']
+        response = Mock(text='\n'.join(blocked + ['8.8.8.8:80']))
+        config = fp.ProxyConfig(True, ('https://example/http.txt',), 1, 1, 30, 1)
+        with patch.object(fp.TimeoutSession, 'get', return_value=response):
+            self.assertEqual(fp._load_candidates(config, time.monotonic() + 1), ['http://8.8.8.8:80'])
+
+    def test_validation_failure_stops_proxy_rotation(self):
+        fetch = Mock(side_effect=fp.CaptionValidationFailed('incomplete'))
+        config = fp.ProxyConfig(True, (), 1, 1, 3, 1)
+        with self.assertRaises(fp.CaptionValidationFailed):
+            fp._race(['one', 'two'], fetch, config, time.monotonic() + 1)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fp._WORKING, [])
+
     def test_session_timeout_and_tls(self):
         with patch("requests.Session.request") as request:
             fp.TimeoutSession(8).get("https://example", verify=False)
@@ -146,6 +166,24 @@ class ApiChainTests(unittest.TestCase):
             "show",
             duration_seconds=1800,
         )
+
+    def test_incomplete_primary_does_not_rotate_proxies(self):
+        snippets = [SimpleNamespace(text='short', start=0, duration=10)]
+        with patch('youtube_transcript_api.YouTubeTranscriptApi', return_value=Mock(fetch=Mock(return_value=snippets))), \
+                patch('news_officer.youtube.fetch_with_free_proxies') as rotate:
+            self.assertIsNone(YouTubeTranscriptProvider()._fetch_api(self.episode))
+        rotate.assert_not_called()
+
+    def test_incomplete_proxy_stops_before_loading_more_candidates(self):
+        snippets = [SimpleNamespace(text='short', start=0, duration=10)]
+        fp._WORKING[:] = ['http://8.8.8.8:80']
+        with patch('youtube_transcript_api.YouTubeTranscriptApi', side_effect=[
+                Mock(fetch=Mock(side_effect=RuntimeError('blocked'))),
+                Mock(fetch=Mock(return_value=snippets))]) as api, \
+                patch.object(fp, '_load_candidates') as load:
+            self.assertIsNone(YouTubeTranscriptProvider()._fetch_api(self.episode))
+        self.assertEqual(api.call_count, 2)
+        load.assert_not_called()
 
     def test_primary_then_rotation_then_ytdlp(self):
         order = []

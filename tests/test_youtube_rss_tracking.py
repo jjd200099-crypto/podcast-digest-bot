@@ -31,7 +31,7 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
             'url': 'https://www.youtube.com/channel/UCXUPKJO5MZQN11PqgIvyuvQ/videos',
             'rss_url': 'https://www.youtube.com/feeds/videos.xml?channel_id=UCXUPKJO5MZQN11PqgIvyuvQ',
         }]}))
-        self.episode = Episode('abcdefghijk', '【Channel｜Long video】',
+        self.episode = Episode('abcdefghijk', 'Long video',
                                'https://www.youtube.com/watch?v=abcdefghijk', 'Channel',
                                published_at=datetime.now(UTC), duration_seconds=1200,
                                metadata={'source_type': 'youtube'})
@@ -55,7 +55,7 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
     def test_atom_identity_media_date_and_title(self):
         episode = self.parse()[0]
         self.assertEqual(episode.id, 'abcdefghijk')
-        self.assertEqual(episode.title, '【Channel｜Long video】')
+        self.assertEqual(episode.title, 'Long video')
         self.assertEqual(episode.duration_seconds, 1200)
         self.assertEqual(episode.metadata['description'], 'Full talk')
         self.assertEqual(episode.metadata['source_type'], 'youtube')
@@ -91,7 +91,7 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
         service = self.service(provider)
         def summarize(episode, transcript):
             self.assertEqual(self.store.get_verified_transcript(episode.id).transcript.text, transcript.text)
-            self.assertEqual(episode.title, '【Channel｜Long video】')
+            self.assertEqual(episode.title, 'Long video')
             return 'summary'
         service.summarizer.summarize.side_effect = summarize
         with patch('news_officer.podcast.latest_rss_episodes', return_value=[self.episode]):
@@ -123,6 +123,83 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
             connection.execute('UPDATE daily_transcript_backlog SET created_at=? WHERE episode_id=?',
                                ((datetime.now(UTC) - age).isoformat(), episode_id))
 
+    def backlog(self, episode_id=None):
+        with self.store._connect() as db:
+            return dict(db.execute('SELECT * FROM daily_transcript_backlog WHERE episode_id=?',
+                                  (episode_id or self.episode.id,)).fetchone())
+
+    def test_only_missing_text_charges_retry_and_six_hour_backoff(self):
+        self.store.defer_daily_transcript(self.episode, 'missing')
+        self._age_backlog(self.episode.id, timedelta(days=2))
+        with self.store._connect() as db:
+            db.execute('UPDATE daily_transcript_backlog SET attempts=48')
+        self.assertFalse(self.store.defer_daily_transcript(self.episode, 'missing'))
+        row = self.backlog()
+        self.assertEqual(row['attempts'], 49)
+        self.assertGreater(datetime.fromisoformat(row['next_check_at']), datetime.now(UTC) + timedelta(hours=5, minutes=59))
+        self._age_backlog(self.episode.id, timedelta(days=4))
+        for state in ['摘要格式待重试', 'unverified_date', 'limited']:
+            self.assertFalse(self.store.defer_daily_transcript(self.episode, state, count_failure=False))
+            self.assertEqual(self.backlog()['attempts'], 49)
+
+    def test_summary_failure_after_full_text_never_exhausts_retry(self):
+        from news_officer.summarizer import SummaryFormatError
+        self.store.defer_daily_transcript(self.episode, 'missing')
+        self._age_backlog(self.episode.id, timedelta(days=4))
+        provider = Mock(name='provider')
+        provider.fetch.return_value = Transcript('full transcript ' * 1000, 'YouTube', self.episode.url, True)
+        service = self.service(provider)
+        for error, status in [(SummaryFormatError('format'), 'summary_format_error'),
+                              (RuntimeError('model'), 'failed')]:
+            service.summarizer.summarize.side_effect = error
+            with patch('news_officer.podcast.latest_rss_episodes', return_value=[self.episode]):
+                self.assertEqual(service.build_daily()[0].status, status)
+            self.assertEqual(self.backlog()['attempts'], 1)
+            self.assertNotEqual(self.backlog()['state'], 'final_skipped')
+
+    def test_missing_text_attempt_cap(self):
+        self.store.defer_daily_transcript(self.episode, 'missing')
+        with self.store._connect() as db:
+            db.execute('UPDATE daily_transcript_backlog SET attempts=71')
+        self.assertFalse(self.store.defer_daily_transcript(self.episode, 'summary', count_failure=False))
+        self.assertTrue(self.store.defer_daily_transcript(self.episode, 'missing'))
+        self.assertEqual(self.backlog()['attempts'], 72)
+
+    def test_hourly_budget_does_not_charge_daily_retry(self):
+        from news_officer.free_proxies import ProxyBudgetExhausted
+        provider = YouTubeTranscriptProvider()
+        with patch.object(provider, '_fetch_api', side_effect=ProxyBudgetExhausted('budget')), \
+                patch.object(provider, '_fetch_captions') as captions, \
+                patch('news_officer.podcast.latest_rss_episodes', return_value=[self.episode]):
+            self.assertEqual(self.service(provider).build_daily()[0].status, 'no_transcript')
+        captions.assert_not_called()
+        self.assertEqual(self.backlog()['attempts'], 0)
+
+    def test_legacy_migration_is_selective_and_runs_once(self):
+        for identity, age, attempts, state in [
+            ('old', 4, 2, 'missing'), ('fresh', 0, 2, 'missing'),
+            ('low', 2, 1, 'missing'), ('done', 2, 3, 'delivered'),
+            ('final', 2, 3, 'final_skipped')]:
+            self.store.defer_daily_transcript(replace(self.episode, id=identity), 'missing')
+            with self.store._connect() as db:
+                db.execute('UPDATE daily_transcript_backlog SET created_at=?, attempts=?, state=? WHERE episode_id=?',
+                           ((datetime.now(UTC) - timedelta(days=age)).isoformat(), attempts, state, identity))
+        with self.store._connect() as db:
+            db.execute('DELETE FROM schema_migrations')
+        self.store.initialize()
+        for identity, expected in [('old', 0), ('fresh', 2), ('low', 1), ('done', 3), ('final', 3)]:
+            self.assertEqual(self.backlog(identity)['attempts'], expected)
+        with self.store._connect() as db:
+            db.execute("UPDATE daily_transcript_backlog SET attempts=5 WHERE episode_id='old'")
+        Store(self.store.path).initialize()
+        self.assertEqual(self.backlog('old')['attempts'], 5)
+        with self.store._connect() as db:
+            db.execute("UPDATE daily_transcript_backlog SET attempts=0 WHERE episode_id='old'")
+        old = replace(self.episode, id='old')
+        self.assertFalse(self.store.defer_daily_transcript(old, 'missing'))
+        self.assertFalse(self.store.defer_daily_transcript(old, 'missing'))
+        self.assertTrue(self.store.defer_daily_transcript(old, 'missing'))
+
     def test_legacy_backlog_with_many_attempts_is_not_finalized_same_day(self):
         self.store.defer_daily_transcript(self.episode, 'missing')
         with self.store._connect() as connection:
@@ -136,8 +213,10 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
         free_proxies._SPENT[:] = [(free_proxies.time.monotonic(), 600.0)]
         fetch = Mock(return_value='x')
         try:
-            with patch.dict('os.environ', {'YOUTUBE_FREE_PROXY_ENABLED': 'true'}):
-                self.assertIsNone(free_proxies.fetch_with_free_proxies(fetch))
+            with (patch.dict('os.environ', {'YOUTUBE_FREE_PROXY_ENABLED': 'true'}),
+                  self.assertLogs('news_officer.free_proxies', level='INFO'),
+                  self.assertRaises(free_proxies.ProxyBudgetExhausted)):
+                free_proxies.fetch_with_free_proxies(fetch)
         finally:
             free_proxies._SPENT.clear()
         fetch.assert_not_called()
@@ -151,6 +230,8 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
             self.assertFalse(self.store.defer_daily_transcript(episode, 'missing'))
             self.assertFalse(self.store.defer_daily_transcript(episode, 'missing'))
             self._age_backlog(episode.id, timedelta(days=1, minutes=1))
+            self.assertFalse(self.store.defer_daily_transcript(episode, 'missing'))
+            self._age_backlog(episode.id, timedelta(days=3, minutes=1))
             self.assertTrue(self.store.defer_daily_transcript(episode, 'missing'))
             reopened = Store(self.store.path)
             self.assertIsNone(reopened.episode_review_state(episode.id))
@@ -192,6 +273,7 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_three_day_retry_cap(self):
+        self.store.defer_daily_transcript(self.episode, 'missing')
         self.store.defer_daily_transcript(self.episode, 'missing')
         with self.store._connect() as db:
             db.execute('UPDATE daily_transcript_backlog SET created_at=?',

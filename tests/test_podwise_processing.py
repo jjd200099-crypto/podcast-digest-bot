@@ -115,7 +115,7 @@ class ProcessingTests(unittest.TestCase):
             self.assertEqual(service.build_daily()[0].status, expected)
         with self.store._connect() as connection:
             connection.execute("UPDATE daily_transcript_backlog SET created_at=?",
-                ((datetime.now(UTC) - timedelta(days=1, minutes=1)).isoformat(),))
+                ((datetime.now(UTC) - timedelta(days=3, minutes=1)).isoformat(),))
         self.assertEqual(service.build_daily()[0].status, 'final_skipped')
         self.provider._process.assert_not_called()
 

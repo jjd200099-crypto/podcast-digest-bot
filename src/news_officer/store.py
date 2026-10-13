@@ -304,6 +304,14 @@ class Store:
                     "record_revision_sha256 TEXT NOT NULL DEFAULT ''"
                 )
 
+            connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)")
+            migration = 'review68_reset_legacy_transcript_attempts'
+            if not connection.execute('SELECT 1 FROM schema_migrations WHERE name=?', (migration,)).fetchone():
+                connection.execute("UPDATE daily_transcript_backlog SET attempts=0 "
+                    "WHERE state NOT IN ('delivered', 'final_skipped') AND attempts>=2 "
+                    "AND julianday(created_at)<julianday(?)", ((datetime.now(UTC) - timedelta(days=1)).isoformat(),))
+                connection.execute('INSERT INTO schema_migrations VALUES (?)', (migration,))
+
     @staticmethod
     def _validate_subscription_target(target_type: str, target_id: str) -> None:
         if target_type not in {"open_id", "chat_id"}:
@@ -1477,10 +1485,10 @@ class Store:
                 'ON CONFLICT(provider_key) DO UPDATE SET retry_at=excluded.retry_at, failures=excluded.failures',
                 (key, retry_at, failures))
 
-    def defer_daily_transcript(self, episode: Episode, state: str, *, retry_at: datetime | None = None) -> bool:
-        """Retain publisher identity, terminating after three attempts or days.
+    def defer_daily_transcript(self, episode: Episode, state: str, *, retry_at: datetime | None = None, count_failure: bool = True) -> bool:
+        """Count missing-full-text failures; back off six hours after 48 misses.
 
-        Return True when the durable backlog entry is final-skipped.
+        Stop after 72 failures, or three failures once the item is three days old.
         """
         value = episode.to_persisted_dict()
         value['metadata'] = episode.metadata
@@ -1488,22 +1496,20 @@ class Store:
         with self._connect() as connection:
             prior = connection.execute('SELECT attempts, created_at, state FROM daily_transcript_backlog WHERE episode_id=?',
                                        (episode.id,)).fetchone()
-            # Retries run every 30 minutes, so a bare attempt count would drop a
-            # podcast whose transcript lands a few hours late (and instantly finalize
-            # legacy rows). The 3-attempt cap only applies once the item is a day old.
             age = now - datetime.fromisoformat(prior['created_at']) if prior else timedelta(0)
-            final = bool(prior and (prior['state'] == 'final_skipped' or age >= timedelta(days=3)
-                         or (prior['attempts'] >= 2 and age >= timedelta(days=1))))
+            final = bool(prior and (prior['state'] == 'final_skipped' or
+                         (count_failure and ((age >= timedelta(days=3) and prior['attempts'] >= 2)
+                                            or prior['attempts'] >= 71))))
             if final:
                 state = 'final_skipped'
             delay = timedelta(hours=6) if prior and prior['attempts'] >= 48 else timedelta(minutes=30)
             next_check = max(now + delay, retry_at) if retry_at else now + delay
             connection.execute(
-                'INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, 1) '
+                'INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(episode_id) DO UPDATE SET state=excluded.state, '
-                'next_check_at=excluded.next_check_at, attempts=attempts+1',
+                'next_check_at=excluded.next_check_at, attempts=attempts+excluded.attempts',
                 (episode.id, json.dumps(value, ensure_ascii=False), state, now.isoformat(),
-                 next_check.isoformat()),
+                 next_check.isoformat(), int(count_failure)),
             )
         if final:
             self.record_episode(episode, 'final_skipped')

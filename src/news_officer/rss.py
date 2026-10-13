@@ -292,7 +292,7 @@ def _youtube_atom_episodes(
         content = entry.find("media:group/media:content", ns)
         duration = _parse_duration(content.get("duration", "")) if content is not None else None
         episode = Episode(
-            id=video_id, title=f"【{show_name}｜{title}】",
+            id=video_id, title=title,
             url=link, show=show_name,
             published_at=_parse_date(entry.findtext("atom:published", "", ns)),
             duration_seconds=duration,
