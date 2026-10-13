@@ -45,7 +45,26 @@ def test_backtest_read_only_stored_floor_and_optional_rescore(tmp_path):
         assert '\t4\t2\tout\t' in output.getvalue()
         for policy in policies:
             policy.assess.assert_called_once()
+        policies[0].assess.side_effect = ValueError("Editorial review failed")
+        policies[1].assess.reset_mock()
+        with redirect_stdout(output):
+            backtest.print_backtest(db, date(2026, 10, 1), date(2026, 10, 1), policies)
+        policies[1].assess.assert_called_once()
+        assert "old: Editorial review failed" in output.getvalue()
+
         import pytest
         with pytest.raises(sqlite3.OperationalError, match='readonly'):
             db.execute("DELETE FROM editorial_reviews")
     assert path.read_bytes() == before
+
+
+def test_missing_database_is_not_created(tmp_path, monkeypatch):
+    import pytest
+
+    missing = tmp_path / "missing.sqlite3"
+    monkeypatch.setattr(
+        "sys.argv", ["backtest_selection.py", str(missing), "2026-10-01", "2026-10-02"]
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        backtest.main()
+    assert not missing.exists()
