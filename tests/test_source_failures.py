@@ -212,7 +212,7 @@ class SourceFailureTests(unittest.TestCase):
             "New episode",
             "https://www.youtube.com/watch?v=kG8AoExkX40",
             "Show",
-            duration_seconds=600,
+            duration_seconds=1200,
             published_at=datetime(2026, 9, 5, tzinfo=UTC),
         )
         service = PodcastService(
@@ -264,7 +264,7 @@ class SourceFailureTests(unittest.TestCase):
         self.assertEqual([candidate.id for candidate in candidates], ["rss:healthy"])
         self.assertEqual(service._last_failed_feeds, ())
 
-    def test_dual_channel_source_is_hard_failure_when_both_are_empty(self):
+    def test_successful_feed_with_only_filtered_entries_is_healthy(self):
         self.feeds.write_text(
             '{"sources": [{"name": "Show", "type": "youtube", '
             '"url": "https://www.youtube.com/@show", '
@@ -275,9 +275,9 @@ class SourceFailureTests(unittest.TestCase):
         with (
             patch("news_officer.podcast.latest_videos", return_value=[]),
             patch("news_officer.podcast.latest_rss_episodes", return_value=[]),
-            self.assertRaises(FeedDiscoveryError),
         ):
-            service.discover_daily_candidates(datetime(2026, 9, 6, tzinfo=UTC))
+            self.assertEqual(service.discover_daily_candidates(datetime(2026, 9, 6, tzinfo=UTC)), [])
+        self.assertEqual(service._last_failed_feeds, ())
 
     def test_unmatched_youtube_episode_survives_rss_merge(self):
         self.feeds.write_text(
@@ -359,7 +359,7 @@ class SourceFailureTests(unittest.TestCase):
             "Title",
             "https://www.youtube.com/watch?v=x",
             "Show",
-            duration_seconds=600,
+            duration_seconds=1200,
             published_at=None,
         )
         service = PodcastService(self.store, self.feeds, FakeSummarizer())
@@ -709,7 +709,7 @@ class SourceFailureTests(unittest.TestCase):
                     "A1",
                     "https://youtu.be/a1",
                     "A one",
-                    duration_seconds=600,
+                    duration_seconds=1200,
                     published_at=datetime(2026, 9, 5, 5, tzinfo=UTC),
                 ),
                 Episode(
@@ -717,7 +717,7 @@ class SourceFailureTests(unittest.TestCase):
                     "A2",
                     "https://youtu.be/a2",
                     "A one",
-                    duration_seconds=600,
+                    duration_seconds=1200,
                     published_at=datetime(2026, 9, 5, 23, tzinfo=UTC),
                 ),
             ],
@@ -727,7 +727,7 @@ class SourceFailureTests(unittest.TestCase):
                     "X1",
                     "https://youtu.be/x1",
                     "A two",
-                    duration_seconds=600,
+                    duration_seconds=1200,
                     published_at=datetime(2026, 9, 5, 20, tzinfo=UTC),
                 ),
                 Episode(
@@ -735,7 +735,7 @@ class SourceFailureTests(unittest.TestCase):
                     "X2",
                     "https://youtu.be/x2",
                     "A two",
-                    duration_seconds=600,
+                    duration_seconds=1200,
                     published_at=datetime(2026, 9, 5, 21, tzinfo=UTC),
                 ),
             ],
@@ -745,7 +745,7 @@ class SourceFailureTests(unittest.TestCase):
                     "B1",
                     "https://youtu.be/b1",
                     "B one",
-                    duration_seconds=600,
+                    duration_seconds=1200,
                     published_at=datetime(2026, 9, 5, 22, tzinfo=UTC),
                 )
             ],

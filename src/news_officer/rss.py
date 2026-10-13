@@ -198,10 +198,12 @@ def latest_rss_episodes(
     limit: int = 4,
     timeout: int = 20,
 ) -> list[Episode]:
-    """Discover dated podcast episodes from the publisher's RSS feed."""
+    """Discover dated podcast RSS or YouTube Atom episodes."""
 
     response = _response(feed_url, timeout=timeout, max_bytes=MAX_FEED_BYTES)
     root = ElementTree.fromstring(response.content)
+    if _local_name(root.tag) == "feed":
+        return _youtube_atom_episodes(root, show_name, feed_url, limit)
     items = root.findall(".//item")
     episodes: list[Episode] = []
     for item in (items if limit == 0 else items[: max(1, limit)]):
@@ -263,6 +265,44 @@ def latest_rss_episodes(
         )
     if not episodes:
         raise ValueError("Official RSS feed contains no valid podcast episodes")
+    return episodes
+
+
+def _youtube_atom_episodes(
+    root: ElementTree.Element, show_name: str, feed_url: str, limit: int
+) -> list[Episode]:
+    """Read official YouTube Atom entries through the bounded RSS fetcher."""
+    from .youtube import YOUTUBE_VIDEO_ID_RE, youtube_skip_reason, youtube_video_id
+
+    ns = {"atom": "http://www.w3.org/2005/Atom",
+          "yt": "http://www.youtube.com/xml/schemas/2015",
+          "media": "http://search.yahoo.com/mrss/"}
+    entries = root.findall("atom:entry", ns)
+    episodes = []
+    for entry in (entries if limit == 0 else entries[:max(1, limit)]):
+        video_id = entry.findtext("yt:videoId", "", ns).strip()
+        title = entry.findtext("atom:title", "", ns).strip()
+        if not YOUTUBE_VIDEO_ID_RE.fullmatch(video_id) or not title:
+            continue
+        link = next((_safe_https_url(node.get("href", ""))
+                     for node in entry.findall("atom:link", ns)
+                     if node.get("rel", "alternate") == "alternate"), None)
+        if link is None or youtube_video_id(link) != video_id:
+            link = f"https://www.youtube.com/watch?v={video_id}"
+        content = entry.find("media:group/media:content", ns)
+        duration = _parse_duration(content.get("duration", "")) if content is not None else None
+        episode = Episode(
+            id=video_id, title=f"【{show_name}｜{title}】",
+            url=link, show=show_name,
+            published_at=_parse_date(entry.findtext("atom:published", "", ns)),
+            duration_seconds=duration,
+            metadata={"rss_feed_url": feed_url, "source_type": "youtube",
+                      "youtube_title": title,
+                      "description": entry.findtext("media:group/media:description", "", ns)},
+        )
+        if not youtube_skip_reason(episode):
+            episodes.append(episode)
+    # A healthy feed containing only clips is still a successful source scan.
     return episodes
 
 

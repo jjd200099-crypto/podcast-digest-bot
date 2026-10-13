@@ -33,7 +33,7 @@ class CuratedSourcesTests(unittest.TestCase):
                 source = configured[name]
                 self.assertEqual(source["type"], "youtube")
                 self.assertEqual(source["priority"], "B")
-                self.assertNotIn("rss_url", source)
+                self.assertIn("rss_url", source)
                 self.assertEqual(source["url"],
                                  f"https://www.youtube.com/channel/{channel_id}/videos")
                 self.assertRegex(source["url"],

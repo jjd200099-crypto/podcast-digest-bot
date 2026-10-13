@@ -23,6 +23,11 @@ from news_officer.youtube import (
 
 
 class YouTubeTranscriptTests(unittest.TestCase):
+    def setUp(self):
+        api = patch.object(YouTubeTranscriptProvider, "_fetch_api", return_value=None)
+        api.start()
+        self.addCleanup(api.stop)
+
     def test_rolling_caption_text_is_merged_without_repetition(self):
         merged = _merge_caption_chunks(
             ["AI agents are", "agents are changing software", "changing software now"]
@@ -174,14 +179,15 @@ agents are changing software
 
     @patch("news_officer.youtube.run")
     @patch("news_officer.youtube._YTDLP_DISABLED_UNTIL", float("inf"))
-    def test_caption_lookup_ignores_the_metadata_circuit_breaker(self, mock_run):
+    @patch.object(YouTubeTranscriptProvider, "_fetch_api", return_value=None)
+    def test_caption_lookup_ignores_the_metadata_circuit_breaker(self, mock_api, mock_run):
         mock_run.return_value = ""
         episode = Episode(
             "kG8AoExkX40",
             "Sam Altman",
             "https://youtu.be/kG8AoExkX40",
             "David Senra",
-            duration_seconds=600,
+            duration_seconds=1200,
         )
 
         transcript = YouTubeTranscriptProvider().fetch(episode)
@@ -195,7 +201,7 @@ agents are changing software
         def write_caption_files(*args, **kwargs):
             temp_dir = Path(args[args.index("-o") + 1]).parent
             (temp_dir / "kG8AoExkX40.info.json").write_text(
-                json.dumps({"duration": 600})
+                json.dumps({"duration": 1200})
             )
             events = [
                 {
@@ -209,7 +215,7 @@ agents are changing software
                         }
                     ],
                 }
-                for index in range(60)
+                for index in range(120)
             ]
             (temp_dir / "kG8AoExkX40.en.json3").write_text(
                 json.dumps({"events": events})
@@ -232,18 +238,19 @@ agents are changing software
         self.assertIn("--write-info-json", mock_run.call_args.args)
 
     @patch("news_officer.youtube.run")
-    def test_caption_timeout_is_a_source_error_not_a_missing_transcript(self, mock_run):
+    def test_caption_timeout_tries_transcript_api(self, mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired("yt-dlp", 60)
         episode = Episode(
             "kG8AoExkX40",
             "Sam Altman",
             "https://youtu.be/kG8AoExkX40",
             "David Senra",
-            duration_seconds=600,
+            duration_seconds=1200,
         )
 
-        with self.assertRaises(subprocess.TimeoutExpired):
-            YouTubeTranscriptProvider().fetch(episode)
+        with patch.object(YouTubeTranscriptProvider, "_fetch_api", return_value=None) as api:
+            self.assertIsNone(YouTubeTranscriptProvider().fetch(episode))
+        api.assert_called_once()
 
     @patch("news_officer.youtube.run")
     def test_latest_videos_ignores_channel_tabs(self, mock_run):
