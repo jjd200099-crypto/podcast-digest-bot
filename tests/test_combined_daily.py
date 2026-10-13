@@ -16,7 +16,7 @@ from test_reliability import (
     runtime,
 )
 
-from news_officer.daily_report import render_daily_summary
+from news_officer.daily_report import episode_summary, render_daily_summary
 from news_officer.feishu import (
     FeishuMessenger,
     combined_delivery_parts,
@@ -128,7 +128,7 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("仍在转写", text)
         self.assertLess(text.index("节目：episode-4"), text.index("节目：episode-0"))
         for item in items[:6]:
-            self.assertIn(render_daily_summary(item.message), text.replace("\n \n", "\n\n"))
+            self.assertIn(render_daily_summary(episode_summary(item)), text.replace("\n \n", "\n\n"))
             self.assertTrue(self.store.episode_is_delivered(item.episode))
         self.assertNotIn('★', text)
         self.assertNotIn('推荐星级', text)

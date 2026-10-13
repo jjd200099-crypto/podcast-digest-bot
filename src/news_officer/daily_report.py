@@ -97,24 +97,41 @@ def compact_paragraphs(markdown, rewriter=None, audit=None):
     ratio = compact_ratio()
     errors = []
     paragraphs = None
+    count_failures = 0
     for _ in range(6):
         if rewriter is None:
             break
         candidate = None
         try:
             candidate = rewriter.rewrite_paragraphs(originals, errors)
-            if not isinstance(candidate, list) or len(candidate) != len(originals):
-                raise ValueError('Keep the original paragraph count')
+            if not isinstance(candidate, list) or len(candidate) < 2:
+                count_failures += 1
+                if count_failures == 2:
+                    errors.append('Expected exactly two paragraphs; using fallback')
+                    break
+                raise ValueError('Return exactly two summary paragraphs')
             candidate = [re.sub(r'(?<=[\u4e00-\u9fff，。；：]) +| +(?=[\u4e00-\u9fff，。；：])', '', p).strip()
                          if isinstance(p, str) else p for p in candidate]
             if not all(isinstance(p, str) for p in candidate):
                 raise ValueError('Paragraphs must be strings')
+            if len([p for p in candidate if p.strip()]) < 2:
+                count_failures += 1
+                if count_failures == 2:
+                    errors.append('Expected exactly two nonempty paragraphs; using fallback')
+                    break
+                raise ValueError('Return exactly two nonempty summary paragraphs')
             issues = []
+            if any(name not in ' '.join(candidate) for source in originals for name in required_prose_names(source)):
+                issues.append('Keep required English proper nouns in their original spelling')
             source_length = sum(map(len, originals))
             output_length = sum(map(len, candidate))
             if not ratio * .85 <= output_length / source_length <= ratio * 1.15:
                 issues.append(f'Use natural prose at ratio {ratio}: source={source_length}, output={output_length}, allowed={math.ceil(source_length * ratio * .85)}–{math.floor(source_length * ratio * 1.15)}; cut at least {max(0, output_length - round(source_length * ratio))} characters to reach target, including EVERY English letter, punctuation and space')
-            for source, short in zip(originals, candidate, strict=True):
+            pairs = (zip(originals, candidate, strict=True) if len(originals) == len(candidate)
+                     else [(' '.join(originals), ' '.join(candidate))])
+            if any(not p or '\n' in p or re.match(r'\s*(?:[-•#*]|\d+[.、)])', p) for p in candidate):
+                issues.append('Keep natural prose paragraphs without bullets or extra newlines')
+            for source, short in pairs:
                 if (not isinstance(short, str) or not short.strip() or '\n' in short
                         or re.match(r'\s*(?:[-•#*]|\d+[.、)])', short)):
                     issues.append('Keep natural prose paragraphs without bullets or extra newlines')
@@ -166,8 +183,10 @@ def compact_paragraphs(markdown, rewriter=None, audit=None):
                     break
                 chosen.add(index)
             paragraphs.append(''.join(sentence for index, sentence in enumerate(sentences) if index in chosen))
+    paragraphs = exactly_two_paragraphs(paragraphs)
+    replacements = ['\n\n'.join(paragraphs)] + [''] * (len(spans) - 1)
     result = markdown
-    for span, short in reversed(list(zip(spans, paragraphs, strict=True))):
+    for span, short in reversed(list(zip(spans, replacements, strict=True))):
         result = result[:span.start()] + short + result[span.end():]
     if audit is not None:
         audit.append({'model': getattr(rewriter, 'model', None), 'fallback': fallback,
@@ -177,10 +196,68 @@ def compact_paragraphs(markdown, rewriter=None, audit=None):
     return result
 
 
+def exactly_two_paragraphs(paragraphs):
+    """Merge surplus prose; split a lone paragraph only at sentence boundaries."""
+    if len(paragraphs) >= 2:
+        return [paragraphs[0], ' '.join(paragraphs[1:])]
+    prose = paragraphs[0]
+    sentences = re.findall(r'[^。！？]+[。！？]?(?:[”’」』])?', prose)
+    if len(sentences) >= 2:
+        split = max(1, len(sentences) // 2)
+        return [''.join(sentences[:split]), ''.join(sentences[split:])]
+    # An indivisible claim cannot be split safely; retain it in both paragraphs.
+    return [prose, prose]
+
+
+def normalize_duration(value):
+    """Use the generator's rounded-minute format for every known duration."""
+    value = str(value or '').strip()
+    seconds = None
+    if re.fullmatch(r'\d+(?:\.\d+)?', value):
+        seconds = float(value)
+    elif re.fullmatch(r'\d+:\d{2}(?::\d{2})?', value):
+        parts = [int(part) for part in value.split(':')]
+        seconds = sum(part * 60 ** index for index, part in enumerate(reversed(parts)))
+    else:
+        match = re.fullmatch(r'(?:(\d+)\s*小时)?\s*(?:(\d+)\s*分(?:钟)?)?\s*(?:(\d+)\s*秒)?', value)
+        if match and any(match.groups()):
+            hours, minutes, secs = (int(part or 0) for part in match.groups())
+            seconds = hours * 3600 + minutes * 60 + secs
+    return f'{round(seconds / 60)} 分钟' if seconds is not None else '未提供'
+
+
+def episode_summary(item):
+    """Prefer archived seconds to inconsistent duration text in generated prose."""
+    episode = item.episode
+    if episode.duration_seconds is not None:
+        duration = normalize_duration(episode.duration_seconds)
+    elif episode.duration_string:
+        duration = normalize_duration(episode.duration_string)
+    else:
+        match = re.search(r'(?m)^时长：([^\n]*)', item.message)
+        duration = normalize_duration(match[1] if match else None)
+    line = '时长：' + duration
+    if re.search(r'(?m)^时长：', item.message):
+        return re.sub(r'(?m)^时长：[^\n]*', lambda _: line, item.message)
+    lines = item.message.splitlines()
+    index = next((i + 1 for i, value in enumerate(lines) if value.startswith('节目：')), 1)
+    lines.insert(index, line)
+    return '\n'.join(lines)
+
+
+def clean_daily_lines(markdown):
+    return '\n'.join(line.rstrip() for line in markdown.split('\n'))
+
+
 def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = True,
                    rewriter=None, rewrite_audit=None, compact: bool = False) -> str:
     """Group one episode's reading and listening links below its prose."""
     content = render_daily_summary(markdown, reader_mode=True)
+    if not re.search(r'(?m)^时长：', content):
+        lines = content.splitlines()
+        index = next((i + 1 for i, line in enumerate(lines) if line.startswith('节目：')), 1)
+        lines.insert(index, '时长：未提供')
+        content = '\n'.join(lines)
     if compact:
         content = compact_paragraphs(content, rewriter, rewrite_audit)
     lines, links = [], []
@@ -220,13 +297,13 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
             body = metadata + body
         rendered = '\n'.join(body).strip()
         rendered = re.sub(r'\n{3,}', '\n\n', rendered)
-    return rendered
+    return clean_daily_lines(rendered)
 
 
 def render_reader_daily(items, documents, *, fulltext: bool = True, ab_preview: bool = False,
                         rewriter=None, rewrite_audit=None, compact: bool = False) -> str:
     """Render fresh episode results without consulting any frozen delivery."""
-    blocks = [reader_episode(item.message, episode_document_url(item.episode, documents),
+    blocks = [reader_episode(episode_summary(item), episode_document_url(item.episode, documents),
                              fulltext=fulltext, rewriter=rewriter, rewrite_audit=rewrite_audit,
                              compact=compact) for item in ranked_daily_items(items)
               if item.status == 'summarized']
@@ -262,8 +339,10 @@ def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode
     markdown = re.sub(r'(?m)^(推荐星级：[★☆]{5})（[1-5]/5，编辑推荐）[ \t]*$', r'\1', markdown)
     advice = {5: '值得编译', 4: '值得看全文', 3: '看摘要', 2: '无关', 1: '无关'}
     # Keep archived scores for ordering/audit, but show only the reading action.
-    return re.sub(r'(?m)^推荐星级：([★☆]{5})(?:｜(?:值得编译|值得看全文|看摘要即可|看摘要|可跳过|无关))?[ \t]*$',
-                  lambda m: '阅读建议：' + advice.get(m[1].count('★'), '未评级'), markdown)
+    markdown = re.sub(r'(?m)^时长：[ \t]*([^\n]*)$',
+                      lambda m: '时长：' + normalize_duration(m[1]), markdown)
+    return clean_daily_lines(re.sub(r'(?m)^推荐星级：([★☆]{5})(?:｜(?:值得编译|值得看全文|看摘要即可|看摘要|可跳过|无关))?[ \t]*$',
+                  lambda m: '阅读建议：' + advice.get(m[1].count('★'), '未评级'), markdown))
 
 
 def ranked_daily_items(items: list[DailyItem]) -> list[DailyItem]:

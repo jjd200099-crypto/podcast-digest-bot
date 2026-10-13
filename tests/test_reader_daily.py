@@ -27,7 +27,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         episode = Episode('flag', 'Show', 'https://example.test/flag', 'Show',
                           published_at=datetime.now(UTC))
         selected = DailyItem(episode, 'summarized', ('## Guest｜产品\n节目：Show｜Show\n\n公司认为需求可能增长。'
-                            '团队强调评测。后段讨论风险。仍需验证。\n推荐理由：评测和风险。\n推荐星级：★★★★☆'))
+                            '团队强调评测。后段讨论风险。仍需验证。更多背景讨论。\n推荐理由：评测和风险。\n推荐星级：★★★★☆'))
         record = self.store.save_verified_transcript(episode,
             Transcript('Complete source', 'official', episode.url, True))
         self.store.save_transcript_digest(selected.episode.id, selected.message,
@@ -35,7 +35,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         selected = replace(selected, attachment=fixtures.attachment_for(record, selected.message))
         instance, job, podcast = self.setup_job([selected])
         model = Mock(model='mock-model')
-        model.rewrite_paragraphs.return_value = ['公司认为需求可能增长。']
+        model.rewrite_paragraphs.return_value = ['公司认为需求可能增长。', '需验证。']
         podcast.summarizer = model
         instance.settings.daily_compact_paragraphs = True
         await instance._handle_daily_job(job)
