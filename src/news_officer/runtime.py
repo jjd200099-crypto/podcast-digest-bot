@@ -701,19 +701,25 @@ class NewsOfficerRuntime:
                 if not callable(getattr(rewriter, 'rewrite_paragraphs', None)):
                     rewriter = None
                 content = reader_episode(episode_summary(item, compact=compact), rewriter=rewriter, compact=compact)
+                strict = strict_selection_enabled()
                 allowed = (stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4)
-                           and (not strict_selection_enabled() or strict_document_allowed(item.message)))
-                template = (reader_episode(content, DOCUMENT_PLACEHOLDER,
-                    fulltext=getattr(settings, 'daily_document_fulltext', False)) if allowed else content)
-                if strict_selection_enabled() and allowed:
-                    label = '精读和完整中文对谈' if getattr(settings, 'daily_document_fulltext', False) else '精读'
-                    lines = content.splitlines()
-                    index = next((i for i, line in enumerate(lines) if line.startswith('[收听节目](')), len(lines))
-                    prose = '\n'.join(lines[:index]).rstrip()
-                    links = '\n'.join(lines[index:]).strip()
-                    template = prose + f'\n\n[{label}]({DOCUMENT_PLACEHOLDER})'
-                    if links:
-                        template += '\n\n' + links
+                           and (not strict or strict_document_allowed(item.message)))
+                if strict:
+                    template = content
+                    if allowed:
+                        label = '精读和完整中文对谈' if getattr(settings, 'daily_document_fulltext', False) else '精读'
+                        lines = content.splitlines()
+                        index = next((i for i, line in enumerate(lines) if line.startswith('[收听节目](')), len(lines))
+                        prose = '\n'.join(lines[:index]).rstrip()
+                        links = '\n'.join(lines[index:]).strip()
+                        template = prose + f'\n\n[{label}]({DOCUMENT_PLACEHOLDER})'
+                        if links:
+                            template += '\n\n' + links
+                else:
+                    # Preserve legacy bytes and reading-before-listening link order.
+                    # Reuse compact prose without another model call.
+                    template = reader_episode(content if compact else item.message, DOCUMENT_PLACEHOLDER,
+                        fulltext=getattr(settings, 'daily_document_fulltext', False))
                 published = item.episode.published_at
                 if published and published < start:
                     prefix = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n'
@@ -727,8 +733,9 @@ class NewsOfficerRuntime:
                 blocks.append(content)
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')
-        from .daily_report import clean_daily_lines
-        blocks = [clean_daily_lines(block) for block in blocks]
+        if getattr(settings, 'daily_compact_paragraphs', False):
+            from .daily_report import clean_daily_lines
+            blocks = [clean_daily_lines(block) for block in blocks]
         markdown = ("\n\n" if reader_mode else "\n\n---\n\n").join(blocks)
         if reader_mode:
             from .daily_report import compact_reader_episode
