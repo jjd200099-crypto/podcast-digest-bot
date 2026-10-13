@@ -348,6 +348,9 @@ def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode
         r'(?m)(^推荐理由：[^\r\n]*?)（AI \d+/40，投资 \d+/20，研究关联 \d+/5，增量 \d+/20，论据 \d+/15）[ \t]*$',
         r'\1', markdown)
     markdown = re.sub(r'(?m)^(推荐星级：[★☆]{5})（[1-5]/5，编辑推荐）[ \t]*$', r'\1', markdown)
+    if '<!-- strict-selection-v1 -->' in markdown:
+        markdown = markdown.replace('<!-- strict-selection-v1 -->\n', '')
+        markdown = re.sub(r'(?m)^推荐星级：[^\n]*\n?', '', markdown)
     advice = {5: '值得编译', 4: '值得看全文', 3: '看摘要', 2: '无关', 1: '无关'}
     # Keep archived scores for ordering/audit, but show only the reading action.
     return re.sub(r'(?m)^推荐星级：([★☆]{5})(?:｜(?:值得编译|值得看全文|看摘要即可|看摘要|可跳过|无关))?[ \t]*$',

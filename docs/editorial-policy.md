@@ -94,3 +94,9 @@ These checks detect structural omissions, not every possible semantic error.
 Only an exact, unedited legacy generated appendix can be replaced, with an optimistic
 document revision and frozen recoverable backup; front notes are preserved.
 No broader sharing permissions or chat attachments are added.
+
+## 严格选择（可选）
+
+`NEWS_OFFICER_STRICT_SELECTION=true` 启用严格规则（默认 false）。相关度不足 4 的 priority 直接取消，不重试；低证据、未经核验猜测或个人观点主导内容不适用四星保底且低于收录线。仅松散相关于 AI/投资的内容也低于收录线。模型输出 `evidence_quality` 和 `reading_recommendation`；阅读建议受实际判断约束，字段缺失时安全降为不收录。严格模式使用独立缓存，关闭后继续使用原规则及原格式。
+
+摘要上限为正数时，所有候选先完成评分再按星级排序取前 N，平分保持发现顺序，不预留来源配额。默认上限 0 不限制。只读历史回测脚本及数据重建限制见 README。
