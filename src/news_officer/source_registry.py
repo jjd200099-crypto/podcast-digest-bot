@@ -37,7 +37,7 @@ class SourceRegistry:
                 for u in configured["youtube_channels"]
             ]
         result = [
-            dict(s, origin="configured") for s in sources if s.get("enabled", True)
+            dict(s, origin="configured") for s in sources if s.get("enabled", True) and s.get("type") != "text"
         ]
         with self.store._connect() as db:
             rows = db.execute(

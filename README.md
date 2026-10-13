@@ -193,6 +193,10 @@ previously frozen send byte for byte.
 
 只读回测：`PYTHONPATH=src python scripts/backtest_selection.py /path/state.sqlite3 2026-10-01 2026-10-07`。默认只读取 SQLite（`mode=ro`），不调用服务或写入数据库。加 `--rescore --model MODEL` 可显式调用现有 `EditorialPolicy.assess` 分别使用旧、新规则评分（会向 LLM 发送存档全文并产生费用），评分缓存为不写入的内存接口。输出存档星级、相关度、密度、priority、去掉保底后的星级及保底是否抬分、新旧重评分、入选与理由。使用 `jobs` 日报时间、`job_results` 的 daily_item、执行时间内的 `editorial_reviews` 与 `episode_transcripts` 重建候选；历史未保存的发现结果无法恢复，时间窗口归属为近似。历史全文被替换后可能与原评分不匹配，此时去保底星级显示 `?`。
 
+### 文字来源（默认关闭）
+
+`NEWS_OFFICER_TEXT_SOURCES=false`（默认关闭）不加载或请求文字来源，也不加入文字日报条目。设为 `true`（也支持 `1`、`yes`、`on`）后，`feeds.json` 中 `type: "text"` 的博客/通讯进入现有全文存档、评分、筛选和日报流程，标题为【来源｜标题】。`mode: "rss"` 使用 `rss_url`（支持无音频 RSS 和 Atom）；`mode: "html"` 使用 `index_url` 和 `link_regex`，可用 `exclude_regex` 排除目录。文章页面必须提供可提取的 article/main 正文，发布日期来自 feed 或页面元数据；缺少日期不进日报，不用抓取时间冒充发布日期。`free_only: true` 跳过少于 1000 字符或含付费提示的正文（SemiAnalysis、Stratechery 已启用）。全文先存入现有 SQLite 文字稿存储，再评分和摘要；单篇或单源失败独立处理。HTTP 请求沿用环境代理、20 秒超时和受限公共 HTTPS 下载。
+
 ### 完整对谈的新排版（默认关闭）
 
 `NEWS_OFFICER_DEEPREAD_NEW_STYLE=true` 为飞书精读启用“核心内容＋QA 整理”：详细核心 bullets、按原始顺序编号的话题章节、真实说话人姓名、保留第一人称与完整实质对谈。删除广告、开场重复剪辑及无信息语气词，修复可确认的 ASR 错误，English 专有名词保持 English。未确认的身份保留原稿标签。

@@ -1,0 +1,149 @@
+"""Offline article fixtures; compatible with pytest and CI unittest discovery."""
+import json
+import os
+import tempfile
+import unittest
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from news_officer.feishu import _post_elements
+from news_officer.podcast import (
+    PodcastService,
+    TranscriptResolver,
+    load_youtube_sources,
+)
+from news_officer.store import Store
+from news_officer.text_sources import (
+    article_links,
+    discover_articles,
+    extract_article,
+    load_text_sources,
+)
+
+ARTICLE = '<html><nav>noise</nav><article><h1>AI systems</h1><time datetime="2026-10-13T00:00:00Z"></time><p>' + ('Evidence and detailed analysis. ' * 100) + '</p><script>noise</script></article></html>'
+RSS = '<rss><channel><item><title>AI systems</title><link>https://example.org/post/ai</link><pubDate>Tue, 13 Oct 2026 00:00:00 GMT</pubDate><description>Only an excerpt</description></item></channel></rss>'
+ATOM = '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>AI systems</title><link href="https://example.org/post/ai"/><published>2026-10-13T00:00:00Z</published><summary>Excerpt</summary></entry></feed>'
+INDEX = '<a href="/post/ai">AI</a><a href="/post/ai#intro">Again</a><a href="/about">About</a><a href="https://evil.org/post/ai">Outside</a>'
+
+
+class TextSourcesTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'feeds.json'
+        self.source = {'name': 'Lilian Weng', 'type': 'text', 'mode': 'rss',
+                       'rss_url': 'https://example.org/feed'}
+        self.path.write_text(json.dumps({'sources': [self.source]}))
+        self.flag = patch.dict(os.environ, {'NEWS_OFFICER_TEXT_SOURCES': 'true'})
+        self.flag.start()
+        self.addCleanup(self.flag.stop)
+
+    def test_rss_without_audio_and_atom_fetch_full_page(self):
+        for feed in (RSS, ATOM):
+            with self.subTest(feed=feed), patch('news_officer.text_sources._fetch', side_effect=[feed, ARTICLE]):
+                [(episode, transcript)] = discover_articles(self.source)
+                self.assertEqual(episode.show, 'Lilian Weng')
+                self.assertEqual(episode.published_at, datetime(2026, 10, 13, tzinfo=UTC))
+                self.assertIn('Evidence and detailed analysis.', transcript.text)
+                self.assertNotIn('Excerpt', transcript.text)
+                self.assertTrue(transcript.verified_complete)
+
+    def test_html_index_dedup_and_main_text(self):
+        source = {'name': 'Author', 'mode': 'html', 'index_url': 'https://example.org/',
+                  'link_regex': '^/post/'}
+        self.assertEqual(article_links(INDEX, source), ['https://example.org/post/ai'])
+        with patch('news_officer.text_sources._fetch', side_effect=[INDEX, ARTICLE]) as fetch:
+            [(episode, transcript)] = discover_articles(source)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(episode.title, 'AI systems')
+        self.assertNotIn('noise', transcript.text)
+        self.assertEqual(extract_article('<nav>Navigation only</nav>')[1], '')
+
+    def test_paywall_and_truncation_skipped(self):
+        for body in ('short', 'Subscribe to read ' + 'text ' * 500,
+                     'Stratechery Plus ' + 'text ' * 500, 'This is a paid ' + 'text ' * 500):
+            with patch('news_officer.text_sources._fetch', side_effect=[RSS, f'<article>{body}</article>']):
+                self.assertEqual(discover_articles(dict(self.source, free_only=True)), [])
+
+    def test_flag_off_never_loads_or_fetches(self):
+        store = Store(Path(self.temp.name) / 'state.db')
+        store.initialize()
+        for value in ('', 'false', '0'):
+            with patch.dict(os.environ, {'NEWS_OFFICER_TEXT_SOURCES': value}), \
+                    patch('news_officer.podcast.discover_articles') as fetch:
+                self.assertEqual(load_text_sources(self.path), [])
+                self.assertEqual(load_youtube_sources(self.path), [])
+                self.assertEqual(PodcastService(store, self.path, Mock()).build_daily(), [])
+                fetch.assert_not_called()
+        with patch.dict(os.environ, {'NEWS_OFFICER_TEXT_SOURCES': ''}):
+            self.assertEqual(load_text_sources(Path('/missing')), [])
+
+    def test_full_text_persisted_before_scoring_and_summary_and_daily_title(self):
+        store = Store(Path(self.temp.name) / 'state.db')
+        store.initialize()
+        def assess(episode, transcript):
+            self.assertEqual(store.get_verified_transcript(episode.id).transcript.text, transcript.text)
+            return {'selected': True, 'stars': 4}
+        def summarize(episode, transcript):
+            self.assertEqual(store.get_verified_transcript(episode.id).transcript.text, transcript.text)
+            return '## Model title\n节目：Lilian Weng｜AI systems\nSummary'
+        editorial = Mock(assess=Mock(side_effect=assess))
+        editorial.apply.side_effect = lambda summary, decision: summary
+        service = PodcastService(store, self.path, Mock(summarize=Mock(side_effect=summarize)),
+                                 editorial_policy=editorial, daily_rss_only=True)
+        with patch('news_officer.text_sources._fetch', side_effect=[RSS, ARTICLE]):
+            [item] = service.build_daily(datetime(2026, 10, 13, 1, tzinfo=UTC))
+        self.assertEqual(item.status, 'summarized')
+        self.assertEqual(store.get_verified_transcript(item.episode.id).episode.metadata['source_type'], 'text')
+        self.assertEqual(_post_elements(item.message.splitlines()[0])[0]['text'], '【Lilian Weng｜AI systems】')
+        with patch.dict(os.environ, {'NEWS_OFFICER_TEXT_SOURCES': 'false'}):
+            self.assertEqual(service.build_daily(pending=[item.episode]), [])
+
+    def test_source_and_article_failures_are_isolated(self):
+        bad = dict(self.source, name='Broken', rss_url='https://broken.org/feed')
+        self.path.write_text(json.dumps({'sources': [bad, self.source]}))
+        store = Store(Path(self.temp.name) / 'state.db')
+        store.initialize()
+        with patch('news_officer.text_sources._fetch', side_effect=[TimeoutError(), RSS, ARTICLE]):
+            candidates = PodcastService(store, self.path, Mock()).discover_daily_candidates(
+                datetime(2026, 10, 13, 1, tzinfo=UTC))
+        self.assertEqual(len(candidates), 1)
+        with patch('news_officer.text_sources._fetch', side_effect=[RSS, TimeoutError()]):
+            self.assertEqual(discover_articles(self.source), [])
+
+    def test_configured_sources_and_first_round_exclusions(self):
+        sources = load_text_sources(Path(__file__).resolve().parents[1] / 'feeds.json')
+        self.assertEqual(len(sources), 10)
+        self.assertEqual({s['name'] for s in sources if s.get('free_only')},
+                         {'SemiAnalysis', 'Stratechery'})
+        first = next(s for s in sources if s['name'] == 'First Round')
+        page = ('<a href="/articles/ai/">Category</a><a href="/glossary/ai/">Glossary</a>'
+                '<a href="https://review.firstround.com/building-ai-products/">Article</a>')
+        self.assertEqual(article_links(page, first),
+                         ['https://review.firstround.com/building-ai-products/'])
+
+    def test_flag_off_matches_legacy_daily_bytes(self):
+        podcast = {'name': 'Podcast', 'type': 'rss', 'rss_url': 'https://example.org/podcast'}
+        from news_officer.models import Episode, Transcript
+        episode = Episode('rss:podcast', 'AI interview', 'https://example.org/interview',
+                          'Podcast', published_at=datetime(2026, 10, 13, tzinfo=UTC))
+        outputs = []
+        with patch.dict(os.environ, {'NEWS_OFFICER_TEXT_SOURCES': 'false'}), \
+                patch('news_officer.podcast.latest_rss_episodes', return_value=[episode]), \
+                patch('news_officer.podcast.discover_articles') as article_fetch:
+            for index, sources in enumerate(([podcast], [podcast, self.source])):
+                self.path.write_text(json.dumps({'sources': sources}))
+                store = Store(Path(self.temp.name) / f'legacy-{index}.db')
+                store.initialize()
+                service = PodcastService(store, self.path, Mock(summarize=Mock(return_value='## Podcast｜AI\nSummary')),
+                                         daily_rss_only=True,
+                                         transcript_resolver=TranscriptResolver([Mock(
+                                             supports_url=Mock(return_value=False),
+                                             fetch=Mock(return_value=Transcript(
+                                                 'Full interview', 'publisher', episode.url, True)))]))
+                items = service.build_daily(datetime(2026, 10, 13, 1, tzinfo=UTC))
+                outputs.append(json.dumps([item.to_persisted_dict() for item in items],
+                                          sort_keys=True).encode())
+            self.assertEqual(outputs[0], outputs[1])
+            article_fetch.assert_not_called()
