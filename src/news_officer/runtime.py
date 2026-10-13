@@ -690,21 +690,33 @@ class NewsOfficerRuntime:
             # Freeze the prose now; independent jobs enrich this same message.
             from .daily_enrichment import DOCUMENT_PLACEHOLDER
             from .episode_document import stars
+            from .strict_selection import (
+                strict_document_allowed,
+                strict_selection_enabled,
+            )
             sections, eligible = [], []
             for item in summaries:
                 compact = getattr(settings, 'daily_compact_paragraphs', False)
                 rewriter = getattr(self.podcast_service, 'summarizer', None) if compact else None
                 if not callable(getattr(rewriter, 'rewrite_paragraphs', None)):
                     rewriter = None
-                content = reader_episode(episode_summary(item), rewriter=rewriter, compact=compact)
-                template = reader_episode(content, DOCUMENT_PLACEHOLDER,
-                    fulltext=getattr(settings, 'daily_document_fulltext', False))
+                content = reader_episode(episode_summary(item, compact=compact), rewriter=rewriter, compact=compact)
+                allowed = (stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4)
+                           and (not strict_selection_enabled() or strict_document_allowed(item.message)))
+                template = (reader_episode(content, DOCUMENT_PLACEHOLDER,
+                    fulltext=getattr(settings, 'daily_document_fulltext', False)) if allowed else content)
+                if strict_selection_enabled():
+                    label = '精读和完整中文对谈' if getattr(settings, 'daily_document_fulltext', False) else '精读'
+                    template = content + f'\n\n[{label}]({DOCUMENT_PLACEHOLDER})' if allowed else content
                 published = item.episode.published_at
                 if published and published < start:
                     prefix = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n'
                     content, template = prefix + content, prefix + template
-                sections.append({'episode_id': item.episode.id, 'body': content, 'template': template})
-                if stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4):
+                section = {'episode_id': item.episode.id, 'body': content, 'template': template}
+                if strict_selection_enabled():
+                    section['strict_document_allowed'] = allowed
+                sections.append(section)
+                if allowed:
                     eligible.append(item.episode.id)
                 blocks.append(content)
             if not summaries:

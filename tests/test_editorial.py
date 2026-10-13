@@ -84,7 +84,7 @@ class EditorialTests(unittest.TestCase):
                 value.relevance.priority = topic
                 decision = decide(value, FULL_TEXT)
                 self.assertTrue(decision['selected'])
-                self.assertEqual(decision['stars'], 5 if density == 5 else 4)
+                self.assertEqual(decision['stars'], 5 if density == 5 else (4 if density >= 3 else 3))
                 self.assertEqual(decision['assessment']['density']['score'], density)
 
     def test_priority_requires_valid_relevance_evidence(self):
@@ -102,7 +102,7 @@ class EditorialTests(unittest.TestCase):
         value.relevance.priority = 'model_lab'
         resolved = resolve_evidence(value, [TEXT])
         self.assertEqual(resolved.relevance.priority, 'model_lab')
-        self.assertEqual(decide(resolved, TEXT)['stars'], 4)
+        self.assertEqual(decide(resolved, TEXT)['stars'], 3)
         raw = value.model_dump()
         raw['relevance'].pop('priority')
         with self.assertRaises(ValueError):
@@ -260,27 +260,96 @@ class EditorialTests(unittest.TestCase):
         from news_officer.editorial import StrictAssessment
         for quality, advice, stars in [('low', '值得看全文', 2),
                                       ('mixed', '看摘要', 3),
-                                      ('high', '值得看全文', 4)]:
+                                      ('high', '值得看全文', 3)]:
             raw = assessment(relevance=5, density=2).model_dump()
             raw['relevance']['priority'] = 'model_lab'
             raw.update(evidence_quality=quality, reading_recommendation=advice)
             result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
             self.assertEqual(result['stars'], stars)
             rendered = render_daily_summary(EditorialPolicy.apply(SUMMARY, result))
-            if quality == 'low' or advice == '看摘要':
+            if stars <= 3:
                 self.assertNotIn('值得看全文', rendered)
             else:
                 self.assertIn('阅读建议：值得看全文', rendered)
             self.assertEqual(decide(assessment(relevance=5, density=2), FULL_TEXT)['stars'], 2)
 
-    def test_strict_missing_judgement_falls_back_and_has_separate_cache(self):
+    def test_strict_fields_are_required_and_reprompted(self):
+        from news_officer.editorial import StrictAssessment, StrictSourceAssessment
+        for field in ('evidence_quality', 'reading_recommendation'):
+            for schema, raw in ((StrictAssessment, assessment().model_dump()),
+                                (StrictSourceAssessment, source_assessment().model_dump())):
+                raw.update(evidence_quality='high', reading_recommendation='值得看全文')
+                raw.pop(field)
+                with self.assertRaises(ValueError):
+                    schema.model_validate(raw)
+            valid = source_assessment().model_dump()
+            valid.update(evidence_quality='high', reading_recommendation='值得看全文')
+            invalid = dict(valid)
+            invalid.pop(field)
+            client = Mock()
+            client.responses.create.side_effect = [SimpleNamespace(output_text=json.dumps(v))
+                                                   for v in (invalid, valid)]
+            policy = EditorialPolicy(client, field, self.store, strict=True)
+            self.assertTrue(policy.assess(self.episode, self.transcript)['selected'])
+            self.assertEqual(client.responses.create.call_count, 2)
+
+    def test_strict_contradictory_evidence_reprompts(self):
+        invalid = source_assessment().model_dump()
+        invalid.update(evidence_quality='low', reading_recommendation='值得看全文')
+        valid = {**invalid, 'evidence_quality': 'high'}
         client = Mock()
-        client.responses.create.return_value = SimpleNamespace(output_text=source_assessment().model_dump_json())
-        old = EditorialPolicy(client, 'same', self.store, strict=False)
-        new = EditorialPolicy(client, 'same', self.store, strict=True)
-        self.assertTrue(old.assess(self.episode, self.transcript)['selected'])
-        self.assertFalse(new.assess(self.episode, self.transcript)['selected'])
+        client.responses.create.side_effect = [SimpleNamespace(output_text=json.dumps(v))
+                                               for v in (invalid, valid)]
+        result = EditorialPolicy(client, 'contradiction', self.store, strict=True).assess(
+            self.episode, self.transcript)
+        self.assertEqual(result['stars'], 4)
         self.assertEqual(client.responses.create.call_count, 2)
+
+    def test_capped_failures_backfill_and_schedule_retry(self):
+        from news_officer.summarizer import SummaryFormatError
+        for editorial in (False, True):
+            for error in (SummaryFormatError('invalid'), RuntimeError('offline')):
+                with self.subTest(editorial=editorial, error=type(error).__name__):
+                    policy = Mock() if editorial else None
+                    if policy:
+                        policy.assess.side_effect = [decide(assessment(relevance=r, density=d), FULL_TEXT)
+                                                    for r, d in ((4, 4), (5, 5), (3, 3), (3, 3))]
+                        policy.apply.side_effect = EditorialPolicy.apply
+                    summarizer = Mock()
+                    summarizer.summarize.side_effect = [error, SUMMARY]
+                    resolver = Mock()
+                    resolver.fetch.return_value = self.transcript
+                    service = PodcastService(self.store, self.root / 'feeds.json', summarizer,
+                                             resolver, editorial_policy=policy, max_daily_summaries=1)
+                    prefix = f'{editorial}-{type(error).__name__}'
+                    candidates = [Episode(prefix + str(i), str(i), f'https://example.org/{prefix}/{i}',
+                                          'Show', published_at=datetime.now(UTC)) for i in range(4)]
+                    service.discover_daily_candidates = Mock(return_value=candidates)
+                    before = datetime.now(UTC)
+                    items = service.build_daily()
+                    self.assertEqual(summarizer.summarize.call_count, 2)
+                    expected = candidates[0 if editorial else 1].id
+                    self.assertEqual([i.episode.id for i in items if i.status == 'summarized'], [expected])
+                    failed = candidates[1 if editorial else 0].id
+                    with self.store._connect() as db:
+                        row = db.execute('SELECT next_check_at FROM daily_transcript_backlog WHERE episode_id=?',
+                                         (failed,)).fetchone()
+                    delay = (datetime.fromisoformat(row[0]) - before).total_seconds()
+                    self.assertGreaterEqual(delay, 1800)
+                    self.assertLess(delay, 1810)
+
+    def test_legacy_cap_summarizes_only_selected_candidates(self):
+        summarizer = Mock()
+        summarizer.summarize.return_value = SUMMARY
+        resolver = Mock()
+        resolver.fetch.return_value = self.transcript
+        service = PodcastService(self.store, self.root / 'feeds.json', summarizer,
+                                 resolver, max_daily_summaries=1)
+        service.discover_daily_candidates = Mock(return_value=[
+            Episode(str(i), str(i), f'https://example.org/{i}', 'Show',
+                    published_at=datetime.now(UTC)) for i in range(4)])
+        self.assertEqual([i.episode.id for i in service.build_daily()], ['0'])
+        self.assertEqual(summarizer.summarize.call_count, 1)
 
     def test_cap_scores_all_candidates_then_selects_highest_stably(self):
         policy = Mock()
@@ -326,6 +395,10 @@ class EditorialTests(unittest.TestCase):
             raw = assessment(relevance=relevance, density=5).model_dump()
             raw['relevance']['priority'] = 'model_lab'
             raw.update(evidence_quality=quality, reading_recommendation='值得编译')
+            if quality == 'low':
+                with self.assertRaises(ValueError):
+                    decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
+                continue
             result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
             self.assertLess(result['stars'], 3)
             self.assertFalse(result['selected'])

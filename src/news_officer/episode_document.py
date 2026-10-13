@@ -13,6 +13,7 @@ from .document_transcript import fulltext_identity, render_fulltext
 from .library import LibraryError
 from .models import IncomingMessage
 from .shownotes import VERSION, note_identity, text_node
+from .strict_selection import strict_document_allowed, strict_selection_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -174,9 +175,13 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         selected = []
         for item, record in records:
             digest = self.store.get_transcript_digest(record.episode.id) or item.message
-            if stars(digest) >= self.min_stars:
+            if strict_selection_enabled():
+                digest = item.message
+            if (stars(digest) >= self.min_stars
+                    and (not strict_selection_enabled() or strict_document_allowed(digest))):
                 selected.append((item, record))
-        selected.sort(key=lambda pair: -stars(self.store.get_transcript_digest(pair[1].episode.id) or pair[0].message))
+        selected.sort(key=lambda pair: -stars(pair[0].message if strict_selection_enabled() else
+                                             self.store.get_transcript_digest(pair[1].episode.id) or pair[0].message))
         manifest = [(r.episode.id, self.document_identity(r)) for _, r in selected]
         revision = hashlib.sha256(json.dumps([VERSION, self.min_stars, manifest]).encode()).hexdigest()
         return revision, selected, []
@@ -290,6 +295,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 return None
             documents = []
             for item, record in records:
+                if not requested and strict_selection_enabled() and not strict_document_allowed(item.message):
+                    continue
                 if not self._attempt_available(record, self.today()):
                     deferred = True
                     continue
@@ -298,7 +305,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 key = 'episode:' + record.episode.id
                 published = record.episode.published_at.isoformat()[:10] if record.episode.published_at else day
                 title = f'{record.episode.title}｜{record.episode.show}｜{published}'
-                digest = self.store.get_transcript_digest(record.episode.id) or item.message
+                digest = (item.message if not requested and strict_selection_enabled() else
+                          self.store.get_transcript_digest(record.episode.id) or item.message)
                 with self.store._connect() as db:
                     previous = db.execute('SELECT nodes_json,entries_json FROM daily_documents WHERE day=?', (key,)).fetchone()
                 entries = json.loads(previous['entries_json']) if previous else []
@@ -357,7 +365,10 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         links = []
         for document in bundle['documents']:
             # An older pending batch must not bypass a newly raised threshold.
-            if not requested and document['stars'] < self.min_stars:
+            if not requested and (document['stars'] < self.min_stars or
+                    (strict_selection_enabled() and not any(
+                        r.episode.id == document['key'].removeprefix('episode:')
+                        and strict_document_allowed(i.message) for i, r in records))):
                 continue
             if not self.include_fulltext and any(e.startswith('fulltext:') for e in document['entries']):
                 raise ValueError('全文发布授权已关闭，停止写入冻结的全文文档')

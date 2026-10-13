@@ -7,6 +7,7 @@ import re
 from collections import Counter
 
 from .models import DailyItem
+from .strict_selection import strict_document_allowed, strict_selection_enabled
 from .summarizer import remove_editorial_leadins
 
 
@@ -32,7 +33,7 @@ def summary_paragraph_spans(markdown):
     """Locate prose only, retaining every surrounding byte of the layout."""
     return [match for match in re.finditer(r'(?m)^[^\n]+$', markdown)
             if match.group().strip() and not match.group().strip().startswith(
-                ('#', '**', '节目：', '时长：', '链接：', '推荐理由：', '阅读建议：', '['))]
+                ('#', '**', '节目：', '时长：', '链接：', '节目链接：', '收听链接：', '推荐理由：', '阅读建议：', '['))]
 
 
 def required_prose_names(source):
@@ -210,12 +211,12 @@ def exactly_two_paragraphs(paragraphs):
     if len(sentences) >= 2:
         split = max(1, len(sentences) // 2)
         return [''.join(sentences[:split]), ''.join(sentences[split:])]
-    # An indivisible claim cannot be split safely; retain it in both paragraphs.
-    return [prose, prose]
+    # An indivisible claim stays in a single paragraph.
+    return [prose]
 
 
 def normalize_duration(value):
-    """Use the generator's rounded-minute format for every known duration."""
+    """Round positive known durations to minutes; retain unparseable text."""
     value = str(value or '').strip()
     seconds = None
     if re.fullmatch(r'\d+(?:\.\d+)?', value):
@@ -228,11 +229,15 @@ def normalize_duration(value):
         if match and any(match.groups()):
             hours, minutes, secs = (int(part or 0) for part in match.groups())
             seconds = hours * 3600 + minutes * 60 + secs
-    return f'{round(seconds / 60)} 分钟' if seconds is not None else '未提供'
+    if seconds is not None:
+        return f'{round(seconds / 60)} 分钟' if seconds > 0 else '未提供'
+    return value or '未提供'
 
 
-def episode_summary(item):
-    """Prefer archived seconds to inconsistent duration text in generated prose."""
+def episode_summary(item, *, compact=False):
+    """In compact mode, prefer archived seconds to generated duration text."""
+    if not compact:
+        return item.message
     episode = item.episode
     if episode.duration_seconds is not None:
         duration = normalize_duration(episode.duration_seconds)
@@ -258,12 +263,14 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
                    rewriter=None, rewrite_audit=None, compact: bool = False) -> str:
     """Group one episode's reading and listening links below its prose."""
     content = render_daily_summary(markdown, reader_mode=True)
-    if not re.search(r'(?m)^时长：', content):
+    if compact and not re.search(r'(?m)^时长：', content):
         lines = content.splitlines()
         index = next((i + 1 for i, line in enumerate(lines) if line.startswith('节目：')), 1)
         lines.insert(index, '时长：未提供')
         content = '\n'.join(lines)
     if compact:
+        content = re.sub(r'(?m)^时长：[^\n]*',
+                         lambda m: '时长：' + normalize_duration(m[0][3:]), content)
         content = compact_paragraphs(content, rewriter, rewrite_audit)
     lines, links = [], []
     for line in content.splitlines():
@@ -280,7 +287,7 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
         if clean.startswith('节目：') or (not any(v.strip() for v in lines) and clean and not clean.startswith('#')):
             line = '**' + clean + '**'
         lines.append(line)
-    if document_url:
+    if document_url and (not strict_selection_enabled() or strict_document_allowed(markdown)):
         label = '精读和完整中文对谈' if fulltext else '精读'
         lines.extend(['', f'[{label}]({document_url})'])
     if links:
@@ -302,13 +309,13 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
             body = metadata + body
         rendered = '\n'.join(body).strip()
         rendered = re.sub(r'\n{3,}', '\n\n', rendered)
-    return clean_daily_lines(rendered)
+    return clean_daily_lines(rendered) if compact else rendered
 
 
 def render_reader_daily(items, documents, *, fulltext: bool = True, ab_preview: bool = False,
                         rewriter=None, rewrite_audit=None, compact: bool = False) -> str:
     """Render fresh episode results without consulting any frozen delivery."""
-    blocks = [reader_episode(episode_summary(item), episode_document_url(item.episode, documents),
+    blocks = [reader_episode(episode_summary(item, compact=compact), episode_document_url(item.episode, documents),
                              fulltext=fulltext, rewriter=rewriter, rewrite_audit=rewrite_audit,
                              compact=compact) for item in ranked_daily_items(items)
               if item.status == 'summarized']
@@ -343,14 +350,12 @@ def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode
         r'\1', markdown)
     markdown = re.sub(r'(?m)^(推荐星级：[★☆]{5})（[1-5]/5，编辑推荐）[ \t]*$', r'\1', markdown)
     if '<!-- strict-selection-v1 -->' in markdown:
-        markdown = markdown.replace('<!-- strict-selection-v1 -->\n', '')
         markdown = re.sub(r'(?m)^推荐星级：[^\n]*\n?', '', markdown)
+    markdown = re.sub(r'<!--.*?-->\n?', '', markdown, flags=re.DOTALL)
     advice = {5: '值得编译', 4: '值得看全文', 3: '看摘要', 2: '无关', 1: '无关'}
     # Keep archived scores for ordering/audit, but show only the reading action.
-    markdown = re.sub(r'(?m)^时长：[ \t]*([^\n]*)$',
-                      lambda m: '时长：' + normalize_duration(m[1]), markdown)
-    return clean_daily_lines(re.sub(r'(?m)^推荐星级：([★☆]{5})(?:｜(?:值得编译|值得看全文|看摘要即可|看摘要|可跳过|无关))?[ \t]*$',
-                  lambda m: '阅读建议：' + advice.get(m[1].count('★'), '未评级'), markdown))
+    return re.sub(r'(?m)^推荐星级：([★☆]{5})(?:｜(?:值得编译|值得看全文|看摘要即可|看摘要|可跳过|无关))?[ \t]*$',
+                  lambda m: '阅读建议：' + advice.get(m[1].count('★'), '未评级'), markdown)
 
 
 def ranked_daily_items(items: list[DailyItem]) -> list[DailyItem]:
