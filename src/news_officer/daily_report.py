@@ -199,7 +199,12 @@ def compact_paragraphs(markdown, rewriter=None, audit=None):
 def exactly_two_paragraphs(paragraphs):
     """Merge surplus prose; split a lone paragraph only at sentence boundaries."""
     if len(paragraphs) >= 2:
-        return [paragraphs[0], ' '.join(paragraphs[1:])]
+        merged = paragraphs[1].strip()
+        for paragraph in paragraphs[2:]:
+            right = paragraph.strip()
+            separator = ' ' if re.search(r'[A-Za-z0-9]$', merged) and re.match(r'[A-Za-z0-9]', right) else ''
+            merged += separator + right
+        return [paragraphs[0], merged]
     prose = paragraphs[0]
     sentences = re.findall(r'[^。！？]+[。！？]?(?:[”’」』])?', prose)
     if len(sentences) >= 2:

@@ -3,10 +3,37 @@ import unittest
 from unittest.mock import Mock, patch
 
 from news_officer.config import Settings
-from news_officer.daily_report import compact_paragraphs, reader_episode, source_numbers
+from news_officer.daily_report import (
+    compact_paragraphs,
+    exactly_two_paragraphs,
+    reader_episode,
+    source_numbers,
+)
 
 
 class CompactParagraphTests(unittest.TestCase):
+    def test_surplus_paragraph_join_boundaries(self):
+        cases = [
+            ('中文', '中文', '中文中文'),
+            ('本身。', '对于', '本身。对于'),
+            ('Hello', 'World', 'Hello World'),
+            ('2026', 'October', '2026 October'),
+            ('中文', 'Latin', '中文Latin'),
+            ('Latin', '中文', 'Latin中文'),
+            ('Latin', '，中文', 'Latin，中文'),
+            ('Ａ', 'Latin', 'ＡLatin'),
+            (' Hello  ', '  World ', 'Hello World'),
+        ]
+        for left, right, expected in cases:
+            with self.subTest(left=left, right=right):
+                self.assertEqual(exactly_two_paragraphs(['首段。', left, right]), ['首段。', expected])
+
+    def test_surplus_paragraph_join_checks_each_boundary(self):
+        self.assertEqual(
+            exactly_two_paragraphs(['首段。', '中文', 'Latin', '2026', '。结束']),
+            ['首段。', '中文Latin 2026。结束'],
+        )
+
     source = ('## Guest｜产品\n节目：Show｜Show\n时长：20 分钟\n\n'
               'Guest认为需求可能增长10倍。团队反复研究这一问题并逐步建立完整的评测流程，讨论各种技术选择及其适用条件。'
               '\n\n推荐理由：有具体评测。\n阅读建议：值得看全文\n链接：https://example.test/listen')
