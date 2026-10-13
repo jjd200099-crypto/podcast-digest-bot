@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .shownotes import Correction, NotePoint, text_node, transcript_evidence
+from .titles import normalize_deepread_title
 
 INSTRUCTIONS = (Path(__file__).parent / "prompts" / "deepread_new_style.md").read_text(
     encoding="utf-8"
@@ -351,7 +352,7 @@ def render(record, value, digest=""):
         prefix = {"heading1": "# ", "heading2": "## ", "bullet": "- "}.get(kind, "")
         markdown.append(prefix + text)
 
-    add(ep.title, "heading1")
+    add(normalize_deepread_title(ep.title), "heading1")
     add(f"节目：{ep.show}｜发布时间：{published}｜时长：{duration}")
     add(f"[原始访谈]({ep.url})")
     for role, label in [("guest", "嘉宾"), ("host", "主持人"), ("other", "其他说话人")]:

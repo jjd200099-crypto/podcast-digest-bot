@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from .daily_report import coverage_report, ranked_daily_items, render_daily_summary
 from .models import DailyItem
+from .titles import normalize_deepread_title
 
 
 def read_daily_digest(store, day: str) -> dict:
@@ -83,7 +84,7 @@ def read_daily_digest(store, day: str) -> dict:
         blocks.append("当日仍有扫描或处理任务未完成，以上是已归档结果，不代表完整更新清单。")
     if reader_mode:
         blocks = list(summaries) or ['今天暂无可推送的播客摘要。']
-        blocks += [f"精读文档：[{d['title'].replace('[', '（').replace(']', '）')}]({d['url']})"
+        blocks += [f"精读文档：[{normalize_deepread_title(d['title']).replace('[', '（').replace(']', '）')}]({d['url']})"
                    for d in documents]
         blocks += feature_updates
     return {"status": "ready", "date": day, "count": len(summaries),

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from .library import inline_elements
 from .qa import chunk_transcript
+from .titles import normalize_deepread_title
 
 WORKFLOW = (Path(__file__).parent / 'prompts' / 'podcast_shownotes.md').read_text(encoding='utf-8')
 VERSION = 'podcast-notes-feishu-v3-' + hashlib.sha256(WORKFLOW.encode()).hexdigest()[:12]
@@ -259,10 +260,11 @@ def render_episode(record, notes, digest='', *, fulltext_attached=False, new_sty
     for line in digest.splitlines():
         if line.startswith(('推荐理由：', '推荐星级：')):
             metadata.append(line)
-    nodes = [text_node(ep.title, 'heading1'),
+    title = normalize_deepread_title(ep.title)
+    nodes = [text_node(title, 'heading1'),
              {'block_type': 19, 'callout': {'background_color': 5, 'emoji_id': 'microphone'},
               'children': [text_node(line) for line in metadata]}, text_node('核心论点', 'heading2')]
-    markdown = ['# ' + ep.title, *['> ' + line for line in metadata], '\n## 核心论点']
+    markdown = ['# ' + title, *['> ' + line for line in metadata], '\n## 核心论点']
     for point in notes['core']:
         timestamp = evidence[point['evidence_ids'][0]]['time'] or '原稿无时间戳'
         line = '[' + timestamp + '] ' + point['text']

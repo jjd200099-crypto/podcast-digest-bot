@@ -14,6 +14,7 @@ from .library import LibraryError
 from .models import IncomingMessage
 from .shownotes import note_identity, text_node
 from .strict_selection import strict_document_allowed, strict_selection_enabled
+from .titles import normalize_deepread_title
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +305,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 identity = note_identity(record, new_style=self.new_style)
                 key = 'episode:' + record.episode.id
                 published = record.episode.published_at.isoformat()[:10] if record.episode.published_at else day
-                title = f'{record.episode.title}｜{record.episode.show}｜{published}'
+                title = normalize_deepread_title(f'{record.episode.title}｜{record.episode.show}｜{published}')
                 digest = (item.message if not requested and strict_selection_enabled() else
                           self.store.get_transcript_digest(record.episode.id) or item.message)
                 with self.store._connect() as db:
