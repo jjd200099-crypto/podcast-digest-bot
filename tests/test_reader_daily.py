@@ -256,6 +256,46 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('次要解释', result)
         self.assertIn('https://example.test/one', result)
 
+    async def test_strict_compacted_daily_enrichment_uses_saved_document_eligibility(self):
+        from news_officer.daily_enrichment import _content
+        with patch.dict('os.environ', {'NEWS_OFFICER_STRICT_SELECTION': 'true'}):
+            item = self.oversized_item('one', '次要段落。' * 15000)
+            message = item.message.replace('推荐星级：★★★☆☆', '推荐星级：★★★★☆')
+            message += '\n<!-- strict-selection-v2 -->\n阅读建议：值得看全文'
+            item = replace(item, message=message, attachment=fixtures.attachment_for(
+                self.store.get_verified_transcript('one'), message))
+            with self.store._connect() as db:
+                db.execute('DELETE FROM episode_digests WHERE episode_id=?', ('one',))
+            self.store.save_transcript_digest('one', message, item.attachment.source_sha256,
+                                             item.attachment.record_revision_sha256)
+            instance, job, _ = self.setup_job([item])
+            await instance._handle_daily_job(job)
+            bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+            section = bundle['enrichment']['sections'][0]
+            self.assertEqual(bundle['enrichment']['eligible'], ['one'])
+            self.assertIs(section['strict_document_allowed'], True)
+            self.assertNotIn('阅读建议：', section['body'])
+            self.assertNotIn('次要段落', section['body'])
+            documents = {'one': {'url': 'https://www.feishu.cn/docx/one'}}
+            delivery = bundle['deliveries'][0]
+            _, content = _content(bundle, documents, delivery)
+            self.assertIn('精读', content)
+            self.assertIn(documents['one']['url'], content)
+
+            section['strict_document_allowed'] = False
+            for advice in ('', '\n阅读建议：值得看全文'):
+                with self.subTest(advice=advice):
+                    section['body'] += advice
+                    _, content = _content(bundle, documents, delivery)
+                    self.assertNotIn(documents['one']['url'], content)
+
+            del section['strict_document_allowed']
+            _, content = _content(bundle, documents, delivery)
+            self.assertIn(documents['one']['url'], content)
+            section['body'] = section['body'].replace('\n阅读建议：值得看全文', '')
+            _, content = _content(bundle, documents, delivery)
+            self.assertNotIn(documents['one']['url'], content)
+
     async def test_plaintext_fallback_warns_without_changing_body(self):
         from news_officer.daily_report import reader_episode
         from news_officer.operations import business_snapshot

@@ -115,9 +115,14 @@ def _content(bundle, documents, delivery):
     blocks = list(edition['prefix'])
     for section in edition['sections']:
         doc = documents.get(section['episode_id'])
-        if strict_selection_enabled() and (section.get('strict_document_allowed') is False or not any(
-                f'阅读建议：{advice}' in section['body'] for advice in ('值得编译', '值得看全文'))):
-            doc = None
+        if strict_selection_enabled():
+            if 'strict_document_allowed' in section:
+                allowed = section['strict_document_allowed']
+            else:
+                allowed = any(f'阅读建议：{advice}' in section['body']
+                              for advice in ('值得编译', '值得看全文'))
+            if not allowed:
+                doc = None
         # Apply the display-label correction to older frozen templates too.
         template = section['template'].replace(
             '[精读与完整中文对谈](', '[精读和完整中文对谈](')
