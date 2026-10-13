@@ -10,6 +10,37 @@ from news_officer.podcast import load_youtube_sources
 
 
 class CuratedSourcesTests(unittest.TestCase):
+    def test_curated_youtube_sources_load(self):
+        expected = {
+            "Anthropic": "UCrDwWp7EBBv4NwvScIpBDOA",
+            "AI Engineer": "UCLKPca3kwwd-B59HNr-_lvA",
+            "Andrej Karpathy": "UCXUPKJO5MZQN11PqgIvyuvQ",
+            "Stripe": "UCM1guA1E-RHLO2OyfQPOkEQ",
+            "Founders You Should Know": "UC7tPLStIIpO7a9x9ERMXrdg",
+            "Generalist": "UCwV9z8IGmbUQUb5D8KSv3mQ",
+            "Index Ventures": "UCFMxDWNYefVV3XmCdCBCFjQ",
+        }
+        feeds_path = ROOT / "feeds.json"
+        sources = json.loads(feeds_path.read_text())["sources"]
+        names = [source["name"] for source in sources]
+        self.assertEqual(len(names), len(set(names)))
+        configured = {source["name"]: source for source in sources}
+        loaded = {source.name: source for source in load_youtube_sources(feeds_path)}
+        for name, channel_id in expected.items():
+            with self.subTest(name=name):
+                self.assertIn(name, configured)
+                self.assertIn(name, loaded)
+                source = configured[name]
+                self.assertEqual(source["type"], "youtube")
+                self.assertEqual(source["priority"], "B")
+                self.assertNotIn("rss_url", source)
+                self.assertEqual(source["url"],
+                                 f"https://www.youtube.com/channel/{channel_id}/videos")
+                self.assertRegex(source["url"],
+                                 r"\Ahttps://www\.youtube\.com/channel/UC[A-Za-z0-9_-]{22}/videos\Z")
+                self.assertEqual(loaded[name].url, source["url"])
+                self.assertEqual(loaded[name].priority, "B")
+
     def test_curated_rss_sources_load(self):
         expected_urls = {
             "https://feeds.megaphone.fm/nopriors",
