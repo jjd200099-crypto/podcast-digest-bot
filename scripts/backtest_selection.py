@@ -48,7 +48,7 @@ def historical_rows(db, start, end):
         for row in db.execute('SELECT DISTINCT t.* FROM editorial_reviews r JOIN episode_transcripts t USING(episode_id) WHERE r.created_at>=? AND r.created_at<=? ORDER BY r.created_at,r.episode_id', (job['created_at'], job['updated_at'])):
             episodes.setdefault(row['episode_id'], Episode(row['episode_id'], row['title'], row['episode_url'], row['show_name']))
         for episode in episodes.values():
-            review = db.execute('SELECT decision_json FROM editorial_reviews WHERE episode_id=? AND created_at<=? ORDER BY created_at DESC,cache_key LIMIT 1', (episode.id, job['updated_at'])).fetchone()
+            review = db.execute("SELECT decision_json FROM editorial_reviews WHERE episode_id=? AND created_at<=? AND json_extract(decision_json, '$.policy') != 'strict-selection-v1' ORDER BY created_at DESC,cache_key LIMIT 1", (episode.id, job['updated_at'])).fetchone()
             transcript = db.execute('SELECT transcript_text,source,source_url FROM episode_transcripts WHERE episode_id=?', (episode.id,)).fetchone()
             yield day.isoformat(), episode, json.loads(review[0]) if review else None, transcript
 
@@ -70,14 +70,20 @@ def print_backtest(db, start, end, policies=None):
         reason = value.get('reason', 'No stored review')
         if policies and transcript:
             full = Transcript(transcript['transcript_text'], transcript['source'], transcript['source_url'], True)
-            try:
-                old = policies[0].assess(episode, full)
-                new = policies[1].assess(episode, full)
-                reason = new['assessment']['reason']
-            except ValueError as error:
-                reason = str(error)
+            rescored = []
+            errors = []
+            for name, policy in zip(('old', 'new'), policies, strict=True):
+                try:
+                    rescored.append(policy.assess(episode, full))
+                except ValueError as error:
+                    rescored.append(None)
+                    errors.append(f'{name}: {error}')
+            old, new = rescored
+            reason = new['assessment']['reason'] if new else 'New rescore unavailable'
+            if errors:
+                reason += '; ' + '; '.join(errors)
         stars = (stored or {}).get('stars', '?')
-        selected = (new or stored or {}).get('selected')
+        selected = (new or {}).get('selected') if policies else (stored or {}).get('selected')
         fields = [day, episode.title, stars, relevance.get('score', '?'), density.get('score', '?'), relevance.get('priority', '?'), without_floor,
                   stars > without_floor if isinstance(stars, int) and isinstance(without_floor, int) else '?',
                   (old or {}).get('stars', '-'), (new or {}).get('stars', '-'),
@@ -91,7 +97,7 @@ def main():
     parser.add_argument('start', type=date.fromisoformat)
     parser.add_argument('end', type=date.fromisoformat)
     parser.add_argument('--rescore', action='store_true', help='Send archived transcripts to the configured LLM (paid network calls)')
-    parser.add_argument('--model', default=os.environ.get('OPENAI_MODEL', 'gpt-4.1-mini'))
+    parser.add_argument('--model', default=os.environ.get('OPENAI_MODEL', 'gpt-5.6-terra'))
     args = parser.parse_args()
     if args.start > args.end:
         parser.error('start must not be after end')
