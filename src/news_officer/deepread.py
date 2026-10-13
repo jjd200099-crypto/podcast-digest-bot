@@ -58,6 +58,29 @@ class DeepRead(BaseModel):
     corrections: list[Correction]
 
 
+def source_evidence(text):
+    """Merge adjacent timestamp cues from the same explicitly named speaker.
+
+    Keep every source character. Per-cue IDs burden long-episode coverage with
+    hundreds of half sentences; a full speaker turn is the useful audit unit.
+    Unlabelled or ambiguous blocks remain separate, never infer an identity.
+    """
+    result = {}
+    previous = None
+    for body in transcript_evidence(text).values():
+        match = re.match(
+            r"^\[\d{1,3}:\d{2}(?::\d{2})?\]\s*([^:\n：]{1,80})[:：]",
+            body["text"],
+        )
+        speaker = match[1].strip() if match else None
+        if speaker and speaker == previous:
+            result[next(reversed(result))]["text"] += body["text"]
+        else:
+            result[f"C{len(result) + 1:04d}"] = dict(body)
+        previous = speaker
+    return result
+
+
 def check_output(text):
     if WORKFLOW_LABEL.search(text):
         raise ValueError("Internal workflow label in document")
@@ -70,7 +93,10 @@ def validate_deepread(value, evidence):
 
     def refs(keys):
         if any(key not in order for key in keys):
-            raise ValueError("Unknown deepread evidence")
+            raise ValueError(
+                "Unknown deepread evidence: "
+                + next(key for key in keys if key not in order)
+            )
 
     names = [s.name for s in notes.speakers]
     if len(set(names)) != len(names):
@@ -104,7 +130,10 @@ def validate_deepread(value, evidence):
         refs(exclusion.evidence_ids)
         covered.update(exclusion.evidence_ids)
     if covered != set(evidence):
-        raise ValueError("Incomplete QA source coverage")
+        missing = sorted(set(evidence) - covered)
+        raise ValueError(
+            f"Incomplete QA source coverage: {len(missing)} blocks missing: {missing[:20]}"
+        )
     qa = "\n".join([*names, *dialogue])
     for noun in notes.proper_nouns:
         refs(noun.evidence_ids)
@@ -127,7 +156,7 @@ def validate_deepread(value, evidence):
 
 
 def generate(client, model, record):
-    evidence = transcript_evidence(record.transcript.text)
+    evidence = source_evidence(record.transcript.text)
     if not evidence or not record.transcript.verified_complete:
         raise ValueError("Complete transcript required")
     ep = record.episode
@@ -167,7 +196,7 @@ def generate(client, model, record):
 
 
 def render(record, value, digest=""):
-    notes = validate_deepread(value, transcript_evidence(record.transcript.text))
+    notes = validate_deepread(value, source_evidence(record.transcript.text))
     ep = record.episode
     check_output(ep.title + ep.show + digest)
     published = ep.published_at.isoformat()[:10] if ep.published_at else "原源未标明"

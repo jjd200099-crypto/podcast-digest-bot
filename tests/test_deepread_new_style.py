@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from news_officer.config import Settings
 from news_officer.deepread import INSTRUCTIONS as NEW_INSTRUCTIONS
-from news_officer.deepread import DeepRead, validate_deepread
+from news_officer.deepread import DeepRead, source_evidence, validate_deepread
 from news_officer.shownotes import (
     INSTRUCTIONS,
     EpisodeNotes,
@@ -81,6 +81,18 @@ def record():
 
 
 class NewStyleTests(unittest.TestCase):
+    def test_source_turns_merge_cues_losslessly_without_inventing_speakers(self):
+        text = "[00:01] Jane Doe: Why?\n[00:02] Jane Doe: Tell me more.\n[00:03] John Smith: I use OpenAI.\n[00:04] John Smith: Here is how.\n[00:05] Unlabelled material."
+        evidence = source_evidence(text)
+        self.assertEqual(len(evidence), 3)
+        self.assertEqual("".join(x["text"] for x in evidence.values()), text)
+        self.assertEqual(evidence["C0001"]["time"], "00:01")
+        self.assertEqual(evidence["C0002"]["time"], "00:03")
+        self.assertEqual(
+            source_evidence("unlabelled source"),
+            transcript_evidence("unlabelled source"),
+        )
+
     def test_flag_defaults_off_and_explicitly_enables(self):
         env = {
             "FEISHU_APP_ID": "id",
