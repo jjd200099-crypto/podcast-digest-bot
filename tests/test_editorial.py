@@ -236,3 +236,96 @@ class EditorialTests(unittest.TestCase):
         self.assertIn('1 期已有全文', report)
         self.assertNotIn('未取得完整文字稿', report)
         self.assertNotIn('今日无', report)
+
+    def test_strict_priority_does_not_retry_or_inflate_low_relevance(self):
+        raw = source_assessment(relevance=2, density=4).model_dump()
+        raw['relevance']['priority'] = 'model_lab'
+        raw.update(evidence_quality='high', reading_recommendation='值得看全文')
+        client = Mock()
+        client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(raw))
+        policy = EditorialPolicy(client, 'strict', self.store, strict=True)
+        result = policy.assess(self.episode, self.transcript)
+        self.assertEqual(client.responses.create.call_count, 1)
+        self.assertEqual(result['assessment']['relevance']['priority'], 'none')
+        self.assertEqual(result['stars'], 2)
+        self.assertFalse(result['selected'])
+        self.assertNotIn('命中者至少', client.responses.create.call_args.kwargs['instructions'])
+        legacy = EditorialPolicy(client, 'strict', self.store, strict=False)
+        with self.assertRaises(ValueError):
+            legacy.assess(self.episode, self.transcript)
+        self.assertEqual(client.responses.create.call_count, 3)
+
+    def test_strict_evidence_and_reading_judgement_override_priority_floor(self):
+        from news_officer.daily_report import render_daily_summary
+        from news_officer.editorial import StrictAssessment
+        for quality, advice, stars in [('low', '值得看全文', 2),
+                                      ('mixed', '看摘要', 3),
+                                      ('high', '值得看全文', 4)]:
+            raw = assessment(relevance=5, density=2).model_dump()
+            raw['relevance']['priority'] = 'model_lab'
+            raw.update(evidence_quality=quality, reading_recommendation=advice)
+            result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
+            self.assertEqual(result['stars'], stars)
+            rendered = render_daily_summary(EditorialPolicy.apply(SUMMARY, result))
+            if quality == 'low' or advice == '看摘要':
+                self.assertNotIn('值得看全文', rendered)
+            else:
+                self.assertIn('阅读建议：值得看全文', rendered)
+            self.assertEqual(decide(assessment(relevance=5, density=2), FULL_TEXT)['stars'], 2)
+
+    def test_strict_missing_judgement_falls_back_and_has_separate_cache(self):
+        client = Mock()
+        client.responses.create.return_value = SimpleNamespace(output_text=source_assessment().model_dump_json())
+        old = EditorialPolicy(client, 'same', self.store, strict=False)
+        new = EditorialPolicy(client, 'same', self.store, strict=True)
+        self.assertTrue(old.assess(self.episode, self.transcript)['selected'])
+        self.assertFalse(new.assess(self.episode, self.transcript)['selected'])
+        self.assertEqual(client.responses.create.call_count, 2)
+
+    def test_cap_scores_all_candidates_then_selects_highest_stably(self):
+        policy = Mock()
+        policy.assess.side_effect = [decide(assessment(relevance=r, density=d), FULL_TEXT)
+                                    for r, d in [(3, 3), (5, 5), (5, 5), (4, 4)]]
+        policy.apply.side_effect = EditorialPolicy.apply
+        summarizer = Mock()
+        summarizer.summarize.return_value = SUMMARY
+        resolver = Mock()
+        resolver.fetch.return_value = self.transcript
+        service = PodcastService(self.store, self.root / 'feeds.json', summarizer,
+                                 resolver, editorial_policy=policy, max_daily_summaries=2)
+        candidates = [Episode(str(i), str(i), f'https://example.org/{i}', 'Show',
+                              published_at=datetime.now(UTC), duration_seconds=300)
+                      for i in range(4)]
+        service.discover_daily_candidates = Mock(return_value=candidates)
+        items = service.build_daily()
+        self.assertEqual([i.episode.id for i in items], ['1', '2'])
+        self.assertEqual(policy.assess.call_count, 4)
+        self.assertEqual(summarizer.summarize.call_count, 2)
+
+    def test_flag_defaults_off_and_legacy_summary_bytes_are_unchanged(self):
+        from unittest.mock import patch
+
+        from news_officer.daily_report import render_daily_summary
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertFalse(EditorialPolicy(Mock(), 'test', self.store).strict)
+        with patch.dict('os.environ', {'NEWS_OFFICER_STRICT_SELECTION': 'true'}):
+            self.assertTrue(EditorialPolicy(Mock(), 'test', self.store).strict)
+        decision = decide(assessment(), FULL_TEXT)
+        self.assertEqual(decision, {'policy': 'relevance-density-priority-v4',
+                                   'selected': True, 'total': 80, 'stars': 4,
+                                   'assessment': assessment().model_dump()})
+        expected = ('推荐理由：这期具体分析推理成本如何影响企业客户留存，能帮助检验商业模式。\n\n'
+                    '1. 推理成本影响企业客户的单位经济模型。\n\n推荐星级：★★★★☆')
+        self.assertEqual(EditorialPolicy.apply(SUMMARY, decision).encode(), expected.encode())
+        self.assertEqual(render_daily_summary(expected).encode(),
+                         expected.replace('推荐星级：★★★★☆', '阅读建议：值得看全文').encode())
+
+    def test_strict_low_evidence_and_off_topic_cannot_be_selected_even_with_high_density(self):
+        from news_officer.editorial import StrictAssessment
+        for relevance, quality in [(5, 'low'), (2, 'high')]:
+            raw = assessment(relevance=relevance, density=5).model_dump()
+            raw['relevance']['priority'] = 'model_lab'
+            raw.update(evidence_quality=quality, reading_recommendation='值得编译')
+            result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
+            self.assertLess(result['stars'], 3)
+            self.assertFalse(result['selected'])
