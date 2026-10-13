@@ -173,3 +173,18 @@ python -m unittest discover -s tests -v
 回读对账调用 [获取会话历史消息 API](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/list)（`GET /im/v1/messages`）：应用身份读取单聊需 `im:message`（获取与发送单聊、群组消息）、`im:message:readonly`（获取单聊、群组消息）或旧版 `im:message.history:readonly` 任一权限；读取群聊还需 `im:message.group_msg`（获取群组中所有消息）。请在飞书开放平台为应用开通相应权限。机器人必须在被查询群内；私聊需已与用户有会话且能定位该会话 ID。明确拒绝发送的失败继续复用同一 uuid 正常重试，不受 50 分钟窗口限制。不确定发送在去重窗口外必须回读确认：已有消息则标记 sent，完整历史确认不存在才重发；私聊无法定位历史会话、缺权限或回读失败时，**宁缺毋滥：不确定且无法对账时不重发**。保留待发送状态并记录包含 day、掩码 target 的 operations warning，日志限频，不每小时刷 error。
 
 可选设置 `NEWS_OFFICER_DAILY_COMPACT_PARAGRAPHS=1`（默认关闭）：保留自然段结构，摘要目标压缩为原文的 40%，推荐理由和阅读建议置于时长后。校验不通过时保留完整原句，原始归档摘要与精读文档不变。
+
+To preview an archived daily on production without sending or writing to the DB:
+
+```bash
+PYTHONPATH=src NEWS_OFFICER_DAILY_COMPACT_PARAGRAPHS=1 python -m news_officer.daily_preview --dry-run --date 2026-10-13 --db /data/news-officer.sqlite3
+```
+
+Run this from the repository directory in an environment with the existing DB
+available. Omit `--date` for today's date in Asia/Shanghai. The command renders
+persisted daily items and document links to stdout using deterministic compact
+fallbacks; it does not discover episodes, call a model, construct the service or
+Feishu client, or enqueue deliveries. SQLite is opened with `mode=ro` and
+`query_only=ON`; a missing DB fails without creating a file. This previews current
+rendering of archived summaries, rather than regenerating them or reproducing a
+previously frozen send byte for byte.

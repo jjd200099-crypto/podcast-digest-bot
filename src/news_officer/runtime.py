@@ -611,6 +611,7 @@ class NewsOfficerRuntime:
 
     def _prepare_combined_daily(self, job, *, finalize=False):
         from .daily_report import (
+            episode_summary,
             reader_episode,
             render_daily_summary,
         )
@@ -673,7 +674,7 @@ class NewsOfficerRuntime:
             blocks.append(f"统计窗口：{start:%m-%d %H:%M} 至 {when:%m-%d %H:%M}（{zone}）。")
         if summaries:
             blocks.append("以下按阅读优先级排列，均基于已核验全文。节目中的数字与预测为嘉宾或公司表述，未经独立审计。")
-        blocks.extend(render_daily_summary(item.message, discovered=item.episode.id.startswith('podwise:'))
+        blocks.extend(render_daily_summary(episode_summary(item), discovered=item.episode.id.startswith('podwise:'))
                       for item in summaries)
         blocks.extend(notices)
         report = coverage_report(report_items)
@@ -695,7 +696,7 @@ class NewsOfficerRuntime:
                 rewriter = getattr(self.podcast_service, 'summarizer', None) if compact else None
                 if not callable(getattr(rewriter, 'rewrite_paragraphs', None)):
                     rewriter = None
-                content = reader_episode(item.message, rewriter=rewriter, compact=compact)
+                content = reader_episode(episode_summary(item), rewriter=rewriter, compact=compact)
                 template = reader_episode(content, DOCUMENT_PLACEHOLDER,
                     fulltext=getattr(settings, 'daily_document_fulltext', False))
                 published = item.episode.published_at
@@ -708,6 +709,8 @@ class NewsOfficerRuntime:
                 blocks.append(content)
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')
+        from .daily_report import clean_daily_lines
+        blocks = [clean_daily_lines(block) for block in blocks]
         markdown = ("\n\n" if reader_mode else "\n\n---\n\n").join(blocks)
         if reader_mode:
             from .daily_report import compact_reader_episode

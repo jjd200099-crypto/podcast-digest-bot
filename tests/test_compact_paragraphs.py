@@ -7,7 +7,7 @@ from news_officer.daily_report import compact_paragraphs, reader_episode, source
 
 
 class CompactParagraphTests(unittest.TestCase):
-    source = ('## Guest｜产品\n节目：Show｜Show\n时长：20分\n\n'
+    source = ('## Guest｜产品\n节目：Show｜Show\n时长：20 分钟\n\n'
               'Guest认为需求可能增长10倍。团队反复研究这一问题并逐步建立完整的评测流程，讨论各种技术选择及其适用条件。'
               '\n\n推荐理由：有具体评测。\n阅读建议：值得看全文\n链接：https://example.test/listen')
 
@@ -26,11 +26,10 @@ class CompactParagraphTests(unittest.TestCase):
 
     def test_model_only_changes_prose_and_retains_layout(self):
         model = Mock(model='mock')
-        short = 'Guest认为需求可能增长10倍。团队建立评测。'
-        model.rewrite_paragraphs.return_value = [short]
+        model.rewrite_paragraphs.return_value = ['Guest认为需求可能增长10倍。', '团队建立评测。']
         result = compact_paragraphs(self.source, model)
         original = self.source.split('\n\n')[1]
-        self.assertEqual(result, self.source.replace(original, short))
+        self.assertEqual(result, self.source.replace(original, 'Guest认为需求可能增长10倍。\n\n团队建立评测。'))
         model.rewrite_paragraphs.assert_called_once()
         self.assertNotIn('推荐理由', str(model.rewrite_paragraphs.call_args))
         rendered = reader_episode(self.source, rewriter=model, compact=True)
@@ -46,7 +45,7 @@ class CompactParagraphTests(unittest.TestCase):
             self.assertEqual(result, compact_paragraphs(self.source))
             self.assertTrue(audit[0]['fallback'])
             self.assertEqual(audit[0]['missing_numbers'], [])
-            self.assertEqual(model.rewrite_paragraphs.call_count, 6)
+            self.assertEqual(model.rewrite_paragraphs.call_count, 2)
             self.assertIn('Guest认为需求可能增长10倍。', result)
 
     def test_transport_failure_preserves_conditional_sentences(self):
@@ -83,11 +82,11 @@ class CompactParagraphTests(unittest.TestCase):
             self.assertNotIn('仅', payload['required_qualifiers'][0])
 
     def test_blank_lines_only_when_compact(self):
-        source = self.source.replace('时长：20分\n\n', '时长：20分\n\n\n').replace('\n阅读建议', '\n\n阅读建议')
+        source = self.source.replace('时长：20 分钟\n\n', '时长：20 分钟\n\n\n').replace('\n阅读建议', '\n\n阅读建议')
         result = reader_episode(source, compact=True)
-        self.assertIn('时长：20分\n推荐理由：有具体评测。\n阅读建议：值得看全文\n\nGuest', result)
+        self.assertIn('时长：20 分钟\n推荐理由：有具体评测。\n阅读建议：值得看全文\n\nGuest', result)
         self.assertIn('推荐理由：有具体评测。\n阅读建议', result)
-        self.assertIn('时长：20分\n\n\n', reader_episode(source))
+        self.assertIn('时长：20 分钟\n\n\n', reader_episode(source))
 
     def test_compact_episode_order_with_two_paragraphs_and_links(self):
         model = Mock(model='mock')
@@ -95,7 +94,7 @@ class CompactParagraphTests(unittest.TestCase):
         source = self.source.replace('\n\n推荐理由', '\n\n' + self.source.split('\n\n')[1] + '\n\n推荐理由')
         model.rewrite_paragraphs.return_value = [paragraph, paragraph]
         result = reader_episode(source, 'https://example.test/doc', compact=True, rewriter=model)
-        expected = ('## Guest｜产品\n**节目：Show**\n时长：20分\n'
+        expected = ('## Guest｜产品\n**节目：Show**\n时长：20 分钟\n'
                     '推荐理由：有具体评测。\n阅读建议：值得看全文\n\n'
                     + paragraph + '\n\n' + paragraph + '\n\n'
                     '[精读和完整中文对谈](https://example.test/doc)\n\n'
@@ -111,7 +110,7 @@ class CompactParagraphTests(unittest.TestCase):
 
     def test_length_failure_retries_at_default_ratio(self):
         model = Mock(model='mock')
-        model.rewrite_paragraphs.side_effect = [[self.source.split('\n\n')[1]], ['Guest认为需求可能增长10倍。团队建立评测。']]
+        model.rewrite_paragraphs.side_effect = [[self.source.split('\n\n')[1], '背景。'], ['Guest认为需求可能增长10倍。', '团队建立评测。']]
         audit = []
         compact_paragraphs(self.source, model, audit)
         self.assertEqual(model.rewrite_paragraphs.call_count, 2)
@@ -169,7 +168,7 @@ class CompactParagraphTests(unittest.TestCase):
     def test_restricted_scope_hedge_is_retained(self):
         source = 'Guest认为这仅是一种假设。' + '背景讨论。' * 8
         model = Mock(model='mock')
-        model.rewrite_paragraphs.return_value = ['Guest认为这是一种假设，团队仍需验证。']
+        model.rewrite_paragraphs.return_value = ['Guest认为这是一种假设。', '团队仍需验证。']
         audit = []
         compact_paragraphs(source, model, audit)
         self.assertTrue(audit[0]['fallback'])
