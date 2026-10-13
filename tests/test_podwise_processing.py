@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -10,6 +11,7 @@ from news_officer.models import DailyItem, Episode, Transcript
 from news_officer.podcast import PodcastService, TranscriptResolver
 from news_officer.podwise import PodwiseAPIError, PodwiseTranscriptProvider
 from news_officer.store import Store
+from news_officer.youtube import YouTubeTranscriptProvider
 
 
 class ProcessingTests(unittest.TestCase):
@@ -53,6 +55,113 @@ class ProcessingTests(unittest.TestCase):
         if path == '/me':
             return {'result': {'plan': 'Pro', 'credits': {'aiProcessing': self.credit, 'aiProcessingAddOn': 0}}}
         raise AssertionError(path)
+
+    def youtube_setup(self):
+        self.episode = replace(self.episode, id='EWvNQjAaOHw',
+            url='https://www.youtube.com/watch?v=EWvNQjAaOHw')
+        self.rss.update(link=self.episode.url, transcribed=False)
+        self.alternate = False
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_youtube_atom_never_inherits_auto_process(self):
+        self.youtube_setup()
+        self.assertIsNone(self.provider.fetch(self.episode))
+        self.assertIsNone(self.provider._ensure_processing(self.episode, {123: self.rss}))
+        self.provider._process.assert_not_called()
+        self.assertNotIn('/me', [c.args[0] for c in self.provider._get.call_args_list])
+
+    def test_youtube_fallback_after_api_and_captions_fail_or_return_none(self):
+        self.youtube_setup()
+        self.rss['transcribed'] = True
+        youtube = YouTubeTranscriptProvider()
+        for failure in (None, RuntimeError('blocked')):
+            calls = []
+            def api(episode, calls=calls, failure=failure):
+                calls.append('api')
+                if failure:
+                    raise failure
+            def captions(episode, calls=calls, failure=failure):
+                calls.append('captions')
+                if failure:
+                    raise failure
+            original = self.provider._get
+            def get(path, params=None, calls=calls, original=original):
+                calls.append(path)
+                return original(path, params)
+            with patch.object(youtube, '_fetch_api', side_effect=api), \
+                 patch.object(youtube, '_fetch_captions', side_effect=captions), \
+                 patch.object(self.provider, '_get', side_effect=get):
+                result = TranscriptResolver([self.provider, youtube]).fetch(self.episode)
+            self.assertTrue(result.verified_complete)
+            self.assertEqual(calls[:3], ['api', 'captions', '/episodes/search'])
+            self.assertIn('/episodes/123/transcripts', calls)
+        self.provider._process.assert_not_called()
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_youtube_daily_fallback_is_stored_before_summary_and_missing_retries_end(self):
+        self.youtube_setup()
+        self.rss['transcribed'] = True
+        def summarize(episode, transcript):
+            stored = self.store.get_verified_transcript(episode.id)
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.transcript.text, transcript.text)
+            return 'summary'
+        service = PodcastService(self.store, self.root/'feeds.json',
+            Mock(summarize=Mock(side_effect=summarize)), TranscriptResolver([self.provider]))
+        service.discover_daily_candidates = Mock(return_value=[self.episode])
+        self.assertEqual(service.build_daily()[0].status, 'summarized')
+        self.rss['transcribed'] = False
+        for expected in ('no_transcript', 'no_transcript', 'final_skipped'):
+            self.assertEqual(service.build_daily()[0].status, expected)
+        self.provider._process.assert_not_called()
+
+    def test_youtube_rejects_wrong_id_even_with_identical_title_date_duration(self):
+        self.youtube_setup()
+        self.rss.update(link='https://www.youtube.com/watch?v=WRONGid1234', transcribed=True)
+        self.assertIsNone(self.provider.fetch(self.episode))
+        self.provider._process.assert_not_called()
+        self.rss['link'] = self.episode.url
+        original = self.get
+        def get(path, params=None):
+            data = original(path, params)
+            if path.endswith('/transcripts'):
+                data['episode']['link'] = 'https://youtu.be/WRONGid1234'
+            return data
+        self.provider._get.side_effect = get
+        self.assertIsNone(self.provider.fetch(self.episode))
+
+    @patch.dict(os.environ, {'NEWS_OFFICER_YOUTUBE_PODWISE_PROCESS': 'true',
+                            'NEWS_OFFICER_YOUTUBE_PODWISE_DAILY_MAX': '1'}, clear=True)
+    def test_youtube_opt_in_cap_survives_restart_and_uncertain_post(self):
+        self.youtube_setup()
+        self.provider.auto_process = False
+        self.provider._process.side_effect = PodwiseAPIError('uncertain')
+        self.provider.fetch(self.episode)
+        self.provider.fetch(self.episode)
+        self.provider._process.assert_called_once_with(123)
+        restarted = Store(self.store.path)
+        self.assertFalse(restarted.reserve_youtube_podwise_processing(456, 1))
+        self.rss['seq'] = 456
+        original = self.get
+        def get(path, params=None):
+            if path == '/episodes/456/status':
+                return {'result': {'status': 'not_requested'}}
+            return original(path, params)
+        self.provider._get.side_effect = get
+        self.provider.fetch(self.episode)
+        self.provider._process.assert_called_once()
+        with self.store._connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM youtube_podwise_process_requests').fetchone()[0], 1)
+        with patch('news_officer.store._now', return_value='2099-01-01T00:00:00+00:00'):
+            self.assertTrue(restarted.reserve_youtube_podwise_processing(456, 1))
+
+    @patch.dict(os.environ, {'NEWS_OFFICER_YOUTUBE_PODWISE_PROCESS': 'true'}, clear=True)
+    def test_youtube_opt_in_requires_positive_cap(self):
+        self.youtube_setup()
+        for value in ('0', '-1', 'invalid'):
+            with patch.dict(os.environ, {'NEWS_OFFICER_YOUTUBE_PODWISE_DAILY_MAX': value}):
+                self.assertIsNone(self.provider.fetch(self.episode))
+        self.provider._process.assert_not_called()
 
     def test_cross_version_uses_existing_full_text_before_spending_credit(self):
         result = self.provider.fetch(self.episode)

@@ -93,7 +93,13 @@ class TranscriptResolver:
 
     def fetch(self, episode: Episode) -> Transcript | None:
         errors: list[tuple[str, Exception]] = []
-        for provider in self.providers:
+        providers = list(self.providers)
+        if is_youtube_url(episode.url):
+            # YouTubeTranscriptProvider tries transcript-api, then yt-dlp captions.
+            providers = [p for p in providers if not isinstance(p, PodwiseTranscriptProvider)] + [
+                p for p in providers if isinstance(p, PodwiseTranscriptProvider)
+            ]
+        for provider in providers:
             if self.rss_only and isinstance(provider, YouTubeTranscriptProvider) and not is_youtube_url(episode.url):
                 continue
             try:

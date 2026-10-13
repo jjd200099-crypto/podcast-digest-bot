@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import os
 import re
 from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit
@@ -14,6 +15,7 @@ import requests
 from .models import Episode, Transcript
 from .provider_guard import PodwiseAPIError, PodwiseRateLimited, podwise_guard
 from .rss import _strict_timeline_coverage, _valid_plain_transcript
+from .youtube import is_youtube_url, youtube_video_id
 
 API_BASE = "https://app.podwise.ai/api/open/v1"
 MAX_BYTES = 4_000_000
@@ -58,6 +60,8 @@ def _cross_version_matches(episode: Episode, item: dict) -> bool:
     Final acceptance additionally requires independent RSS duration, complete
     timeline coverage, and a completed Podwise status for the alternate asset.
     """
+    if is_youtube_url(episode.url):
+        return False
     if not episode.metadata.get('rss_feed_url') or not episode.published_at or not episode.duration_seconds:
         return False
     core = _title_core(episode.title)
@@ -82,6 +86,9 @@ def _number(value) -> float | None:
 
 
 def _matches(episode: Episode, item: dict) -> bool:
+    if is_youtube_url(episode.url):
+        video_id = youtube_video_id(episode.url)
+        return bool(video_id and video_id == youtube_video_id(str(item.get("link") or "")))
     link = _url_key(str(item.get("link") or ""))
     known = {
         _url_key(episode.url),
@@ -188,6 +195,15 @@ class PodwiseTranscriptProvider:
         return data
 
     def _ensure_processing(self, episode: Episode, matches: dict) -> bool | None:
+        youtube = is_youtube_url(episode.url)
+        youtube_opt_in = os.getenv('NEWS_OFFICER_YOUTUBE_PODWISE_PROCESS', '').lower() == 'true'
+        try:
+            youtube_daily_max = max(0, int(os.getenv('NEWS_OFFICER_YOUTUBE_PODWISE_DAILY_MAX', '0')))
+        except ValueError:
+            youtube_daily_max = 0
+        # Atom metadata must never inherit the publisher RSS processing opt-in.
+        if youtube and (not youtube_opt_in or not youtube_daily_max or self.processing_store is None):
+            return None
         if len(matches) != 1:
             self.diagnostics[episode.id] = 'Podwise 未找到可唯一核验的同一期记录，待复查匹配。'
             return
@@ -201,10 +217,10 @@ class PodwiseTranscriptProvider:
         if status == 'failed':
             self.diagnostics[episode.id] = 'Podwise 转写失败，需复核后重试；未重复扣取转写额度。'
             return
-        if status != 'not_requested' or not self.auto_process or self.processing_store is None:
+        if status != 'not_requested' or (not youtube and not self.auto_process) or self.processing_store is None:
             self.diagnostics[episode.id] = 'Podwise 已收录但尚未启动转写。'
             return
-        if not episode.metadata.get('rss_feed_url'):
+        if not youtube and not episode.metadata.get('rss_feed_url'):
             return  # Automatic processing is restricted to tracked publisher RSS.
         account = (self._get('/me') or {}).get('result', {})
         credits = account.get('credits', {})
@@ -215,7 +231,9 @@ class PodwiseTranscriptProvider:
         if account.get('plan') not in {'Pro', 'Enterprise'} or not available:
             self.diagnostics[episode.id] = 'Podwise 转写额度不足或套餐不支持，待补足额度；不会自动购买。'
             return
-        if not self.processing_store.reserve_podwise_processing(seq):
+        reserved = (self.processing_store.reserve_youtube_podwise_processing(seq, youtube_daily_max)
+                    if youtube else self.processing_store.reserve_podwise_processing(seq))
+        if not reserved:
             self.diagnostics[episode.id] = '转写请求已有记录但尚未确认完成，待复核；不会重复提交扣费。'
             return
         try:
@@ -285,7 +303,11 @@ class PodwiseTranscriptProvider:
         if not isinstance(rows, list):
             raise PodwiseAPIError("Podwise invalid search result")
         has_exact = any(isinstance(r, dict) and _matches(episode, r) for r in rows)
-        if (not rows or (episode.metadata.get('rss_feed_url') and not has_exact)) and episode.show and episode.published_at:
+        if (
+            not is_youtube_url(episode.url)
+            and (not rows or (episode.metadata.get('rss_feed_url') and not has_exact))
+            and episode.show and episode.published_at
+        ):
             # A long compound title can miss the search index. Read the show's
             # dated episode catalog too; final asset matching remains strict.
             shows = self._get("/podcasts/search", {"q": episode.show, "hitsPerPage": 3})
@@ -310,7 +332,10 @@ class PodwiseTranscriptProvider:
             and item['seq'] > 0 and _matches(episode, item)
         }
         # Try already-processed syndications before spending a processing credit.
-        if episode.metadata.get('rss_feed_url') and not any(r.get('transcribed') is True for r in exact_assets.values()):
+        if (
+            not is_youtube_url(episode.url) and episode.metadata.get('rss_feed_url')
+            and not any(r.get('transcribed') is True for r in exact_assets.values())
+        ):
             core = _title_core(episode.title)
             if len(core.split()) >= 8:
                 extra = self._get('/episodes/search', {'q': core[:180], 'hitsPerPage': 30})
@@ -340,7 +365,7 @@ class PodwiseTranscriptProvider:
         if audio_matches:
             matches = audio_matches
         if len(matches) != 1:
-            if not matches and episode.metadata.get('rss_feed_url'):
+            if not matches and (episode.metadata.get('rss_feed_url') or is_youtube_url(episode.url)):
                 # Search indexing can lag behind completed processing. Consult
                 # status and read the verified transcript endpoint directly.
                 if self._ensure_processing(episode, exact_assets):
