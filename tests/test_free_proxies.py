@@ -244,3 +244,28 @@ class ApiChainTests(unittest.TestCase):
             )
             rotate.assert_not_called()
             captions.assert_not_called()
+
+
+class InferredDurationTests(unittest.TestCase):
+    def _run(self, total_seconds):
+        snippets = [
+            SimpleNamespace(text=" ".join(["word"] * 150), start=float(i * 60), duration=60.0)
+            for i in range(int(total_seconds // 60))
+        ]
+        fetched = type("F", (list,), {"language_code": "en"})(snippets)
+        episode = Episode(
+            id="abcdefghijk", title="Talk", url="https://www.youtube.com/watch?v=abcdefghijk",
+            show="AI Engineer",
+        )
+        with (
+            patch("news_officer.youtube.video_metadata", return_value=episode),
+            patch("news_officer.youtube.youtube_skip_reason", return_value=None),
+            patch("youtube_transcript_api.YouTubeTranscriptApi", return_value=Mock(fetch=Mock(return_value=fetched))),
+        ):
+            return YouTubeTranscriptProvider()._fetch_api(episode)
+
+    def test_unknown_duration_inferred_from_captions(self):
+        self.assertIsNotNone(self._run(30 * 60))
+
+    def test_unknown_duration_short_video_rejected(self):
+        self.assertIsNone(self._run(10 * 60))

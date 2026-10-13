@@ -507,8 +507,6 @@ class YouTubeTranscriptProvider:
             duration = enriched.duration_seconds
         if duration and duration < 900:
             raise YouTubeFinalSkip("YouTube video shorter than 15 minutes")
-        if not duration:
-            return None
 
         def fetch(proxy: str | None, timeout: float, deadline: float | None = None):
             from youtube_transcript_api.proxies import GenericProxyConfig
@@ -524,9 +522,14 @@ class YouTubeTranscriptProvider:
                     )
             text = _merge_caption_chunks([snippet.text for snippet in snippets])
             intervals = [(s.start, s.start + s.duration) for s in snippets]
-            if (intervals_cover_episode(intervals, duration)
-                    and len(text) >= max(5_000, round(duration / 60) * 300)
-                    and 60 <= len(text.split()) / (duration / 60) <= 260):
+            effective = duration or (max(end for _, end in intervals) if intervals else 0)
+            if effective < 900:
+                # Duration unknown upstream (e.g. Atom feed + blocked yt-dlp): infer it
+                # from caption timing and keep the >=15 minute rule.
+                return None
+            if (intervals_cover_episode(intervals, effective)
+                    and len(text) >= max(5_000, round(effective / 60) * 300)
+                    and 60 <= len(text.split()) / (effective / 60) <= 260):
                 return Transcript(text, self.name, url, True, snippets.language_code)
             return None
 
