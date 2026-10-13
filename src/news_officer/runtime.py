@@ -36,6 +36,7 @@ from .qa import render_transcript_attachment
 from .research_checkpoint import ResearchContinuationPending
 from .router import CommandRouter
 from .store import Store
+from .titles import normalize_deepread_title
 from .transcript_view import RENDERER_VERSION
 
 logger = logging.getLogger(__name__)
@@ -1234,7 +1235,7 @@ class NewsOfficerRuntime:
                 if not result.get('reply_to'):
                     lines.append('以下重点节目已分别编译成独立文档，早间文字日报保持不变。')
                 for document in result['documents']:
-                    title = document['title'].replace('[', '（').replace(']', '）')
+                    title = normalize_deepread_title(document['title']).replace('[', '（').replace(']', '）')
                     lines.append(f"[{title}]({document['url']})")
                 content = '\n\n'.join(lines)
             else:

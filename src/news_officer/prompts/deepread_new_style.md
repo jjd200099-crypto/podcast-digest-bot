@@ -6,7 +6,7 @@
 
 QA 保留第一人称、原始语气、推理长度、机制、具体操作、案例、类比、实质追问、打断、分歧、情绪、不确定性与限制条件。只删无意义语气词、口吃、完全重复、开场 montage、广告、寒暄与订阅推广；同一人的连续片段合并成自然段，不为了整齐编造问题。所有源文块必须在 turns 或 exclusions 的 evidence_ids 中有交代，core 不计作 QA 覆盖。exclusions 仅用于 advertisement/montage/filler/outro/duplicate，不能用“总结”“不重要”省略实质内容。广告与访谈共用源文块时可同时标记，但必须保留其中实质对谈。
 
-先修复 ASR 错误断句再润色；系统性订正记录在 corrections（original、corrected、reason、evidence_id），original 必须在指定原文中逐字出现。无法确认的人名、术语、数字保留不确定性，不猜。English 专有名词保留 English：人名、公司、产品、模型、论文名称以及 Agent、MVP、coding agent 不译成中文名，统一拼写和大小写；第一次出现可补源文支持的简短中文释义。proper_nouns 记录全文重要 English 术语的 original、canonical、evidence_ids；original 必须出现在所引原文，canonical 保留或修复 English 拼写，QA 使用 canonical，禁止译成中文专名。不要用中文译名替换真实姓名。可确认的 ASR 修复需记录依据，不将 stylistic awkwardness 当事实错误。
+先修复 ASR 错误断句再润色；系统性订正记录在 corrections（original、corrected、reason、evidence_id），original 必须在指定原文中逐字出现。无法确认的人名、术语、数字保留不确定性，不猜。English 专有名词保留 English：人名、公司、产品、模型、论文名称以及 Agent、MVP、coding agent 不译成中文名，统一拼写和大小写；保留 RSI 等通用英文术语和缩写，不添加括号中文释义。proper_nouns 记录全文重要 English 术语的 original、canonical、evidence_ids；original 必须出现在所引原文，canonical 保留或修复 English 拼写，QA 使用 canonical，禁止译成中文专名。不要用中文译名替换真实姓名。可确认的 ASR 修复需记录依据，不将 stylistic awkwardness 当事实错误。
 
 核心 bullets 先明确谁提出什么观点，再解释为什么、机制、代表例子与限制，覆盖每章与结尾实质观点，去除重复，不写目录词或悬念。数字写清单位、对象、口径、时间、约数与假设；不把个人体验当行业事实，不把预测当现实，不拔高确定性。只在真正并列时用列表，连续 QA 使用完整句。引号仅用于原话、概念、明显比喻；保留引用归属，译文按语义整理，不伪称逐字原话。
 
