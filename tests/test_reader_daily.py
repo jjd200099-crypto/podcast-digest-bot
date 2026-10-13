@@ -55,6 +55,49 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         podcast.summarizer.rewrite_paragraphs.assert_not_called()
         self.assertNotIn('• ', body(self.messenger.attempts[0]))
 
+    async def test_flag_off_runtime_matches_pre_51_bytes_and_link_order(self):
+        from news_officer.daily_enrichment import DOCUMENT_PLACEHOLDER, _content
+        from news_officer.feishu import combined_delivery_parts
+
+        # Golden prose follows runtime.py and reader_episode at 3848757 (before #51).
+        # Interior trailing spaces must survive publication and the edit template.
+        for fulltext in (False, True):
+            with self.subTest(fulltext=fulltext):
+                name = f'legacy-{fulltext}'
+                selected = self.oversized_item(name,
+                    '保留行尾空格。  \n下一行。\t\n链接：https://example.test/listen')
+                instance, job, podcast = self.setup_job([selected], key=f'daily:{name}',
+                    payload={'scheduled_for': '2026-10-09T08:30:00+08:00'})
+                instance.settings.daily_compact_paragraphs = False
+                instance.settings.daily_document_fulltext = fulltext
+                podcast.summarizer = Mock()
+                await instance._handle_daily_job(job)
+                bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+                section = bundle['enrichment']['sections'][0]
+                prose = (f'**节目：{name}**\n\n推荐理由：完整原文支持的观点。\n\n'
+                         f'1. {name} 的核心判断。\n\n保留行尾空格。  \n下一行。\t\n'
+                         '\n阅读建议：看摘要')
+                expected_body = prose + '\n\n[收听节目](https://example.test/listen)'
+                label = '精读和完整中文对谈' if fulltext else '精读'
+                expected_template = (prose + f'\n\n[{label}]({DOCUMENT_PLACEHOLDER})'
+                                     '\n\n[收听节目](https://example.test/listen)')
+                self.assertEqual(section['body'].encode(), expected_body.encode())
+                self.assertEqual(section['template'].encode(), expected_template.encode())
+                self.assertLess(section['template'].index(f'[{label}]'),
+                                section['template'].index('[收听节目]'))
+                delivery = bundle['deliveries'][0]
+                expected_parts = combined_delivery_parts(expected_body, delivery['key'],
+                    title='🎧 播客精选 · 2026-10-09')
+                self.assertEqual(self.messenger.attempts[-1].content.encode(),
+                                 expected_parts[0][1].encode())
+                kind, edited = _content(bundle, {name: {'url': 'https://example.test/doc'}}, delivery)
+                expected_edit = combined_delivery_parts(
+                    expected_template.replace(DOCUMENT_PLACEHOLDER, 'https://example.test/doc'),
+                    delivery['key'], title='🎧 播客精选 · 2026-10-09')[0]
+                self.assertEqual((kind, edited.encode()), (expected_edit[0], expected_edit[1].encode()))
+                podcast.summarizer.rewrite_paragraphs.assert_not_called()
+                self.store.complete(job.key)
+
     async def test_only_editorial_content_in_one_message_and_archive(self):
         selected = self.item('selected')
         other = Episode('missing', 'Missing title', 'https://example.test/missing', 'Show')
