@@ -167,11 +167,32 @@ def _race(
         executor.shutdown(wait=False, cancel_futures=True)
 
 
+_SPENT: list[tuple[float, float]] = []
+
+
 def fetch_with_free_proxies(fetch: Callable[[str, float, float], T | None]) -> T | None:
     config = ProxyConfig.from_env()
     if not config.enabled:
         return None
-    deadline = time.monotonic() + config.budget
+    started = time.monotonic()
+    window = _positive("YOUTUBE_FREE_PROXY_WINDOW_BUDGET", 600)
+    with _LOCK:
+        _SPENT[:] = [(t, d) for t, d in _SPENT if started - t < 3600]
+        remaining = window - sum(d for _, d in _SPENT)
+    if remaining <= 0:
+        # Bound total free-proxy time per hour so many slow videos cannot stall
+        # the daily run past its watchdog; later retries pick them up.
+        return None
+    deadline = started + min(config.budget, remaining)
+    try:
+        return _fetch_with_free_proxies(fetch, config, deadline)
+    finally:
+        with _LOCK:
+            _SPENT.append((started, time.monotonic() - started))
+
+
+def _fetch_with_free_proxies(fetch: Callable[[str, float, float], T | None], config: ProxyConfig,
+                             deadline: float) -> T | None:
     with _LOCK:
         remembered = _WORKING[: config.candidates]
     result = _race(remembered, fetch, config, deadline)
