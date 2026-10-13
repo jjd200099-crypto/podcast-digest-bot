@@ -81,6 +81,11 @@ def record():
 
 
 class NewStyleTests(unittest.TestCase):
+    def test_old_style_version_is_pinned(self):
+        from news_officer.shownotes import VERSION
+
+        self.assertEqual(VERSION, "podcast-notes-feishu-v3-4f4f8502190c")
+
     def test_source_turns_merge_cues_losslessly_without_inventing_speakers(self):
         text = "[00:01] Jane Doe: Why?\n[00:02] Jane Doe: Tell me more.\n[00:03] John Smith: I use OpenAI.\n[00:04] John Smith: Here is how.\n[00:05] Unlabelled material."
         evidence = source_evidence(text)
