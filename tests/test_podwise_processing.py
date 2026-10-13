@@ -111,8 +111,12 @@ class ProcessingTests(unittest.TestCase):
         service.discover_daily_candidates = Mock(return_value=[self.episode])
         self.assertEqual(service.build_daily()[0].status, 'summarized')
         self.rss['transcribed'] = False
-        for expected in ('no_transcript', 'no_transcript', 'final_skipped'):
+        for expected in ('no_transcript', 'no_transcript'):
             self.assertEqual(service.build_daily()[0].status, expected)
+        with self.store._connect() as connection:
+            connection.execute("UPDATE daily_transcript_backlog SET created_at=?",
+                ((datetime.now(UTC) - timedelta(days=1, minutes=1)).isoformat(),))
+        self.assertEqual(service.build_daily()[0].status, 'final_skipped')
         self.provider._process.assert_not_called()
 
     def test_youtube_rejects_wrong_id_even_with_identical_title_date_duration(self):

@@ -118,11 +118,39 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
             YouTubeTranscriptProvider().fetch(replace(self.episode, duration_seconds=100))
         run.assert_not_called()
 
+    def _age_backlog(self, episode_id, age):
+        with self.store._connect() as connection:
+            connection.execute('UPDATE daily_transcript_backlog SET created_at=? WHERE episode_id=?',
+                               ((datetime.now(UTC) - age).isoformat(), episode_id))
+
+    def test_legacy_backlog_with_many_attempts_is_not_finalized_same_day(self):
+        self.store.defer_daily_transcript(self.episode, 'missing')
+        with self.store._connect() as connection:
+            connection.execute('UPDATE daily_transcript_backlog SET attempts=48 WHERE episode_id=?', (self.episode.id,))
+        self.assertFalse(self.store.defer_daily_transcript(self.episode, 'missing'))
+        self._age_backlog(self.episode.id, timedelta(days=3, minutes=1))
+        self.assertTrue(self.store.defer_daily_transcript(self.episode, 'missing'))
+
+    def test_free_proxy_time_is_bounded_per_hour(self):
+        from news_officer import free_proxies
+        free_proxies._SPENT[:] = [(free_proxies.time.monotonic(), 600.0)]
+        fetch = Mock(return_value='x')
+        try:
+            with patch.dict('os.environ', {'YOUTUBE_FREE_PROXY_ENABLED': 'true'}):
+                self.assertIsNone(free_proxies.fetch_with_free_proxies(fetch))
+        finally:
+            free_proxies._SPENT.clear()
+        fetch.assert_not_called()
+
     def test_retry_cap_for_all_source_types_survives_restart(self):
         for index, url in enumerate([self.episode.url, 'https://example.org/podcast', 'https://example.org/article']):
             episode = replace(self.episode, id=str(index), url=url)
             self.assertFalse(self.store.defer_daily_transcript(episode, 'missing'))
             self.assertFalse(self.store.defer_daily_transcript(episode, 'missing'))
+            # Same-day misses never exhaust the cap: late transcripts must survive.
+            self.assertFalse(self.store.defer_daily_transcript(episode, 'missing'))
+            self.assertFalse(self.store.defer_daily_transcript(episode, 'missing'))
+            self._age_backlog(episode.id, timedelta(days=1, minutes=1))
             self.assertTrue(self.store.defer_daily_transcript(episode, 'missing'))
             reopened = Store(self.store.path)
             self.assertIsNone(reopened.episode_review_state(episode.id))

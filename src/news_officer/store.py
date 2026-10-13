@@ -1488,11 +1488,15 @@ class Store:
         with self._connect() as connection:
             prior = connection.execute('SELECT attempts, created_at, state FROM daily_transcript_backlog WHERE episode_id=?',
                                        (episode.id,)).fetchone()
-            final = bool(prior and (prior['state'] == 'final_skipped' or prior['attempts'] >= 2
-                         or now - datetime.fromisoformat(prior['created_at']) >= timedelta(days=3)))
+            # Retries run every 30 minutes, so a bare attempt count would drop a
+            # podcast whose transcript lands a few hours late (and instantly finalize
+            # legacy rows). The 3-attempt cap only applies once the item is a day old.
+            age = now - datetime.fromisoformat(prior['created_at']) if prior else timedelta(0)
+            final = bool(prior and (prior['state'] == 'final_skipped' or age >= timedelta(days=3)
+                         or (prior['attempts'] >= 2 and age >= timedelta(days=1))))
             if final:
                 state = 'final_skipped'
-            delay = timedelta(minutes=30)
+            delay = timedelta(hours=6) if prior and prior['attempts'] >= 48 else timedelta(minutes=30)
             next_check = max(now + delay, retry_at) if retry_at else now + delay
             connection.execute(
                 'INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, 1) '
