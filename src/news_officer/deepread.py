@@ -1,6 +1,5 @@
 """Opt-in, source-covered Chinese interview study notes and chronological QA."""
 
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -14,9 +13,10 @@ from .titles import normalize_deepread_title
 INSTRUCTIONS = (Path(__file__).parent / "prompts" / "deepread_new_style.md").read_text(
     encoding="utf-8"
 )
-VERSION = (
-    "deepread-new-style-v3-" + hashlib.sha256(INSTRUCTIONS.encode()).hexdigest()[:12]
-)
+# Pinned to the pre-#58 prompt hash so deployed docs keep their identity;
+# prompt edits apply only to episodes without an existing document.
+# Bump explicitly only when existing documents must be regenerated.
+VERSION = "deepread-new-style-v3-3169390d8c8e"
 INTRO = "依据完整文字稿整理核心内容与中文对谈；保留原始顺序、第一人称、案例与限定条件，删除广告和无实质信息的重复。"
 # Output validation rejects workflow provenance, including variants used in drafts.
 WORKFLOW_LABEL = re.compile(

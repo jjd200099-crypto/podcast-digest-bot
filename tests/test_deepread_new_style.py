@@ -511,6 +511,38 @@ class NewStyleCompilerTests(unittest.TestCase):
             f.compiler.document_identity(source.record),
         )
 
+        # Simulate deployment with an edited prompt, including module reload
+        # and a fresh compiler so this catches a hash computed at import time.
+        import importlib
+        from news_officer import deepread
+
+        source.store.complete(job.key)
+        identity = compiler.document_identity(source.record)
+        revision = compiler.snapshot(source.base)[0]
+        before = copy.deepcopy(source.api.data)
+        instructions = deepread.INSTRUCTIONS
+        module_state = deepread.__dict__.copy()
+        try:
+            with patch.object(Path, "read_text", return_value=instructions + "\nPrompt edit"):
+                importlib.reload(deepread)
+            self.assertNotEqual(deepread.INSTRUCTIONS, instructions)
+            restarted = SelectedEpisodeCompiler(
+                source.store, source.api, source.writer,
+                start_date="2026-09-21", today=lambda: "2026-09-21",
+                include_fulltext=True, new_style=True,
+            )
+            restarted.initialize()
+            self.assertEqual(restarted.document_identity(source.record), identity)
+            self.assertEqual(restarted.snapshot(source.base)[0], revision)
+            self.assertEqual(restarted.enqueue_ready("2026-09-21"), 0)
+            self.assertIsNone(source.store.claim_next("document"))
+            restarted._notes(source.record, "")
+            source.writer.generate.assert_called_once()
+            self.assertEqual(source.api.data, before)
+        finally:
+            deepread.__dict__.clear()
+            deepread.__dict__.update(module_state)
+
     def test_failed_new_style_publishes_old_style_in_normal_and_enrichment_modes(self):
         import test_episode_document as fixtures
         from test_shownotes import ShownotesValidation
