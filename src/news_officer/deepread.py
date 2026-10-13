@@ -18,7 +18,7 @@ VERSION = (
 )
 INTRO = "依据完整文字稿整理核心内容与中文对谈；保留原始顺序、第一人称、案例与限定条件，删除广告和无实质信息的重复。"
 # Output validation rejects workflow provenance, including variants used in drafts.
-WORKFLOW_LABEL = re.compile(r"王[颢頗颇]蓁|wang\s+method|A/B", re.IGNORECASE)
+WORKFLOW_LABEL = re.compile(r"王[颢頗颇]蓁|wang\s+method|A[-/]B", re.IGNORECASE)
 
 
 class Speaker(BaseModel):

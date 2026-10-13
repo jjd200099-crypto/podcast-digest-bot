@@ -204,6 +204,8 @@ class NewStyleTests(unittest.TestCase):
         self.assertIn("English 专有名词保留 English", NEW_INSTRUCTIONS)
         self.assertNotIn("王颢蓁", NEW_INSTRUCTIONS)
         self.assertNotIn("A/B", NEW_INSTRUCTIONS)
+        self.assertNotIn("A-B", NEW_INSTRUCTIONS)
+        self.assertNotIn("Wang", NEW_INSTRUCTIONS)
         value = sample()
         value["chapters"][0]["turns"][0]["paragraphs"] = ["你怎样构建产品？"]
         value["chapters"][0]["turns"][1]["paragraphs"] = ["我使用开放人工智能。"]
@@ -216,6 +218,8 @@ class NewStyleTests(unittest.TestCase):
             lambda v: v["chapters"][0]["turns"][0].update(speaker="Unknown"),
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["王颢蓁"]),
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["A/B测试"]),
+            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["A-B测试"]),
+            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["Wang method"]),
             lambda v: v["core"][0].update(evidence_ids=["missing"]),
         ):
             value = copy.deepcopy(sample())
