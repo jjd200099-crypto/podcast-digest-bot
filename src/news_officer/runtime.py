@@ -703,8 +703,8 @@ class NewsOfficerRuntime:
                 content = reader_episode(episode_summary(item, compact=compact), rewriter=rewriter, compact=compact)
                 allowed = (stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4)
                            and (not strict_selection_enabled() or strict_document_allowed(item.message)))
-                template = reader_episode(content, DOCUMENT_PLACEHOLDER,
-                    fulltext=getattr(settings, 'daily_document_fulltext', False))
+                template = (reader_episode(content, DOCUMENT_PLACEHOLDER,
+                    fulltext=getattr(settings, 'daily_document_fulltext', False)) if allowed else content)
                 if strict_selection_enabled():
                     label = '精读和完整中文对谈' if getattr(settings, 'daily_document_fulltext', False) else '精读'
                     template = content + f'\n\n[{label}]({DOCUMENT_PLACEHOLDER})' if allowed else content

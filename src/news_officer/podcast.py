@@ -933,20 +933,8 @@ class PodcastService:
                 results.append(DailyItem(episode, "failed", str(error)))
                 self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
         # Python's stable sort preserves discovery order for equal scores.
-        # With no editorial policy, obtain all summaries to rank their legacy stars.
-        if self.max_daily_summaries and not self.editorial_policy:
-            legacy_items = []
-            for episode, transcript, stored, decision in ranked_candidates:
-                try:
-                    summary = self._daily_digest(episode, transcript, stored, decision)
-                    legacy_items.append(DailyItem(episode, 'summarized', summary,
-                                                  _readable_attachment(stored, summary)))
-                except Exception as error:
-                    logger.exception('Legacy capped summary failed for %s', episode.id)
-                    results.append(DailyItem(episode, 'failed', str(error)))
-            return ranked_daily_items(results + ranked_daily_items(legacy_items)[:self.max_daily_summaries])
         ranked_candidates.sort(key=lambda item: -(item[3] or {}).get('stars', 0))
-        for episode, transcript, stored, decision in ranked_candidates[:self.max_daily_summaries]:
+        for episode, transcript, stored, decision in ranked_candidates:
             if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                 break
             try:
@@ -959,10 +947,12 @@ class PodcastService:
                     error,
                 )
                 results.append(DailyItem(episode, "summary_format_error", str(error)))
+                self.store.defer_daily_transcript(episode, '摘要格式待重试')
                 continue
             except Exception as error:
                 logger.exception("Deferred podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
+                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
                 continue
             results.append(
                 DailyItem(

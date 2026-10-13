@@ -855,7 +855,7 @@ def _render_blocks(blocks: tuple[TranscriptBlock, ...]) -> list[str]:
 
 
 def _digest_body(markdown: str) -> str:
-    lines = markdown.strip().splitlines()
+    lines = re.sub(r"<!--.*?-->", "", markdown, flags=re.DOTALL).strip().splitlines()
     first_point = next(
         (index for index, line in enumerate(lines) if NUMBERED_POINT_RE.match(line)),
         None,
