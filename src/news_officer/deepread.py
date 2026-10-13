@@ -14,17 +14,17 @@ INSTRUCTIONS = (Path(__file__).parent / "prompts" / "deepread_new_style.md").rea
     encoding="utf-8"
 )
 VERSION = (
-    "deepread-new-style-v2-" + hashlib.sha256(INSTRUCTIONS.encode()).hexdigest()[:12]
+    "deepread-new-style-v3-" + hashlib.sha256(INSTRUCTIONS.encode()).hexdigest()[:12]
 )
 INTRO = "依据完整文字稿整理核心内容与中文对谈；保留原始顺序、第一人称、案例与限定条件，删除广告和无实质信息的重复。"
 # Output validation rejects workflow provenance, including variants used in drafts.
 WORKFLOW_LABEL = re.compile(
     r"王[颢頗颇]蓁|(?i:wang\s+method)|"
-    r"(?<!\w)A-B(?!\w)|[\[【]A[-/]B[\]】]|"
-    r"(?<!\w)A[-/]B(?=\s*(?:工作流|流程|方法|标签))"
+    r"(?<![A-Za-z0-9_])A-B(?![A-Za-z0-9_]|\s*(?:testing|测试))|[\[【]A[-/]B[\]】]|"
+    r"(?<![A-Za-z0-9_])A[-/]B(?=\s*(?:工作流|流程|方法|标签))"
 )
 BATCH_BLOCKS = 5
-BATCH_CHARACTERS = 6000
+BATCH_CHARACTERS = 3000
 MAX_OUTPUT_TOKENS = 12000
 CHUNK_INSTRUCTIONS = (
     "\n输入是按原稿顺序切分的一批文字稿；仅整理本批全部内容，不补写其他批次。"
@@ -68,6 +68,73 @@ class DeepRead(BaseModel):
     proper_nouns: list[ProperNoun]
     exclusions: list[Exclusion]
     corrections: list[Correction]
+
+
+class ChapterBoundary(BaseModel):
+    title: str = Field(min_length=1)
+    start_turn: int = Field(ge=0)
+
+
+class Consolidation(BaseModel):
+    core: list[NotePoint] = Field(min_length=10, max_length=18)
+    chapters: list[ChapterBoundary] = Field(min_length=5, max_length=10)
+
+
+def consolidate(client, model, merged, evidence):
+    turns = [turn for chapter in merged["chapters"] for turn in chapter["turns"]]
+    prompt = json.dumps(
+        {
+            "core": merged["core"],
+            "sections": [
+                {"title": chapter["title"], "turn_count": len(chapter["turns"])}
+                for chapter in merged["chapters"]
+            ],
+            "turns": [{"index": i, **turn} for i, turn in enumerate(turns)],
+        },
+        ensure_ascii=False,
+    )
+    instructions = (
+        "将各批核心内容与章节整合为整期统一内容：10–18条具体加粗标签的核心要点，"
+        "5–10章，合并重复主题并保留细节、例子和限定条件。core evidence_ids沿用输入。"
+        "章节仅返回title和start_turn（从0开始的全局对谈索引），首章从0开始，"
+        "严格递增，每章至少一轮，保持原始顺序。所有对谈由程序原样保留，不重写。"
+        "不得出现内部工作流标签。"
+    )
+    for attempt in range(3):
+        try:
+            response = client.responses.parse(
+                model=model,
+                instructions=instructions,
+                input=prompt,
+                text_format=Consolidation,
+                store=False,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+            )
+            if response.output_parsed is None:
+                raise ValueError("Incomplete consolidation output")
+            value = Consolidation.model_validate(response.output_parsed.model_dump())
+            starts = [chapter.start_turn for chapter in value.chapters]
+            if (
+                starts[0] != 0
+                or starts != sorted(set(starts))
+                or starts[-1] >= len(turns)
+            ):
+                raise ValueError("Invalid consolidation chapter boundaries")
+            result = {
+                **merged,
+                "core": [point.model_dump() for point in value.core],
+                "chapters": [
+                    {"title": chapter.title, "turns": turns[start:end]}
+                    for chapter, start, end in zip(
+                        value.chapters, starts, starts[1:] + [len(turns)]
+                    )
+                ],
+            }
+            return validate_deepread(result, evidence)
+        except Exception as error:
+            if attempt == 2:
+                raise ValueError("Deepread consolidation failed") from error
+            instructions += "\n上次输出未通过校验：" + str(error)[:200] + "。请修正。"
 
 
 def source_evidence(text):
@@ -249,6 +316,8 @@ def generate(client, model, record):
             if key != "speakers":
                 items.extend(value[key])
     merged["speakers"] = list(speakers.values())
+    if len(batches) > 1:
+        return consolidate(client, model, merged, evidence)
     return validate_deepread(merged, evidence)
 
 

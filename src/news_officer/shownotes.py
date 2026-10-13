@@ -244,8 +244,6 @@ def render_episode(record, notes, digest='', *, fulltext_attached=False, new_sty
     if new_style and "chapters" in notes:
         from .deepread import render
         return render(record, notes, digest)
-    if new_style:
-        fulltext_attached = False
     evidence = transcript_evidence(record.transcript.text)
     notes = validate_notes(notes, evidence)
     ep = record.episode

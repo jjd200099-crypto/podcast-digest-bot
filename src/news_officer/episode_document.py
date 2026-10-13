@@ -304,11 +304,27 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 entries = json.loads(previous['entries_json']) if previous else []
                 nodes = json.loads(previous['nodes_json']) if previous else []
                 replacement = {}
-                if self.new_style and nodes and identity not in entries:
-                    # Freeze and verify the existing generated document before
-                    # changing layouts; do not append a duplicate full interview.
-                    replacement = {'replacement_base': nodes, 'replacement_start': 0}
-                    nodes, entries = [], []
+                episode_nodes = None
+                if self.new_style and identity not in entries:
+                    try:
+                        episode_nodes, generated_new_style = self._notes(
+                            record, digest, fulltext_attached=self.include_fulltext and bool(nodes),
+                            return_style=True)
+                    except Exception:
+                        if requested or enrichment:
+                            raise
+                        logger.warning('Episode document validation failed; deferred', exc_info=True)
+                        deferred = True
+                        continue
+                    if nodes and not generated_new_style:
+                        # Keep the existing notes and full-text appendix intact.
+                        documents.append({'key': key, 'title': title, 'nodes': nodes,
+                                          'entries': entries, 'revision': self.document_identity(record),
+                                          'stars': stars(digest)})
+                        continue
+                    if nodes:
+                        replacement = {'replacement_base': nodes, 'replacement_start': 0}
+                        nodes, entries = [], []
                 if self.include_fulltext and not self.new_style and fulltext_identity(record) not in entries:
                     legacy = [i for i, n in enumerate(nodes) if ''.join(
                         e.get('text_run', {}).get('content', '') for e in n.get('heading2', {}).get('elements', [])
@@ -324,7 +340,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     if nodes:
                         nodes.append(text_node('补充精读（原稿版本更新）', 'heading1'))
                     try:
-                        episode_nodes = self._notes(record, digest, fulltext_attached=self.include_fulltext)
+                        if episode_nodes is None:
+                            episode_nodes = self._notes(record, digest, fulltext_attached=self.include_fulltext)
                     except Exception:
                         if requested or enrichment:
                             raise
@@ -332,7 +349,8 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                         deferred = True
                         continue
                     nodes.extend(episode_nodes)
-                    entries.append(identity)
+                    if not self.new_style or generated_new_style:
+                        entries.append(identity)
                 if self.include_fulltext and not self.new_style:
                     appendix_id = fulltext_identity(record)
                     if appendix_id not in entries:

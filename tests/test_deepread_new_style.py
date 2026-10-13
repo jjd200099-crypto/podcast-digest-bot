@@ -220,6 +220,8 @@ class NewStyleTests(unittest.TestCase):
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["【A/B】"]),
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["[A-B]"]),
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["Wang method"]),
+            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["用A-B工作流"]),
+            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["用A/B方法"]),
             lambda v: v["core"][0].update(evidence_ids=["missing"]),
         ):
             value = copy.deepcopy(sample())
@@ -228,7 +230,14 @@ class NewStyleTests(unittest.TestCase):
                 validate_deepread(value, transcript_evidence(record().transcript.text))
 
     def test_normal_english_in_titles_bodies_and_cached_render(self):
-        for text in ("data-backed", "ultra-bullish", "Alpha-Beta", "A/B testing"):
+        for text in (
+            "data-backed",
+            "ultra-bullish",
+            "Alpha-Beta",
+            "A/B testing",
+            "A-B testing",
+            "A-B 测试",
+        ):
             with self.subTest(text=text):
                 rec, value = record(), sample()
                 rec.episode.title = text
@@ -252,9 +261,34 @@ class NewStyleTests(unittest.TestCase):
             f"[00:{i:02d}] Speaker{i % 2}: source {i}" for i in range(12)
         )
         attempts = {}
+        consolidation_attempts = []
         client = Mock()
 
         def respond(**kwargs):
+            from news_officer.deepread import Consolidation
+
+            if kwargs["text_format"] is Consolidation:
+                data = json.loads(kwargs["input"])
+                consolidation_attempts.append(data)
+                if len(consolidation_attempts) == 1:
+                    raise TimeoutError("consolidation timeout")
+                return SimpleNamespace(
+                    output_parsed=Consolidation.model_validate(
+                        {
+                            "core": [
+                                {
+                                    "text": f"**整期主题{i}：**内容",
+                                    "evidence_ids": ["C0001"],
+                                }
+                                for i in range(10)
+                            ],
+                            "chapters": [
+                                {"title": f"主题{i}", "start_turn": i * 2}
+                                for i in range(5)
+                            ],
+                        }
+                    )
+                )
             batch = json.loads(kwargs["input"])["transcript"]
             key = next(iter(batch))
             attempts[key] = attempts.get(key, 0) + 1
@@ -294,9 +328,45 @@ class NewStyleTests(unittest.TestCase):
         client.responses.parse.side_effect = respond
         value = generate(client, "model", rec)
         self.assertEqual(attempts, {"C0001": 2, "C0006": 2, "C0011": 2})
-        self.assertEqual(len(value["chapters"]), 3)
+        self.assertEqual(len(consolidation_attempts), 2)
+        self.assertEqual(len(value["chapters"]), 5)
+        self.assertEqual(len(value["core"]), 10)
+        self.assertEqual(
+            [turn for chapter in value["chapters"] for turn in chapter["turns"]],
+            [
+                {k: v for k, v in turn.items() if k != "index"}
+                for turn in consolidation_attempts[-1]["turns"]
+            ],
+        )
         self.assertEqual(len(value["speakers"]), 1)
         validate_deepread(value, source_evidence(rec.transcript.text))
+
+    def test_consolidation_failure_retries_and_raises(self):
+        from news_officer.deepread import Consolidation, consolidate
+
+        invalid_boundaries = Consolidation.model_validate(
+            {
+                "core": sample()["core"] * 10,
+                "chapters": [{"title": "重复边界", "start_turn": 0}] * 5,
+            }
+        )
+        for output in (
+            None,
+            Mock(model_dump=lambda: {"core": [], "chapters": []}),
+            invalid_boundaries,
+        ):
+            client = Mock()
+            client.responses.parse.return_value.output_parsed = output
+            with self.assertRaisesRegex(ValueError, "consolidation failed"):
+                consolidate(
+                    client, "model", sample(), source_evidence(record().transcript.text)
+                )
+            self.assertEqual(client.responses.parse.call_count, 3)
+
+    def test_batch_character_budget(self):
+        from news_officer.deepread import BATCH_CHARACTERS
+
+        self.assertEqual(BATCH_CHARACTERS, 3000)
 
     def test_long_single_turn_is_bounded_and_lossless(self):
         text = "[00:01] Host: " + "long source " * 2000
@@ -435,6 +505,69 @@ class NewStyleCompilerTests(unittest.TestCase):
                         3,
                     )
                     self.assertEqual(f.compiler.publish(job), result)
+
+    def test_existing_document_fallback_preserves_fulltext_and_does_not_cache(self):
+        import test_document_transcript as fixtures
+
+        from news_officer.models import Job
+
+        f = fixtures.FulltextDocuments()
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        compiler = f.compiler
+        first_job = f.case.job()
+        first = compiler.publish(first_job)
+        f.f.store.complete(first_job.key)
+        before = copy.deepcopy(f.f.api.data)
+        old = f.f.writer.generate(f.f.record)
+        client = Mock()
+        client.responses.parse.return_value.output_parsed = EpisodeNotes.model_validate(
+            old
+        )
+        compiler.writer = ShownotesWriter(client, "model", new_style=True)
+        failing_generate = self.enterContext(
+            patch(
+                "news_officer.deepread.generate",
+                side_effect=ValueError("new style failed"),
+            )
+        )
+        compiler.new_style = True
+        compiler.request_authorizer = lambda _: True
+        job = Job(
+            "fallback-existing",
+            "document",
+            {
+                "mode": "requested_episode",
+                "episode_id": f.f.record.episode.id,
+                "message_id": "test",
+                "chat_id": "test",
+                "chat_type": "p2p",
+                "sender_open_id": "owner",
+                "reply_in_thread": False,
+            },
+            1,
+        )
+        f.f.store.enqueue(job.key, job.kind, job.payload)
+        result = compiler.publish(job)
+        self.assertEqual(result["documents"][0]["url"], first["documents"][0]["url"])
+        self.assertEqual(f.f.api.data, before)
+        self.assertTrue(f.appendix(first["documents"][0]["url"].rsplit("/", 1)[-1]))
+        with f.f.store._connect() as db:
+            self.assertIsNone(
+                db.execute(
+                    "SELECT * FROM episode_shownotes WHERE identity=?",
+                    (note_identity(f.f.record, new_style=True),),
+                ).fetchone()
+            )
+        self.assertFalse(
+            (
+                compiler.root / (note_identity(f.f.record, new_style=True) + ".md")
+            ).exists()
+        )
+        calls = failing_generate.call_count
+        compiler._notes(f.f.record, "", fulltext_attached=True)
+        compiler._notes(f.f.record, "", fulltext_attached=True)
+        self.assertEqual(failing_generate.call_count, calls + 2)
 
     def test_runtime_passes_config_flag_to_writer_and_compiler(self):
         import importlib

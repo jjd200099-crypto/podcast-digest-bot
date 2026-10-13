@@ -153,19 +153,21 @@ class DailyDocumentCompiler:
                                          'targets': audience})
         return count
 
-    def _notes(self, record, digest, *, fulltext_attached=False):
+    def _notes(self, record, digest, *, fulltext_attached=False, return_style=False):
         identity = note_identity(record, new_style=self.new_style)
         with self.store._connect() as db:
             row = db.execute('SELECT notes_json FROM episode_shownotes WHERE identity=?', (identity,)).fetchone()
         notes = json.loads(row[0]) if row else self.writer.generate(record)
         nodes, markdown = render_episode(record, notes, digest, fulltext_attached=fulltext_attached, new_style=self.new_style)
-        if not row:
+        is_new_style = "chapters" in notes
+        if not row and (not self.new_style or is_new_style):
             with self.store._connect() as db:
                 db.execute('INSERT OR IGNORE INTO episode_shownotes VALUES (?,?,?)',
                            (identity, json.dumps(notes, ensure_ascii=False), markdown))
         # Generated application artifacts, never raw secret configuration or source deletion.
-        (self.root / (identity + '.md')).write_text(markdown, encoding='utf-8')
-        return nodes
+        artifact_identity = note_identity(record, new_style=self.new_style and is_new_style)
+        (self.root / (artifact_identity + '.md')).write_text(markdown, encoding='utf-8')
+        return (nodes, is_new_style) if return_style else nodes
 
     def _document(self, day, title):
         with self.store._connect() as db:
