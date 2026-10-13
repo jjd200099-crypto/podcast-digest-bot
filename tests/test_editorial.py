@@ -84,7 +84,7 @@ class EditorialTests(unittest.TestCase):
                 value.relevance.priority = topic
                 decision = decide(value, FULL_TEXT)
                 self.assertTrue(decision['selected'])
-                self.assertEqual(decision['stars'], 5 if density == 5 else (4 if density >= 3 else 3))
+                self.assertEqual(decision['stars'], 5 if density == 5 else 4)
                 self.assertEqual(decision['assessment']['density']['score'], density)
 
     def test_priority_requires_valid_relevance_evidence(self):
@@ -102,7 +102,7 @@ class EditorialTests(unittest.TestCase):
         value.relevance.priority = 'model_lab'
         resolved = resolve_evidence(value, [TEXT])
         self.assertEqual(resolved.relevance.priority, 'model_lab')
-        self.assertEqual(decide(resolved, TEXT)['stars'], 3)
+        self.assertEqual(decide(resolved, TEXT)['stars'], 4)
         raw = value.model_dump()
         raw['relevance'].pop('priority')
         with self.assertRaises(ValueError):
@@ -240,7 +240,7 @@ class EditorialTests(unittest.TestCase):
     def test_strict_priority_does_not_retry_or_inflate_low_relevance(self):
         raw = source_assessment(relevance=2, density=4).model_dump()
         raw['relevance']['priority'] = 'model_lab'
-        raw.update(evidence_quality='high', reading_recommendation='值得看全文')
+        raw.update(ai_content_share='high', evidence_quality='high', reading_recommendation='值得看全文')
         client = Mock()
         client.responses.create.return_value = SimpleNamespace(output_text=json.dumps(raw))
         policy = EditorialPolicy(client, 'strict', self.store, strict=True)
@@ -263,7 +263,7 @@ class EditorialTests(unittest.TestCase):
                                       ('high', '值得看全文', 3)]:
             raw = assessment(relevance=5, density=2).model_dump()
             raw['relevance']['priority'] = 'model_lab'
-            raw.update(evidence_quality=quality, reading_recommendation=advice)
+            raw.update(ai_content_share='high', evidence_quality=quality, reading_recommendation=advice)
             result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
             self.assertEqual(result['stars'], stars)
             rendered = render_daily_summary(EditorialPolicy.apply(SUMMARY, result))
@@ -275,15 +275,15 @@ class EditorialTests(unittest.TestCase):
 
     def test_strict_fields_are_required_and_reprompted(self):
         from news_officer.editorial import StrictAssessment, StrictSourceAssessment
-        for field in ('evidence_quality', 'reading_recommendation'):
+        for field in ('evidence_quality', 'reading_recommendation', 'ai_content_share'):
             for schema, raw in ((StrictAssessment, assessment().model_dump()),
                                 (StrictSourceAssessment, source_assessment().model_dump())):
-                raw.update(evidence_quality='high', reading_recommendation='值得看全文')
+                raw.update(ai_content_share='high', evidence_quality='high', reading_recommendation='值得看全文')
                 raw.pop(field)
                 with self.assertRaises(ValueError):
                     schema.model_validate(raw)
             valid = source_assessment().model_dump()
-            valid.update(evidence_quality='high', reading_recommendation='值得看全文')
+            valid.update(ai_content_share='high', evidence_quality='high', reading_recommendation='值得看全文')
             invalid = dict(valid)
             invalid.pop(field)
             client = Mock()
@@ -292,17 +292,20 @@ class EditorialTests(unittest.TestCase):
             policy = EditorialPolicy(client, field, self.store, strict=True)
             self.assertTrue(policy.assess(self.episode, self.transcript)['selected'])
             self.assertEqual(client.responses.create.call_count, 2)
+            feedback = client.responses.create.call_args.kwargs['input']
+            for required in ('evidence_quality', 'reading_recommendation', 'ai_content_share'):
+                self.assertIn(required, feedback)
 
     def test_strict_contradictory_evidence_reprompts(self):
-        invalid = source_assessment().model_dump()
-        invalid.update(evidence_quality='low', reading_recommendation='值得看全文')
+        invalid = source_assessment(density=3).model_dump()
+        invalid.update(ai_content_share='high', evidence_quality='low', reading_recommendation='值得看全文')
         valid = {**invalid, 'evidence_quality': 'high'}
         client = Mock()
         client.responses.create.side_effect = [SimpleNamespace(output_text=json.dumps(v))
                                                for v in (invalid, valid)]
         result = EditorialPolicy(client, 'contradiction', self.store, strict=True).assess(
             self.episode, self.transcript)
-        self.assertEqual(result['stars'], 4)
+        self.assertEqual(result['stars'], 3)
         self.assertEqual(client.responses.create.call_count, 2)
 
     def test_capped_failures_backfill_and_schedule_retry(self):
@@ -394,7 +397,7 @@ class EditorialTests(unittest.TestCase):
         for relevance, quality in [(5, 'low'), (2, 'high')]:
             raw = assessment(relevance=relevance, density=5).model_dump()
             raw['relevance']['priority'] = 'model_lab'
-            raw.update(evidence_quality=quality, reading_recommendation='值得编译')
+            raw.update(ai_content_share='high', evidence_quality=quality, reading_recommendation='值得编译')
             if quality == 'low':
                 with self.assertRaises(ValueError):
                     decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
@@ -402,3 +405,47 @@ class EditorialTests(unittest.TestCase):
             result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
             self.assertLess(result['stars'], 3)
             self.assertFalse(result['selected'])
+
+    def test_strict_small_ai_share_caps_priority_and_full_reading(self):
+        from news_officer.daily_report import render_daily_summary
+        from news_officer.editorial import (
+            STRICT_POLICY_VERSION,
+            STRICT_RUBRIC,
+            StrictAssessment,
+        )
+        from news_officer.strict_selection import strict_document_allowed
+        self.assertEqual(STRICT_POLICY_VERSION, 'strict-selection-v2')
+        self.assertIn('ai_content_share', STRICT_RUBRIC)
+        for priority in ('none', 'model_lab', 'ai_unicorn_founder'):
+            for advice in ('值得看全文', '值得编译', '看摘要', '值得看摘要'):
+                raw = assessment(relevance=5, density=5).model_dump()
+                raw['relevance']['priority'] = priority
+                raw.update(ai_content_share='low', evidence_quality='high', reading_recommendation=advice)
+                result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
+                self.assertEqual(result['stars'], 3)
+                self.assertEqual(result['assessment']['ai_content_share'], 'low')
+                self.assertEqual(result['assessment']['reading_recommendation'], '值得看摘要')
+                # apply also defends against an inconsistent incoming score.
+                for stars in (3, 5):
+                    summary = EditorialPolicy.apply(SUMMARY, {**result, 'stars': stars})
+                    self.assertIn('推荐星级：★★★☆☆', summary)
+                    self.assertIn('阅读建议：值得看摘要', render_daily_summary(summary))
+                    self.assertNotIn('值得看全文', summary)
+                    self.assertFalse(strict_document_allowed(summary))
+
+    def test_default_rubric_retains_priority_full_read_floor(self):
+        from news_officer.editorial import POLICY_VERSION, RUBRIC
+        self.assertEqual(POLICY_VERSION, 'relevance-density-priority-v4')
+        self.assertIn('命中者至少归为“值得看全文”', RUBRIC)
+        self.assertNotIn('ai_content_share', RUBRIC)
+
+    def test_strict_priority_floor_requires_density_three(self):
+        from news_officer.editorial import StrictAssessment
+        for priority in ('model_lab', 'ai_unicorn_founder'):
+            for density in range(6):
+                raw = assessment(relevance=5, density=density).model_dump()
+                raw['relevance']['priority'] = priority
+                raw.update(ai_content_share='high', evidence_quality='high', reading_recommendation='值得编译')
+                result = decide(StrictAssessment.model_validate(raw), FULL_TEXT, strict=True)
+                self.assertEqual(result['stars'], 5 if density == 5 else (4 if density >= 3 else 3))
+                self.assertEqual(result['assessment']['density']['score'], density)

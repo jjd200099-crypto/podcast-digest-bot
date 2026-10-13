@@ -24,12 +24,12 @@ class SelectedDocuments(unittest.TestCase):
         f.store.save_transcript_digest('one', '推荐星级：★★★★★',
                                        record.content_sha256, record.record_revision_sha256)
         for enabled in ('true', 'false'):
-            for rating, advice in ((3, '看摘要'), (4, '值得看全文'), (5, '值得编译'), (4, '看摘要'), (4, '无关')):
+            for rating, advice in ((3, '看摘要'), (3, '值得看摘要'), (4, '值得看全文'), (5, '值得编译'), (4, '看摘要'), (4, '无关')):
                 for minimum in (3, 4, 5):
                     with self.subTest(enabled=enabled, rating=rating, advice=advice, minimum=minimum), patch.dict(
                             'os.environ', {'NEWS_OFFICER_STRICT_SELECTION': enabled}):
                         summary = EditorialPolicy.apply(VALID_SUMMARY, {
-                            'policy': 'strict-selection-v1', 'stars': rating,
+                            'policy': 'strict-selection-v2', 'stars': rating,
                             'assessment': {'reading_recommendation': advice, 'evidence_quality': 'high', 'reason': '从广告案例讲清模型效果与客户回报之间的因果，适合研究商业化。'}})
                         item = f.store.get_job_result(f.base, 'one')
                         item['message'] = summary

@@ -48,7 +48,7 @@ def historical_rows(db, start, end):
         for row in db.execute('SELECT DISTINCT t.* FROM editorial_reviews r JOIN episode_transcripts t USING(episode_id) WHERE r.created_at>=? AND r.created_at<=? ORDER BY r.created_at,r.episode_id', (job['created_at'], job['updated_at'])):
             episodes.setdefault(row['episode_id'], Episode(row['episode_id'], row['title'], row['episode_url'], row['show_name']))
         for episode in episodes.values():
-            review = db.execute("SELECT decision_json FROM editorial_reviews WHERE episode_id=? AND created_at<=? AND json_extract(decision_json, '$.policy') != 'strict-selection-v1' ORDER BY created_at DESC,cache_key LIMIT 1", (episode.id, job['updated_at'])).fetchone()
+            review = db.execute("SELECT decision_json FROM editorial_reviews WHERE episode_id=? AND created_at<=? AND json_extract(decision_json, '$.policy') NOT LIKE 'strict-selection-%' ORDER BY created_at DESC,cache_key LIMIT 1", (episode.id, job['updated_at'])).fetchone()
             transcript = db.execute('SELECT transcript_text,source,source_url FROM episode_transcripts WHERE episode_id=?', (episode.id,)).fetchone()
             yield day.isoformat(), episode, json.loads(review[0]) if review else None, transcript
 

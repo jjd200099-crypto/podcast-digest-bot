@@ -189,6 +189,6 @@ Feishu client, or enqueue deliveries. SQLite is opened with `mode=ro` and
 rendering of archived summaries, rather than regenerating them or reproducing a
 previously frozen send byte for byte.
 
-`NEWS_OFFICER_STRICT_SELECTION=false`（默认关闭）保留原有评分与阅读建议。设为 `true` 后采用独立评分缓存和严格规则：仅松散相关于 AI/投资，或个人观点、未经核验推测主导的节目低于三星收录线；模型同时判断证据质量和阅读建议，低证据不标为“值得看全文”。priority 在相关度不足 4 时取消，不要求模型抬分；四星保底仅适用于相关度至少 4 且证据不低的节目，并受实际阅读判断约束。无论开关，`NEWS_OFFICER_MAX_SUMMARIES>0` 均先评估全部候选，再按星级降序取前 N，平分保持发现顺序；默认 0 不限数量。
+`NEWS_OFFICER_STRICT_SELECTION=false`（默认关闭）保留原有评分与阅读建议。设为 `true` 后采用 `strict-selection-v2` 独立评分缓存和严格规则：仅松散相关于 AI/投资，或个人观点、未经核验推测主导的节目低于三星收录线；模型同时判断 AI 内容占比、证据质量和阅读建议；AI 内容仅占整期小部分时最多三星，建议“值得看摘要”，不生成精读文档，低证据不标为“值得看全文”。priority 在相关度不足 4 时取消，不要求模型抬分；四星保底仅适用于相关度至少 4、信息密度至少 3 且证据不低的节目，并受实际阅读判断约束。无论开关，`NEWS_OFFICER_MAX_SUMMARIES>0` 均先评估全部候选，再按星级降序取前 N，平分保持发现顺序；默认 0 不限数量。
 
 只读回测：`PYTHONPATH=src python scripts/backtest_selection.py /path/state.sqlite3 2026-10-01 2026-10-07`。默认只读取 SQLite（`mode=ro`），不调用服务或写入数据库。加 `--rescore --model MODEL` 可显式调用现有 `EditorialPolicy.assess` 分别使用旧、新规则评分（会向 LLM 发送存档全文并产生费用），评分缓存为不写入的内存接口。输出存档星级、相关度、密度、priority、去掉保底后的星级及保底是否抬分、新旧重评分、入选与理由。使用 `jobs` 日报时间、`job_results` 的 daily_item、执行时间内的 `editorial_reviews` 与 `episode_transcripts` 重建候选；历史未保存的发现结果无法恢复，时间窗口归属为近似。历史全文被替换后可能与原评分不匹配，此时去保底星级显示 `?`。

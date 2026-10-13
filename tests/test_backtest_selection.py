@@ -23,8 +23,7 @@ def test_backtest_read_only_stored_floor_and_optional_rescore(tmp_path):
     text = 'A sufficiently long original evidence passage on concrete model inference costs.'
     assessment = Assessment.model_validate({'relevance': {'score': 5, 'quotes': [text], 'priority': 'model_lab'}, 'density': {'score': 2, 'quotes': [text]}, 'reason': '原文提供模型推理成本的一手细节，信息偏薄。'})
     decision = decide(assessment, text)
-    # This fixture represents an archived review under the former four-star floor.
-    decision['stars'] = 4
+    assert decision['stars'] == 4
     episode = Episode('e', 'Test episode', 'https://example.test/e', 'Show')
     from news_officer.models import Transcript
     store.save_verified_transcript(episode, Transcript(text, 'official', '', True))
@@ -32,6 +31,9 @@ def test_backtest_read_only_stored_floor_and_optional_rescore(tmp_path):
         db.execute("INSERT INTO jobs (job_key,kind,payload_json,available_at,created_at,updated_at) VALUES ('daily','daily','{}',?,?,?)", ('2026-10-01T01:00:00+00:00',) * 3)
         db.execute("INSERT INTO job_results VALUES ('daily','item','daily_item',?,?)", (json.dumps(DailyItem(episode, 'summarized').to_persisted_dict()), '2026-10-01T01:00:00+00:00'))
         db.execute('INSERT INTO editorial_reviews VALUES (?,?,?,?)', ('e', 'old', json.dumps(decision), '2026-10-01T00:00:00+00:00'))
+        strict = {**decision, 'policy': 'strict-selection-v2', 'stars': 3}
+        db.execute('INSERT INTO editorial_reviews VALUES (?,?,?,?)',
+                   ('e', 'strict', json.dumps(strict), '2026-10-01T00:30:00+00:00'))
     before = path.read_bytes()
     with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as db:
         db.row_factory = sqlite3.Row

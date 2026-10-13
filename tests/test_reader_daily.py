@@ -285,7 +285,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         for enabled in ('true', 'false'):
             with patch.dict('os.environ', {'NEWS_OFFICER_STRICT_SELECTION': enabled}):
                 items = [self.item('three', 3), self.item('four', 4), self.item('summary', 4)]
-                items = [replace(item, message=item.message + '\n<!-- strict-selection-v1 -->\n阅读建议：' + advice)
+                items = [replace(item, message=item.message + '\n链接：' + item.episode.url + '\n<!-- strict-selection-v2 -->\n阅读建议：' + advice)
                          for item, advice in zip(items, ('看摘要', '值得看全文', '看摘要'), strict=True)]
                 items = [replace(item, attachment=fixtures.attachment_for(
                     self.store.get_verified_transcript(item.episode.id), item.message)) for item in items]
@@ -300,6 +300,10 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
                 bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
                 self.assertEqual(bundle['enrichment']['eligible'],
                                  ['four'] if enabled == 'true' else ['four', 'summary'])
+                for section in bundle['enrichment']['sections']:
+                    if enabled == 'true' and '精读和完整中文对谈' in section['template']:
+                        self.assertLess(section['template'].index('[精读和完整中文对谈]'),
+                                        section['template'].index('[收听节目]'))
                 documents = {i.episode.id: {'url': 'https://example.test/' + i.episode.id} for i in items}
                 _, content = _content(bundle, documents, bundle['deliveries'][0])
                 self.assertEqual(content.count('精读和完整中文对谈'), 1 if enabled == 'true' else 2)
@@ -310,7 +314,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
     async def test_internal_markers_are_removed_from_archived_body(self):
         from news_officer.daily_report import render_daily_summary
         item = self.item('markers')
-        message = item.message + '\n<!-- strict-selection-v1 -->\n<!-- future-internal-v2 -->\n阅读建议：值得看全文'
+        message = item.message + '\n<!-- strict-selection-v2 -->\n<!-- future-internal-v2 -->\n阅读建议：值得看全文'
         with self.store._connect() as db:
             db.execute('DELETE FROM episode_digests WHERE episode_id=?', (item.episode.id,))
         self.store.save_transcript_digest(item.episode.id, message,
@@ -322,7 +326,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         for rendered in (render_daily_summary(message), read_daily_digest(self.store, '2026-09-19')['markdown']):
             self.assertIn('markers 的核心判断', rendered)
             self.assertNotIn('<!--', rendered)
-            self.assertNotIn('strict-selection-v1', rendered)
+            self.assertNotIn('strict-selection-v2', rendered)
 
     async def test_document_label_matches_fulltext_setting(self):
         from news_officer.daily_enrichment import _content

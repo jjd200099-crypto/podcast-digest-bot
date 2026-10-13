@@ -705,9 +705,15 @@ class NewsOfficerRuntime:
                            and (not strict_selection_enabled() or strict_document_allowed(item.message)))
                 template = (reader_episode(content, DOCUMENT_PLACEHOLDER,
                     fulltext=getattr(settings, 'daily_document_fulltext', False)) if allowed else content)
-                if strict_selection_enabled():
+                if strict_selection_enabled() and allowed:
                     label = '精读和完整中文对谈' if getattr(settings, 'daily_document_fulltext', False) else '精读'
-                    template = content + f'\n\n[{label}]({DOCUMENT_PLACEHOLDER})' if allowed else content
+                    lines = content.splitlines()
+                    index = next((i for i, line in enumerate(lines) if line.startswith('[收听节目](')), len(lines))
+                    prose = '\n'.join(lines[:index]).rstrip()
+                    links = '\n'.join(lines[index:]).strip()
+                    template = prose + f'\n\n[{label}]({DOCUMENT_PLACEHOLDER})'
+                    if links:
+                        template += '\n\n' + links
                 published = item.episode.published_at
                 if published and published < start:
                     prefix = f'补齐旧节目 · {published.astimezone(zone):%m月%d日}发布\n\n'

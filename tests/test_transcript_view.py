@@ -41,13 +41,13 @@ class TranscriptCleaningTests(unittest.TestCase):
         return content.decode("utf-8")
 
     def test_digest_internal_markers_are_removed_from_attachment_body(self):
-        digest = '1. Concrete model findings.\n<!-- strict-selection-v1 -->\n<!-- future-internal-v2 -->\n阅读建议：看摘要'
+        digest = '1. Concrete model findings.\n<!-- strict-selection-v2 -->\n<!-- future-internal-v2 -->\n阅读建议：看摘要'
         _, content = render_readable_transcript(stored('Guest: Source details.'), digest_markdown=digest)
         rendered = content.decode('utf-8')
         self.assertIn('Concrete model findings.', rendered)
         self.assertIn('阅读建议：看摘要', rendered)
         self.assertNotIn('<!--', rendered)
-        self.assertNotIn('strict-selection-v1', rendered)
+        self.assertNotIn('strict-selection-v2', rendered)
 
     def test_srt_noise_stage_direction_and_filler_are_removed(self):
         text = """WEBVTT
