@@ -17,7 +17,13 @@ from xml.etree import ElementTree
 
 import requests
 
-from .free_proxies import DEFINITIVE_ERRORS, TimeoutSession, fetch_with_free_proxies
+from .free_proxies import (
+    DEFINITIVE_ERRORS,
+    CaptionValidationFailed,
+    ProxyBudgetExhausted,
+    TimeoutSession,
+    fetch_with_free_proxies,
+)
 from .models import Episode, Transcript
 
 YOUTUBE_HOSTS = {
@@ -475,7 +481,7 @@ class YouTubeTranscriptProvider:
             transcript = self._fetch_api(episode)
             if transcript:
                 return transcript
-        except YouTubeFinalSkip:
+        except (YouTubeFinalSkip, ProxyBudgetExhausted):
             raise
         except Exception as error:  # noqa: BLE001 - transcript errors are logged and skipped
             logging.getLogger(__name__).warning("YouTube transcript API failed for %s (%s)", episode.url, type(error).__name__)
@@ -484,7 +490,7 @@ class YouTubeTranscriptProvider:
             if transcript:
                 logging.getLogger(__name__).info("YouTube transcript succeeded via yt-dlp")
             return transcript
-        except YouTubeFinalSkip:
+        except (YouTubeFinalSkip, ProxyBudgetExhausted):
             raise
         except Exception as error:  # noqa: BLE001 - transcript errors are logged and skipped
             logging.getLogger(__name__).warning("YouTube transcript unavailable for %s: %s", episode.url, error)
@@ -526,19 +532,19 @@ class YouTubeTranscriptProvider:
             if effective < 900:
                 # Duration unknown upstream (e.g. Atom feed + blocked yt-dlp): infer it
                 # from caption timing and keep the >=15 minute rule.
-                return None
+                raise CaptionValidationFailed("Caption duration below 15 minutes")
             if (intervals_cover_episode(intervals, effective)
                     and len(text) >= max(5_000, round(effective / 60) * 300)
                     and 60 <= len(text.split()) / (effective / 60) <= 260):
                 return Transcript(text, self.name, url, True, snippets.language_code)
-            return None
+            raise CaptionValidationFailed("Caption completeness validation failed")
 
         try:
             result = fetch(os.getenv("YOUTUBE_TRANSCRIPT_PROXY_URL") or None, 8)
             if result:
                 logging.getLogger(__name__).info("YouTube transcript succeeded via primary API")
                 return result
-        except DEFINITIVE_ERRORS:
+        except (*DEFINITIVE_ERRORS, CaptionValidationFailed):
             return None
         except Exception as error:  # noqa: BLE001 - continue through free fallbacks
             logging.getLogger(__name__).info("YouTube primary API unavailable (%s)", type(error).__name__)
@@ -547,7 +553,7 @@ class YouTubeTranscriptProvider:
             if result:
                 logging.getLogger(__name__).info("YouTube transcript succeeded via free proxy API")
             return result
-        except DEFINITIVE_ERRORS:
+        except (*DEFINITIVE_ERRORS, CaptionValidationFailed):
             return None
 
     def _fetch_captions(self, episode: Episode) -> Transcript | None:

@@ -16,6 +16,7 @@ import requests
 
 from .colossus import ColossusOfficialTranscriptProvider
 from .founders import DavidSenraOfficialTranscriptProvider
+from .free_proxies import ProxyBudgetExhausted
 from .models import (
     AnalysisResult,
     DailyItem,
@@ -120,6 +121,9 @@ class TranscriptResolver:
                     logger.info("YouTube transcript succeeded via Podwise read-only lookup")
                 return transcript
         if errors:
+            budget = [error for _, error in errors if isinstance(error, ProxyBudgetExhausted)]
+            if budget:
+                raise budget[0]
             limited = [error for _, error in errors if isinstance(error, PodwiseRateLimited)]
             if limited:
                 raise max(limited, key=lambda error: error.retry_at)
@@ -900,6 +904,7 @@ class PodcastService:
             if preparation_deadline is not None and time.monotonic() >= preparation_deadline:
                 break
             episode = discovered
+            transcript = None
             try:
                 # Flat playlist metadata often omits dates and duration. Enrich only
                 # the bounded, unseen candidate set instead of every channel item.
@@ -920,7 +925,7 @@ class PodcastService:
                         episode, video_metadata(youtube_url)
                     )
                 if episode.published_at is None:
-                    self.store.defer_daily_transcript(episode, 'unverified_date')
+                    self.store.defer_daily_transcript(episode, 'unverified_date', count_failure=False)
                     results.append(DailyItem(episode, "unverified_date"))
                     continue
                 if pending is None and episode.published_at.astimezone(UTC) < cutoff:
@@ -980,19 +985,22 @@ class PodcastService:
                 logger.warning("Daily transcript unavailable for %s: %s", episode.url, error)
                 final = self.store.defer_daily_transcript(episode, '全文来源暂时不可用')
                 results.append(DailyItem(episode, 'final_skipped' if final else 'no_transcript'))
+            except ProxyBudgetExhausted as error:
+                self.store.defer_daily_transcript(episode, '代理小时预算已用完', count_failure=False)
+                results.append(DailyItem(episode, 'no_transcript', str(error)))
             except PodwiseRateLimited as error:
                 reason = 'Podwise 暂时限流，全文已列入待办，冷却后继续核验；本次不根据简介生成摘要。'
                 self.store.defer_daily_transcript(episode, reason,
-                    retry_at=datetime.fromtimestamp(error.retry_at, UTC))
+                    retry_at=datetime.fromtimestamp(error.retry_at, UTC), count_failure=False)
                 results.append(DailyItem(episode, 'no_transcript', reason))
             except SummaryFormatError as error:
                 logger.warning("Podcast summary format failed for %s: %s", episode.url, error)
                 results.append(DailyItem(episode, "summary_format_error", str(error)))
-                self.store.defer_daily_transcript(episode, '摘要格式待重试')
+                self.store.defer_daily_transcript(episode, '摘要格式待重试', count_failure=False)
             except Exception as error:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
-                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
+                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试', count_failure=transcript is None)
         # Python's stable sort preserves discovery order for equal scores.
         ranked_candidates.sort(key=lambda item: -(item[3] or {}).get('stars', 0))
         for episode, transcript, stored, decision in ranked_candidates:
@@ -1008,12 +1016,12 @@ class PodcastService:
                     error,
                 )
                 results.append(DailyItem(episode, "summary_format_error", str(error)))
-                self.store.defer_daily_transcript(episode, '摘要格式待重试')
+                self.store.defer_daily_transcript(episode, '摘要格式待重试', count_failure=False)
                 continue
             except Exception as error:
                 logger.exception("Deferred podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
-                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
+                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试', count_failure=False)
                 continue
             results.append(
                 DailyItem(
