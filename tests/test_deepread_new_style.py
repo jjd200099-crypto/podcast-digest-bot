@@ -151,9 +151,9 @@ class NewStyleTests(unittest.TestCase):
             sample(),
         )
         args = client.responses.parse.call_args.kwargs
-        self.assertEqual(args["instructions"], NEW_INSTRUCTIONS)
+        self.assertTrue(args["instructions"].startswith(NEW_INSTRUCTIONS))
         self.assertIs(args["text_format"], DeepRead)
-        self.assertGreater(args["max_output_tokens"], 11000)
+        self.assertLessEqual(args["max_output_tokens"], 12000)
         self.assertFalse(args["store"])
 
     def test_native_heading_bullets_and_highlighted_named_speakers(self):
@@ -217,8 +217,8 @@ class NewStyleTests(unittest.TestCase):
             lambda v: v["chapters"][0]["turns"].pop(),
             lambda v: v["chapters"][0]["turns"][0].update(speaker="Unknown"),
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["王颢蓁"]),
-            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["A/B测试"]),
-            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["A-B测试"]),
+            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["【A/B】"]),
+            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["[A-B]"]),
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["Wang method"]),
             lambda v: v["core"][0].update(evidence_ids=["missing"]),
         ):
@@ -226,6 +226,84 @@ class NewStyleTests(unittest.TestCase):
             mutate(value)
             with self.assertRaises(ValueError):
                 validate_deepread(value, transcript_evidence(record().transcript.text))
+
+    def test_normal_english_in_titles_bodies_and_cached_render(self):
+        for text in ("data-backed", "ultra-bullish", "Alpha-Beta", "A/B testing"):
+            with self.subTest(text=text):
+                rec, value = record(), sample()
+                rec.episode.title = text
+                value["chapters"][0]["turns"][1]["paragraphs"].append(text)
+                client = Mock()
+                client.responses.parse.return_value.output_parsed = (
+                    DeepRead.model_validate(value)
+                )
+                generated = ShownotesWriter(client, "model", new_style=True).generate(
+                    rec
+                )
+                self.assertEqual(generated, value)
+                cached = json.loads(json.dumps(generated))
+                self.assertIn(text, render_episode(rec, cached, new_style=True)[1])
+
+    def test_chunking_and_per_chunk_validation_and_transport_retries(self):
+        from news_officer.deepread import generate
+
+        rec = record()
+        rec.transcript.text = "\n".join(
+            f"[00:{i:02d}] Speaker{i % 2}: source {i}" for i in range(12)
+        )
+        attempts = {}
+        client = Mock()
+
+        def respond(**kwargs):
+            batch = json.loads(kwargs["input"])["transcript"]
+            key = next(iter(batch))
+            attempts[key] = attempts.get(key, 0) + 1
+            if attempts[key] == 1:
+                if key == "C0001":
+                    raise TimeoutError("timeout")
+                if key == "C0006":
+                    raise ConnectionError("transport")
+            value = {
+                "speakers": [
+                    {"name": "Narrator", "role": "other", "evidence_ids": list(batch)}
+                ],
+                "core": [{"text": "**主题：**内容", "evidence_ids": [key]}],
+                "chapters": [
+                    {
+                        "title": "章节",
+                        "turns": [
+                            {
+                                "speaker": "Narrator",
+                                "paragraphs": ["完整内容"],
+                                "evidence_ids": [ref],
+                            }
+                            for ref in batch
+                        ],
+                    }
+                ],
+                "proper_nouns": [],
+                "exclusions": [],
+                "corrections": [],
+            }
+            if key == "C0011" and attempts[key] == 1:
+                value["chapters"][0]["turns"].pop()
+            self.assertLessEqual(len(batch), 5)
+            self.assertLessEqual(kwargs["max_output_tokens"], 12000)
+            return SimpleNamespace(output_parsed=DeepRead.model_validate(value))
+
+        client.responses.parse.side_effect = respond
+        value = generate(client, "model", rec)
+        self.assertEqual(attempts, {"C0001": 2, "C0006": 2, "C0011": 2})
+        self.assertEqual(len(value["chapters"]), 3)
+        self.assertEqual(len(value["speakers"]), 1)
+        validate_deepread(value, source_evidence(rec.transcript.text))
+
+    def test_long_single_turn_is_bounded_and_lossless(self):
+        text = "[00:01] Host: " + "long source " * 2000
+        evidence = source_evidence(text)
+        self.assertGreater(len(evidence), 5)
+        self.assertTrue(all(len(body["text"]) <= 2400 for body in evidence.values()))
+        self.assertEqual("".join(body["text"] for body in evidence.values()), text)
 
     def test_chronology_and_explicit_ad_exclusions(self):
         evidence = transcript_evidence(
@@ -292,6 +370,71 @@ class NewStyleCompilerTests(unittest.TestCase):
             compiler.document_identity(source.record),
             f.compiler.document_identity(source.record),
         )
+
+    def test_failed_new_style_publishes_old_style_in_normal_and_enrichment_modes(self):
+        import test_episode_document as fixtures
+        from test_shownotes import ShownotesValidation
+
+        for enrichment in (False, True):
+            for failure in (
+                ValueError("invalid"),
+                TimeoutError("timeout"),
+                ConnectionError("transport"),
+                RuntimeError("unexpected"),
+            ):
+                with self.subTest(enrichment=enrichment, failure=type(failure)):
+                    f = fixtures.SelectedDocuments()
+                    f.setUp()
+                    self.addCleanup(f.doCleanups)
+                    old_fixture = ShownotesValidation()
+                    old_fixture.setUp()
+                    old = old_fixture.value
+                    client = Mock()
+
+                    def respond(failure=failure, old=old, **kwargs):
+                        if kwargs["text_format"] is DeepRead:
+                            if isinstance(failure, ValueError):
+                                return SimpleNamespace(output_parsed=None)
+                            raise failure
+                        return SimpleNamespace(
+                            output_parsed=EpisodeNotes.model_validate(old)
+                        )
+
+                    client.responses.parse.side_effect = respond
+                    f.compiler.new_style = True
+                    f.compiler.writer = ShownotesWriter(client, "model", new_style=True)
+                    if enrichment:
+                        f.fixture.store.save_job_result(
+                            f.fixture.base,
+                            "bundle",
+                            "daily_bundle",
+                            {
+                                "enrichment": {"version": 1, "eligible": ["one"]},
+                                "deliveries": [
+                                    {"target_type": "chat_id", "target_id": "oc_test"}
+                                ],
+                            },
+                        )
+                        job = f.enrichment_job("one")
+                    else:
+                        job = f.job()
+                    with self.assertLogs(
+                        "news_officer.shownotes", level="WARNING"
+                    ) as logs:
+                        result = f.compiler.publish(job)
+                    self.assertEqual(result["count"], 1)
+                    self.assertIn("falling back", logs.output[0])
+                    self.assertIn(
+                        "核心论点", json.dumps(f.fixture.api.data, ensure_ascii=False)
+                    )
+                    self.assertEqual(
+                        sum(
+                            call.kwargs["text_format"] is DeepRead
+                            for call in client.responses.parse.call_args_list
+                        ),
+                        3,
+                    )
+                    self.assertEqual(f.compiler.publish(job), result)
 
     def test_runtime_passes_config_flag_to_writer_and_compiler(self):
         import importlib

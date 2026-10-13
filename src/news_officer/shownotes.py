@@ -7,6 +7,7 @@ model; source IDs and short verbatim quotes are checked before publication.
 
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from .qa import chunk_transcript
 
 WORKFLOW = (Path(__file__).parent / 'prompts' / 'podcast_shownotes.md').read_text(encoding='utf-8')
 VERSION = 'podcast-notes-feishu-v3-' + hashlib.sha256(WORKFLOW.encode()).hexdigest()[:12]
+logger = logging.getLogger(__name__)
 INTRO = '本文基于已核验完整文字稿编译。观点、数字与预测归属节目嘉宾；不附整期实录。'
 
 
@@ -192,7 +194,10 @@ class ShownotesWriter:
     def generate(self, record):
         if self.new_style:
             from .deepread import generate
-            return generate(self.client, self.model, record)
+            try:
+                return generate(self.client, self.model, record)
+            except Exception:
+                logger.warning('New-style deepread failed; falling back to old-style notes', exc_info=True)
         evidence = transcript_evidence(record.transcript.text)
         if not evidence or not record.transcript.verified_complete:
             raise ValueError('Complete transcript required')
@@ -236,9 +241,11 @@ def table_node(rows):
 
 
 def render_episode(record, notes, digest='', *, fulltext_attached=False, new_style=False):
-    if new_style:
+    if new_style and "chapters" in notes:
         from .deepread import render
         return render(record, notes, digest)
+    if new_style:
+        fulltext_attached = False
     evidence = transcript_evidence(record.transcript.text)
     notes = validate_notes(notes, evidence)
     ep = record.episode

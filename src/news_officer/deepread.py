@@ -14,11 +14,23 @@ INSTRUCTIONS = (Path(__file__).parent / "prompts" / "deepread_new_style.md").rea
     encoding="utf-8"
 )
 VERSION = (
-    "deepread-new-style-v1-" + hashlib.sha256(INSTRUCTIONS.encode()).hexdigest()[:12]
+    "deepread-new-style-v2-" + hashlib.sha256(INSTRUCTIONS.encode()).hexdigest()[:12]
 )
 INTRO = "依据完整文字稿整理核心内容与中文对谈；保留原始顺序、第一人称、案例与限定条件，删除广告和无实质信息的重复。"
 # Output validation rejects workflow provenance, including variants used in drafts.
-WORKFLOW_LABEL = re.compile(r"王[颢頗颇]蓁|wang\s+method|A[-/]B", re.IGNORECASE)
+WORKFLOW_LABEL = re.compile(
+    r"王[颢頗颇]蓁|(?i:wang\s+method)|"
+    r"(?<!\w)A-B(?!\w)|[\[【]A[-/]B[\]】]|"
+    r"(?<!\w)A[-/]B(?=\s*(?:工作流|流程|方法|标签))"
+)
+BATCH_BLOCKS = 5
+BATCH_CHARACTERS = 6000
+MAX_OUTPUT_TOKENS = 12000
+CHUNK_INSTRUCTIONS = (
+    "\n输入是按原稿顺序切分的一批文字稿；仅整理本批全部内容，不补写其他批次。"
+    "core 仅概括本批；所有 evidence_ids 必须来自本批 transcript。"
+    "known_speakers 仅用于保持姓名和角色一致，不引用先前批次的内容。"
+)
 
 
 class Speaker(BaseModel):
@@ -62,7 +74,8 @@ def source_evidence(text):
     """Merge adjacent timestamp cues from the same explicitly named speaker.
 
     Keep every source character. Per-cue IDs burden long-episode coverage with
-    hundreds of half sentences; a full speaker turn is the useful audit unit.
+    hundreds of half sentences; speaker turns are useful audit units. Bound
+    long turns so a single turn cannot overwhelm a generation batch.
     Unlabelled or ambiguous blocks remain separate, never infer an identity.
     """
     result = {}
@@ -78,7 +91,14 @@ def source_evidence(text):
         else:
             result[f"C{len(result) + 1:04d}"] = dict(body)
         previous = speaker
-    return result
+    bounded = {}
+    for body in result.values():
+        for start in range(0, len(body["text"]), 2400):
+            bounded[f"C{len(bounded) + 1:04d}"] = {
+                **body,
+                "text": body["text"][start : start + 2400],
+            }
+    return bounded
 
 
 def check_output(text):
@@ -161,38 +181,75 @@ def generate(client, model, record):
         raise ValueError("Complete transcript required")
     ep = record.episode
     check_output(ep.title)
-    prompt = json.dumps(
-        {
-            "title": ep.title,
-            "show": ep.show,
-            "description": ep.metadata.get("description", ""),
-            "transcript": evidence,
-        },
-        ensure_ascii=False,
-    )
-    if len(prompt) > 900_000:
+    if sum(len(body["text"]) for body in evidence.values()) > 900_000:
         raise ValueError("Transcript exceeds deepread input budget; no truncation")
-    repair = ""
-    for _ in range(3):
-        response = client.responses.parse(
-            model=model,
-            instructions=INSTRUCTIONS + repair,
-            input=prompt,
-            text_format=DeepRead,
-            store=False,
-            max_output_tokens=50000,
+    batches, batch = [], {}
+    for key, body in evidence.items():
+        if batch and (
+            len(batch) >= BATCH_BLOCKS
+            or sum(len(v["text"]) for v in batch.values()) + len(body["text"])
+            > BATCH_CHARACTERS
+        ):
+            batches.append(batch)
+            batch = {}
+        batch[key] = body
+    batches.append(batch)
+    merged = {key: [] for key in DeepRead.model_fields}
+    speakers = {}
+    for batch in batches:
+        prompt = json.dumps(
+            {
+                "title": ep.title,
+                "show": ep.show,
+                "description": ep.metadata.get("description", ""),
+                "transcript": batch,
+                "known_speakers": [
+                    {"name": s["name"], "role": s["role"]} for s in speakers.values()
+                ],
+            },
+            ensure_ascii=False,
         )
-        try:
-            if response.output_parsed is None:
-                raise ValueError("Incomplete model output")
-            return validate_deepread(response.output_parsed.model_dump(), evidence)
-        except ValueError as error:
-            repair = (
-                "\n上次输出未通过校验："
-                + str(error)[:200]
-                + "。重新核对完整源文、QA覆盖与顺序、专有名词，返回完整结果，不缩写或省略。"
-            )
-    raise ValueError("Deepread validation failed")
+        repair = ""
+        for attempt in range(3):
+            try:
+                response = client.responses.parse(
+                    model=model,
+                    instructions=INSTRUCTIONS + CHUNK_INSTRUCTIONS + repair,
+                    input=prompt,
+                    text_format=DeepRead,
+                    store=False,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                )
+                if response.output_parsed is None:
+                    raise ValueError("Incomplete model output")
+                value = validate_deepread(response.output_parsed.model_dump(), batch)
+                break
+            except Exception as error:
+                if attempt == 2:
+                    raise ValueError("Deepread chunk generation failed") from error
+                if isinstance(error, ValueError):
+                    repair = (
+                        "\n上次输出未通过校验："
+                        + str(error)[:200]
+                        + "。仅返回本批源文的完整结果，核对覆盖与顺序，不缩写或省略。"
+                    )
+        for speaker in value["speakers"]:
+            name = speaker["name"]
+            if name in speakers:
+                if speakers[name]["role"] != speaker["role"]:
+                    raise ValueError("Inconsistent speaker identity across chunks")
+                speakers[name]["evidence_ids"] = list(
+                    dict.fromkeys(
+                        speakers[name]["evidence_ids"] + speaker["evidence_ids"]
+                    )
+                )
+            else:
+                speakers[name] = speaker
+        for key, items in merged.items():
+            if key != "speakers":
+                items.extend(value[key])
+    merged["speakers"] = list(speakers.values())
+    return validate_deepread(merged, evidence)
 
 
 def render(record, value, digest=""):
