@@ -195,7 +195,7 @@ previously frozen send byte for byte.
 
 ### 文字来源（默认关闭）
 
-`NEWS_OFFICER_TEXT_SOURCES=false`（默认关闭）不加载或请求文字来源，也不加入文字日报条目。设为 `true`（也支持 `1`、`yes`、`on`）后，`feeds.json` 中 `type: "text"` 的博客/通讯进入现有全文存档、评分、筛选和日报流程，标题为【来源｜标题】。`mode: "rss"` 使用 `rss_url`（支持无音频 RSS 和 Atom）；`mode: "html"` 使用 `index_url` 和 `link_regex`，可用 `exclude_regex` 排除目录。文章页面必须提供可提取的 article/main 正文，发布日期来自 feed 或页面元数据；缺少日期不进日报，不用抓取时间冒充发布日期。`free_only: true` 跳过少于 1000 字符或含付费提示的正文（SemiAnalysis、Stratechery 已启用）。全文先存入现有 SQLite 文字稿存储，再评分和摘要；单篇或单源失败独立处理。HTTP 请求沿用环境代理、20 秒超时和受限公共 HTTPS 下载。
+`NEWS_OFFICER_TEXT_SOURCES=false`（默认关闭）不加载或请求文字来源，也不加入文字日报条目。设为 `true`（也支持 `1`、`yes`、`on`）后，`feeds.json` 中 `type: "text"` 的博客/通讯进入现有全文存档、评分、筛选和日报流程，标题为【来源｜标题】。`mode: "rss"` 使用 `rss_url`（支持无音频 RSS 和 Atom）；`mode: "html"` 使用 `index_url` 和 `link_regex`，可用 `exclude_regex` 排除目录。文章页面必须提供可提取的 article/main 正文，发布日期来自 feed 或页面元数据；缺少日期不进日报，不用抓取时间冒充发布日期。`max_articles` 可配置每个来源每次最多返回的文章数（默认 10）；RSS 优先最新条目，HTML 按索引顺序。`free_only: true` 跳过少于 1000 字符、明确付费墙或订阅解锁提示的正文，完整公开文章中普通订阅提及不会被排除（SemiAnalysis、Stratechery 已启用）。全文先存入现有 SQLite 文字稿存储，再评分和摘要；单篇或单源失败独立处理。HTTP 请求沿用环境代理、20 秒超时和受限公共 HTTPS 下载。
 
 ### 完整对谈的新排版（默认关闭）
 

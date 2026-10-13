@@ -263,7 +263,7 @@
       "mode": "html",
       "index_url": "https://review.firstround.com/articles/ai/",
       "link_regex": "^/.+",
-      "exclude_regex": "^/(articles(?:/|$)|glossary(?:/|$))"
+      "exclude_regex": "^/(articles|glossary|collections|series|about|newsletter|search|tag|tags|author|authors|podcast|executive-function|signin)(?:/|$)"
     },
     {
       "name": "Chemistry VC",

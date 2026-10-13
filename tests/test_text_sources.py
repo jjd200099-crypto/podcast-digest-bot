@@ -61,10 +61,68 @@ class TextSourcesTests(unittest.TestCase):
         self.assertEqual(extract_article('<nav>Navigation only</nav>')[1], '')
 
     def test_paywall_and_truncation_skipped(self):
-        for body in ('short', 'Subscribe to read ' + 'text ' * 500,
+        for body in ('short', 'Teaser\nSubscribe to Stratechery Plus for full access. ' + 'text ' * 500,
+                     'Subscribe to read ' + 'text ' * 500,
                      'Stratechery Plus ' + 'text ' * 500, 'This is a paid ' + 'text ' * 500):
             with patch('news_officer.text_sources._fetch', side_effect=[RSS, f'<article>{body}</article>']):
                 self.assertEqual(discover_articles(dict(self.source, free_only=True)), [])
+
+    def test_title_precedence_suffixes_and_inline_words(self):
+        fixtures = [
+            (('<meta property="og:title" content="Dario Amodei — Machines of Loving Grace">'
+             '<header><h1>Dario Amodei</h1></header><article><h1>Machines of Loving Grace</h1>'
+             '<p>Real essay</p></article>'), 'Machines of Loving Grace'),
+            (('<meta property="og:title" content="Memory — A Roadmap">'
+             '<article><h1>Memory — A Roadmap</h1></article>'), 'Memory — A Roadmap'),
+            ('<title>Essay | Publisher</title><main><p>Body</p></main>', 'Essay'),
+            ('<article><h1>How to Get B<span>etter</span> at AI</h1><p>Body</p></article>',
+             'How to Get Better at AI'),
+        ]
+        for page, expected in fixtures:
+            self.assertEqual(extract_article(page)[0], expected)
+        page = ('<main><nav>noise</nav><article><p>B<span>etter</span> AI <a>tools</a>.</p>'
+                '<p>Next paragraph</p><script>noise</script><style>noise</style>'
+                '<footer>noise</footer><header>noise</header></article></main>')
+        self.assertEqual(extract_article(page)[1], 'Better AI tools.\nNext paragraph')
+
+    def test_nfx_and_chemistry_body_containers(self):
+        for css in ('post_post__Hm4aF', 'text-rich-text w-richtext'):
+            page = f'<title>Essay</title><nav>noise</nav><div class="{css}"><p>Full body</p></div>'
+            self.assertEqual(extract_article(page)[1], 'Full body')
+
+    def test_shunyu_atom_http_permalink_upgrades_to_https(self):
+        feed = ATOM.replace('https://example.org/post/ai', 'http://example.org/post/ai')
+        with patch('news_officer.text_sources._fetch', side_effect=[feed, ARTICLE]) as fetch:
+            self.assertEqual(len(discover_articles(self.source)), 1)
+            self.assertEqual(fetch.call_args.args[0], 'https://example.org/post/ai')
+        external = feed.replace('http://example.org/post/ai', 'http://outside.org/post/ai')
+        with patch('news_officer.text_sources._fetch', return_value=external) as fetch:
+            self.assertEqual(discover_articles(self.source), [])
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_free_full_content_with_subscription_mentions_and_paid_teaser(self):
+        body = 'Complete public analysis. ' * 100 + 'Our paid subscribers support this work.'
+        for paywall, count in [('', 1), ('<div class="paywall">Subscribe</div>', 0)]:
+            with patch('news_officer.text_sources._fetch', side_effect=[RSS,
+                       f'<article><p>{body}</p>{paywall}</article>']):
+                self.assertEqual(len(discover_articles(dict(self.source, free_only=True))), count)
+
+    def test_default_and_configured_caps_and_source_failure(self):
+        items = ''.join(f'<item><title>Essay {i}</title><link>https://example.org/post/{i}</link>'
+                        f'<pubDate>2026-10-{i + 1:02d}T00:00:00Z</pubDate></item>'
+                        for i in range(12))
+        feed = f'<rss><channel>{items}</channel></rss>'
+        for limit in (None, 2):
+            source = dict(self.source, **({'max_articles': limit} if limit else {}))
+            with patch('news_officer.text_sources._fetch', side_effect=lambda url:
+                       feed if url.endswith('/feed') else ARTICLE) as fetch:
+                results = discover_articles(source)
+            self.assertEqual(len(results), limit or 10)
+            self.assertEqual(results[0][0].title, 'Essay 11')
+            self.assertEqual(fetch.call_count, len(results) + 1)
+        for failure in (TimeoutError(), '<invalid'):
+            with patch('news_officer.text_sources._fetch', side_effect=[failure]):
+                self.assertEqual(discover_articles(self.source), [])
 
     def test_flag_off_never_loads_or_fetches(self):
         store = Store(Path(self.temp.name) / 'state.db')
@@ -119,6 +177,8 @@ class TextSourcesTests(unittest.TestCase):
                          {'SemiAnalysis', 'Stratechery'})
         first = next(s for s in sources if s['name'] == 'First Round')
         page = ('<a href="/articles/ai/">Category</a><a href="/glossary/ai/">Glossary</a>'
+                '<a href="/collections/">Collection</a><a href="/series/pmf/">Series</a>'
+                '<a href="/podcast/">Podcast</a><a href="/signin/">Login</a>'
                 '<a href="https://review.firstround.com/building-ai-products/">Article</a>')
         self.assertEqual(article_links(page, first),
                          ['https://review.firstround.com/building-ai-products/'])
