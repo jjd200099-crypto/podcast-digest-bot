@@ -341,6 +341,76 @@ class NewStyleTests(unittest.TestCase):
         self.assertEqual(len(value["speakers"]), 1)
         validate_deepread(value, source_evidence(rec.transcript.text))
 
+    def test_consolidation_minimums_scale_with_source_length(self):
+        from news_officer.deepread import consolidation_minimums
+
+        for length, expected in (
+            (100, (4, 2)),
+            (6_000, (4, 2)),
+            (18_000, (7, 3)),
+            (30_000, (10, 5)),
+            (100_000, (10, 5)),
+        ):
+            with self.subTest(length=length):
+                evidence = {
+                    "C0001": {"text": "x" * (length // 2)},
+                    "C0002": {"text": "x" * (length - length // 2)},
+                }
+                self.assertEqual(consolidation_minimums(evidence), expected)
+
+    def test_consolidation_short_and_long_validation_and_prompts(self):
+        from news_officer.deepread import consolidate
+
+        for length, core_count, chapter_count in (
+            (6_000, 4, 2),
+            (18_000, 7, 3),
+            (30_000, 10, 5),
+        ):
+            evidence = source_evidence(record().transcript.text)
+            evidence["C0002"]["text"] += "x" * (
+                length - sum(len(body["text"]) for body in evidence.values())
+            )
+            merged = sample()
+            turns = merged["chapters"][0]["turns"]
+            turns.extend(copy.deepcopy(turns[-1]) for _ in range(3))
+            valid = {
+                "core": merged["core"] * core_count,
+                "chapters": [
+                    {"title": f"主题{i}", "start_turn": i} for i in range(chapter_count)
+                ],
+            }
+            outputs = [valid]
+            for field in ("core", "chapters"):
+                invalid = copy.deepcopy(valid)
+                invalid[field].pop()
+                outputs.append(invalid)
+                excessive = copy.deepcopy(valid)
+                excessive[field] = excessive[field][:1] * (
+                    19 if field == "core" else 11
+                )
+                outputs.append(excessive)
+            for output in outputs:
+                with self.subTest(length=length, output=output):
+                    client = Mock()
+                    client.responses.parse.return_value.output_parsed.model_dump.return_value = output
+                    if output == valid:
+                        result = consolidate(client, "model", merged, evidence)
+                        self.assertEqual(len(result["core"]), core_count)
+                        self.assertEqual(len(result["chapters"]), chapter_count)
+                        self.assertEqual(
+                            [t for c in result["chapters"] for t in c["turns"]],
+                            turns,
+                        )
+                        self.assertEqual(client.responses.parse.call_count, 1)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "consolidation failed"):
+                            consolidate(client, "model", merged, evidence)
+                        self.assertEqual(client.responses.parse.call_count, 3)
+                    for call in client.responses.parse.call_args_list:
+                        instructions = call.kwargs["instructions"]
+                        self.assertIn(f"{core_count}–18条", instructions)
+                        self.assertIn(f"{chapter_count}–10章", instructions)
+
     def test_consolidation_failure_retries_and_raises(self):
         from news_officer.deepread import Consolidation, consolidate
 

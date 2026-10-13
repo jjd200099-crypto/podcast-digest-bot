@@ -76,11 +76,19 @@ class ChapterBoundary(BaseModel):
 
 
 class Consolidation(BaseModel):
-    core: list[NotePoint] = Field(min_length=10, max_length=18)
-    chapters: list[ChapterBoundary] = Field(min_length=5, max_length=10)
+    core: list[NotePoint] = Field(min_length=4, max_length=18)
+    chapters: list[ChapterBoundary] = Field(min_length=2, max_length=10)
+
+
+def consolidation_minimums(evidence):
+    """Scale requirements from short (6k chars) to long (30k chars) sources."""
+    characters = sum(len(body["text"]) for body in evidence.values())
+    progress = min(24_000, max(0, characters - 6_000))
+    return 4 + progress * 6 // 24_000, 2 + progress * 3 // 24_000
 
 
 def consolidate(client, model, merged, evidence):
+    min_core, min_chapters = consolidation_minimums(evidence)
     turns = [turn for chapter in merged["chapters"] for turn in chapter["turns"]]
     prompt = json.dumps(
         {
@@ -94,8 +102,8 @@ def consolidate(client, model, merged, evidence):
         ensure_ascii=False,
     )
     instructions = (
-        "将各批核心内容与章节整合为整期统一内容：10–18条具体加粗标签的核心要点，"
-        "5–10章，合并重复主题并保留细节、例子和限定条件。core evidence_ids沿用输入。"
+        f"将各批核心内容与章节整合为整期统一内容：{min_core}–18条具体加粗标签的核心要点，"
+        f"{min_chapters}–10章，合并重复主题并保留细节、例子和限定条件。core evidence_ids沿用输入。"
         "章节仅返回title和start_turn（从0开始的全局对谈索引），首章从0开始，"
         "严格递增，每章至少一轮，保持原始顺序。所有对谈由程序原样保留，不重写。"
         "不得出现内部工作流标签。"
@@ -113,6 +121,11 @@ def consolidate(client, model, merged, evidence):
             if response.output_parsed is None:
                 raise ValueError("Incomplete consolidation output")
             value = Consolidation.model_validate(response.output_parsed.model_dump())
+            if len(value.core) < min_core or len(value.chapters) < min_chapters:
+                raise ValueError(
+                    f"Consolidation requires at least {min_core} core points "
+                    f"and {min_chapters} chapters for this transcript"
+                )
             starts = [chapter.start_turn for chapter in value.chapters]
             if (
                 starts[0] != 0
