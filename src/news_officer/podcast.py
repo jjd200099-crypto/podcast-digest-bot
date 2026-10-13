@@ -658,18 +658,25 @@ class PodcastService:
                     failed_sources[-1],
                 )
 
-        healthy_text_sources = 0
+        text_source_count = 0
         if text_sources_enabled():
             for source in load_text_sources(self.feeds_path):
+                text_source_count += 1
                 try:
-                    articles = discover_articles(source)
-                    healthy_text_sources += 1
+                    articles = discover_articles(source, raise_on_error=True)
+                    eligible_articles = []
                     for episode, transcript in articles:
+                        if episode.published_at is None:
+                            first_seen = self.store.article_first_seen(episode.url, now)
+                            if first_seen.astimezone(now.tzinfo).date() != now.date():
+                                continue
+                        eligible_articles.append(episode)
                         self.store.save_verified_transcript(episode, transcript)
                     priority = source.get('priority', 'B')
                     groups_by_priority[priority if priority in {'A', 'B'} else 'B'].append(
-                        [episode for episode, _ in articles])
+                        eligible_articles)
                 except Exception as error:  # noqa: BLE001 - isolate text source failures
+                    failed_sources.append(source['name'])
                     logger.warning('Text discovery failed for %s: %s', source['name'], error)
 
         new_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
@@ -796,14 +803,14 @@ class PodcastService:
                 key=lambda episode: not bool(episode.metadata.get("rss_feed_url")),
             )
 
-        successful_sources = len(sources) - len(failed_sources) + healthy_text_sources
+        successful_sources = len(sources) + text_source_count - len(failed_sources)
         self._last_failed_feeds = tuple(failed_sources)
         if failed_sources and not any(e.id.startswith('podwise:') for e in candidates) and (
             not candidates or len(failed_sources) >= successful_sources
         ):
             raise FeedDiscoveryError(
                 "The source scan was unhealthy: "
-                f"{len(failed_sources)} of {len(sources)} source(s) failed"
+                f"{len(failed_sources)} of {len(sources) + text_source_count} source(s) failed"
             )
         # Verified-dated RSS episodes (including due retries) must not be
         # displaced by never-seen, undated videos that may be old clips.
