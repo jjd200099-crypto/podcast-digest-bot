@@ -5,42 +5,42 @@
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UCf_KhBXw5TIV0A7butjgFhg/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCf_KhBXw5TIV0A7butjgFhg"
+      "rss_url": "https://anchor.fm/s/10fbee758/podcast/rss"
     },
     {
       "name": "20VC",
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UCf0PBRjhf0rF8fWBIxTuoWA/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCf0PBRjhf0rF8fWBIxTuoWA"
+      "rss_url": "https://rss.libsyn.com/shows/61840/destinations/240976.xml"
     },
     {
       "name": "BG2",
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UC-yRDvpR99LUc5l7i7jLzew/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC-yRDvpR99LUc5l7i7jLzew"
+      "rss_url": "https://anchor.fm/s/f06c2370/podcast/rss"
     },
     {
       "name": "All-In Podcast",
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UCESLZhusAkFfsNsApnjF_Cg/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCESLZhusAkFfsNsApnjF_Cg"
+      "rss_url": "https://allinchamathjason.libsyn.com/rss"
     },
     {
       "name": "Big Technology Podcast",
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UCaKiCexVhZ459j9sZ2e7XdQ/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCaKiCexVhZ459j9sZ2e7XdQ"
+      "rss_url": "https://feeds.megaphone.fm/LI3617121267"
     },
     {
       "name": "Goldman Sachs Exchanges — Tech/AI",
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UCyz6-taovlaOkPsPtK4KNEg/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCyz6-taovlaOkPsPtK4KNEg",
+      "rss_url": "https://feeds.megaphone.fm/GLD9218176758",
       "scan_depth": 20,
       "include_keywords": [
         "AI",
@@ -58,56 +58,56 @@
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UCpQBb0fToph3jrDulwz1iUQ/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCpQBb0fToph3jrDulwz1iUQ"
+      "rss_url": "https://feeds.megaphone.fm/CLS2859450455"
     },
     {
       "name": "Sequoia Capital — Training Data",
       "type": "youtube",
       "priority": "A",
       "url": "https://www.youtube.com/channel/UCWrF0oN6unbXrWsTN7RctTw/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCWrF0oN6unbXrWsTN7RctTw"
+      "rss_url": "https://feeds.megaphone.fm/trainingdata"
     },
     {
       "name": "David Senra",
       "type": "youtube",
       "priority": "B",
       "url": "https://www.youtube.com/channel/UCy2FPslt0LLPsIV0iukvHpQ/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCy2FPslt0LLPsIV0iukvHpQ"
+      "rss_url": "https://feeds.megaphone.fm/david-senra"
     },
     {
       "name": "Acquired",
       "type": "youtube",
       "priority": "B",
       "url": "https://www.youtube.com/channel/UCyFqFYfTW2VoIQKylJ04Rtw/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCyFqFYfTW2VoIQKylJ04Rtw"
+      "rss_url": "https://feeds.transistor.fm/acquired"
     },
     {
       "name": "Dwarkesh Podcast",
       "type": "youtube",
       "priority": "B",
       "url": "https://www.youtube.com/channel/UCXl4i9dYBrFOabk0xGmbkRA/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCXl4i9dYBrFOabk0xGmbkRA"
+      "rss_url": "https://api.substack.com/feed/podcast/69345.rss"
     },
     {
       "name": "a16z Show",
       "type": "youtube",
       "priority": "B",
       "url": "https://www.youtube.com/channel/UC9cn0TuPq4dnbTY-CBsm8XA/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC9cn0TuPq4dnbTY-CBsm8XA"
+      "rss_url": "https://feeds.simplecast.com/JGE3yC0V"
     },
     {
       "name": "Lenny's Podcast",
       "type": "youtube",
       "priority": "B",
       "url": "https://www.youtube.com/channel/UC6t1O76G0jYXOAoYCm153dA/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC6t1O76G0jYXOAoYCm153dA"
+      "rss_url": "https://api.substack.com/feed/podcast/10845.rss"
     },
     {
       "name": "The Generalist",
       "type": "youtube",
       "priority": "B",
       "url": "https://www.youtube.com/channel/UC5xRQOIT8cfumDr2HaKNd4g/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC5xRQOIT8cfumDr2HaKNd4g"
+      "rss_url": "https://api.substack.com/feed/podcast/15764.rss"
     },
     {
       "name": "Anthropic",

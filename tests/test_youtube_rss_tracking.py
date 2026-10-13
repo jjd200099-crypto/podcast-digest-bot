@@ -209,9 +209,9 @@ class YouTubeRSSTrackingTests(unittest.TestCase):
                 self.assertRaisesRegex(FeedDiscoveryError, '1 of 2 source'):
             service.discover_daily_candidates()
 
-    def test_all_configured_youtube_feeds_have_exact_atom_url(self):
+    def test_configured_youtube_atom_feeds_have_exact_channel_url(self):
         feeds = json.loads((Path(__file__).resolve().parents[1] / 'feeds.json').read_text())
         for source in feeds['sources']:
-            if source['type'] == 'youtube':
+            if source['type'] == 'youtube' and 'youtube.com/feeds/' in source.get('rss_url', ''):
                 channel_id = source['url'].split('/channel/')[1].split('/')[0]
                 self.assertEqual(source['rss_url'], f'https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}')
