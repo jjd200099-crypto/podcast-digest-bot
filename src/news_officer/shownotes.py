@@ -185,10 +185,14 @@ def chapter_outline(episode):
 
 
 class ShownotesWriter:
-    def __init__(self, client, model):
+    def __init__(self, client, model, *, new_style=False):
         self.client, self.model = client, model
+        self.new_style = new_style
 
     def generate(self, record):
+        if self.new_style:
+            from .deepread import generate
+            return generate(self.client, self.model, record)
         evidence = transcript_evidence(record.transcript.text)
         if not evidence or not record.transcript.verified_complete:
             raise ValueError('Complete transcript required')
@@ -231,7 +235,10 @@ def table_node(rows):
                          for row in rows for cell in row]}
 
 
-def render_episode(record, notes, digest='', *, fulltext_attached=False):
+def render_episode(record, notes, digest='', *, fulltext_attached=False, new_style=False):
+    if new_style:
+        from .deepread import render
+        return render(record, notes, digest)
     evidence = transcript_evidence(record.transcript.text)
     notes = validate_notes(notes, evidence)
     ep = record.episode
@@ -285,5 +292,8 @@ def render_episode(record, notes, digest='', *, fulltext_attached=False):
     return nodes, '\n\n'.join(markdown)
 
 
-def note_identity(record):
-    return hashlib.sha256((VERSION + record.record_revision_sha256 + json.dumps(chapter_outline(record.episode), sort_keys=True)).encode()).hexdigest()
+def note_identity(record, *, new_style=False):
+    version = VERSION
+    if new_style:
+        from .deepread import VERSION as version
+    return hashlib.sha256((version + record.record_revision_sha256 + json.dumps(chapter_outline(record.episode), sort_keys=True)).encode()).hexdigest()

@@ -12,7 +12,7 @@ from .daily_document import DailyDocumentCompiler, read_tree, tree_signature
 from .document_transcript import fulltext_identity, render_fulltext
 from .library import LibraryError
 from .models import IncomingMessage
-from .shownotes import VERSION, note_identity, text_node
+from .shownotes import note_identity, text_node
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,13 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
     def _migrate_attempt(self, record):
         # The pre-merge notes-only revision used note_identity directly. Keep
         # its durable budget when adopting main's composite document identity.
-        if self.include_fulltext:
+        if self.include_fulltext or self.new_style:
             return
         identity = self.document_identity(record)
         with self.store._connect() as db:
             db.execute('UPDATE episode_document_attempts SET revision=? WHERE episode_id=? AND revision=? '
                        'AND NOT EXISTS (SELECT 1 FROM episode_document_attempts WHERE episode_id=? AND revision=?)',
-                       (identity, record.episode.id, note_identity(record), record.episode.id, identity))
+                       (identity, record.episode.id, note_identity(record, new_style=self.new_style), record.episode.id, identity))
 
     def _attempt_available(self, record, today):
         self._migrate_attempt(record)
@@ -135,15 +135,15 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         if actual != [tree_signature(n) for n in base]:
             raise LibraryError('旧附录或精读存在人工修改，停止替换以保护内容')
         start = document['replacement_start']
-        # Frozen base is the recoverable backup, only the known generated tail
-        # is removed; front notes, media and their block IDs remain untouched.
+        # Frozen base is the recoverable backup. A layout upgrade replaces all
+        # generated content; a legacy appendix upgrade replaces only its tail.
         self.api.request('DELETE', f'/docx/v1/documents/{token}/blocks/{token}/children/batch_delete',
                          params={'document_revision_id': revision},
                          data={'start_index': start, 'end_index': len(base)})
 
     def document_identity(self, record):
-        components = [note_identity(record)]
-        if self.include_fulltext:
+        components = [note_identity(record, new_style=self.new_style)]
+        if self.include_fulltext and not self.new_style:
             components.append(fulltext_identity(record))
         return hashlib.sha256(json.dumps(components).encode()).hexdigest()
 
@@ -178,7 +178,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 selected.append((item, record))
         selected.sort(key=lambda pair: -stars(self.store.get_transcript_digest(pair[1].episode.id) or pair[0].message))
         manifest = [(r.episode.id, self.document_identity(r)) for _, r in selected]
-        revision = hashlib.sha256(json.dumps([VERSION, self.min_stars, manifest]).encode()).hexdigest()
+        revision = hashlib.sha256(json.dumps([self.notes_version, self.min_stars, manifest]).encode()).hexdigest()
         return revision, selected, []
 
     def enqueue_ready(self, today, *, requested_only=False):
@@ -294,7 +294,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     deferred = True
                     continue
                 self._claim_attempt(record, self.today() if requested else day, claimed)
-                identity = note_identity(record)
+                identity = note_identity(record, new_style=self.new_style)
                 key = 'episode:' + record.episode.id
                 published = record.episode.published_at.isoformat()[:10] if record.episode.published_at else day
                 title = f'{record.episode.title}｜{record.episode.show}｜{published}'
@@ -304,7 +304,12 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 entries = json.loads(previous['entries_json']) if previous else []
                 nodes = json.loads(previous['nodes_json']) if previous else []
                 replacement = {}
-                if self.include_fulltext and fulltext_identity(record) not in entries:
+                if self.new_style and nodes and identity not in entries:
+                    # Freeze and verify the existing generated document before
+                    # changing layouts; do not append a duplicate full interview.
+                    replacement = {'replacement_base': nodes, 'replacement_start': 0}
+                    nodes, entries = [], []
+                if self.include_fulltext and not self.new_style and fulltext_identity(record) not in entries:
                     legacy = [i for i, n in enumerate(nodes) if ''.join(
                         e.get('text_run', {}).get('content', '') for e in n.get('heading2', {}).get('elements', [])
                     ).startswith(('完整文字稿（归档原文', '完整中文文字稿', '完整对谈实录'))]
@@ -328,7 +333,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                         continue
                     nodes.extend(episode_nodes)
                     entries.append(identity)
-                if self.include_fulltext:
+                if self.include_fulltext and not self.new_style:
                     appendix_id = fulltext_identity(record)
                     if appendix_id not in entries:
                         if self.transcript_writer is None:
