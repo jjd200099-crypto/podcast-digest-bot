@@ -18,7 +18,10 @@ from .qa import chunk_transcript
 from .titles import normalize_deepread_title
 
 WORKFLOW = (Path(__file__).parent / 'prompts' / 'podcast_shownotes.md').read_text(encoding='utf-8')
-VERSION = 'podcast-notes-feishu-v3-' + hashlib.sha256(WORKFLOW.encode()).hexdigest()[:12]
+# Pinned to the dac0a59 prompt hash so deployed docs keep their identity;
+# prompt edits apply only to episodes without an existing document.
+# Bump explicitly only when existing documents must be regenerated.
+VERSION = 'podcast-notes-feishu-v3-4f4f8502190c'
 logger = logging.getLogger(__name__)
 INTRO = '本文基于已核验完整文字稿编译。观点、数字与预测归属节目嘉宾；不附整期实录。'
 
