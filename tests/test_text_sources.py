@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from news_officer.feishu import _post_elements
 from news_officer.podcast import (
+    FeedDiscoveryError,
     PodcastService,
     TranscriptResolver,
     load_youtube_sources,
@@ -160,21 +161,84 @@ class TextSourcesTests(unittest.TestCase):
 
     def test_source_and_article_failures_are_isolated(self):
         bad = dict(self.source, name='Broken', rss_url='https://broken.org/feed')
-        self.path.write_text(json.dumps({'sources': [bad, self.source]}))
+        self.path.write_text(json.dumps({'sources': [bad, self.source, dict(self.source, name='Healthy')]}))
         store = Store(Path(self.temp.name) / 'state.db')
         store.initialize()
-        with patch('news_officer.text_sources._fetch', side_effect=[TimeoutError(), RSS, ARTICLE]):
+        with patch('news_officer.text_sources._fetch', side_effect=[TimeoutError(), RSS, ARTICLE, RSS, ARTICLE]):
             candidates = PodcastService(store, self.path, Mock()).discover_daily_candidates(
                 datetime(2026, 10, 13, 1, tzinfo=UTC))
         self.assertEqual(len(candidates), 1)
         with patch('news_officer.text_sources._fetch', side_effect=[RSS, TimeoutError()]):
             self.assertEqual(discover_articles(self.source), [])
 
+    def test_failed_text_sources_do_not_mask_podcast_health_alert(self):
+        from news_officer.models import Episode
+        podcast = {'name': 'Podcast', 'type': 'rss', 'rss_url': 'https://example.org/podcast'}
+        healthy = Episode('rss:healthy', 'Interview', 'https://example.org/interview',
+                          'Podcast', published_at=datetime(2026, 10, 13, tzinfo=UTC))
+        self.path.write_text(json.dumps({'sources': [podcast, self.source]}))
+        store = Store(Path(self.temp.name) / 'health.db')
+        store.initialize()
+        service = PodcastService(store, self.path, Mock(), daily_rss_only=True)
+        for failure in (TimeoutError(), '<invalid'):
+            with self.subTest(failure=failure), \
+                    patch('news_officer.podcast.latest_rss_episodes', return_value=[healthy]), \
+                    patch('news_officer.text_sources._fetch', side_effect=[failure]):
+                with self.assertRaisesRegex(FeedDiscoveryError, '1 of 2'):
+                    service.discover_daily_candidates(datetime(2026, 10, 13, 1, tzinfo=UTC))
+                self.assertEqual(service._last_failed_feeds, ('Lilian Weng',))
+        with patch('news_officer.podcast.latest_rss_episodes', return_value=[healthy]), \
+                patch('news_officer.text_sources._fetch', return_value='<rss><channel/></rss>'):
+            self.assertEqual(len(service.discover_daily_candidates(
+                datetime(2026, 10, 13, 1, tzinfo=UTC))), 1)
+            self.assertEqual(service._last_failed_feeds, ())
+        with patch('news_officer.podcast.latest_rss_episodes', return_value=[healthy]), \
+                patch('news_officer.text_sources._fetch', side_effect=[RSS, TimeoutError()]), \
+                self.assertRaises(FeedDiscoveryError):
+            service.discover_daily_candidates(datetime(2026, 10, 13, 1, tzinfo=UTC))
+
+    def test_failed_podcast_and_text_sources_trigger_alert_with_healthy_article(self):
+        podcast = {'name': 'Podcast', 'type': 'rss', 'rss_url': 'https://example.org/podcast'}
+        bad = dict(self.source, name='Broken', rss_url='https://broken.org/feed')
+        self.path.write_text(json.dumps({'sources': [podcast, bad, self.source]}))
+        store = Store(Path(self.temp.name) / 'mixed-health.db')
+        store.initialize()
+        service = PodcastService(store, self.path, Mock(), daily_rss_only=True)
+        with patch('news_officer.podcast.latest_rss_episodes', side_effect=TimeoutError()), \
+                patch('news_officer.text_sources._fetch', side_effect=[TimeoutError(), RSS, ARTICLE]):
+            with self.assertRaisesRegex(FeedDiscoveryError, '2 of 3'):
+                service.discover_daily_candidates(datetime(2026, 10, 13, 1, tzinfo=UTC))
+            self.assertEqual(service._last_failed_feeds, ('Podcast', 'Broken'))
+
+    def test_undated_first_seen_survives_restart_and_dated_behavior_is_unchanged(self):
+        feed = RSS.replace('<pubDate>Tue, 13 Oct 2026 00:00:00 GMT</pubDate>', '')
+        page = ARTICLE.replace('<time datetime="2026-10-13T00:00:00Z"></time>', '')
+        db_path = Path(self.temp.name) / 'seen.db'
+        now = datetime(2026, 10, 13, 1, tzinfo=UTC)
+        for day, expected in ((13, 1), (13, 1), (14, 0)):
+            store = Store(db_path)
+            store.initialize()
+            service = PodcastService(store, self.path, Mock())
+            with patch('news_officer.text_sources._fetch', side_effect=[feed, page]):
+                self.assertEqual(len(service.discover_daily_candidates(now.replace(day=day))), expected)
+            self.assertEqual(store.article_first_seen('https://example.org/post/ai', now.replace(day=day)), now)
+        # A newly available publication date follows the existing lookback rules.
+        with patch('news_officer.text_sources._fetch', side_effect=[RSS, ARTICLE]):
+            self.assertEqual(len(service.discover_daily_candidates(now.replace(day=14))), 1)
+
+    def test_every_paid_preview_is_skipped(self):
+        source = next(s for s in load_text_sources(
+            Path(__file__).resolve().parents[1] / 'feeds.json') if s['name'] == 'Every')
+        index = '<a href="/p/essay">Essay</a>'
+        page = '<article><h1>Essay</h1><p>Public preview</p></article>'
+        with patch('news_officer.text_sources._fetch', side_effect=[index, page]):
+            self.assertEqual(discover_articles(source), [])
+
     def test_configured_sources_and_first_round_exclusions(self):
         sources = load_text_sources(Path(__file__).resolve().parents[1] / 'feeds.json')
         self.assertEqual(len(sources), 10)
         self.assertEqual({s['name'] for s in sources if s.get('free_only')},
-                         {'SemiAnalysis', 'Stratechery'})
+                         {'Every', 'SemiAnalysis', 'Stratechery'})
         first = next(s for s in sources if s['name'] == 'First Round')
         page = ('<a href="/articles/ai/">Category</a><a href="/glossary/ai/">Glossary</a>'
                 '<a href="/collections/">Collection</a><a href="/series/pmf/">Series</a>'

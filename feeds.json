@@ -288,6 +288,7 @@
     },
     {
       "name": "Every",
+      "free_only": true,
       "type": "text",
       "mode": "html",
       "index_url": "https://every.to/",

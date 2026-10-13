@@ -153,6 +153,7 @@ def _discover_articles(source: dict) -> list[tuple[Episode, Transcript]]:
     entries.sort(key=lambda entry: entry[2].timestamp() if entry[2] else 0, reverse=True)
     results = []
     seen = set()
+    fetch_error = None
     for url, feed_title, feed_date in entries:
         if url in seen:
             continue
@@ -177,17 +178,23 @@ def _discover_articles(source: dict) -> list[tuple[Episode, Transcript]]:
             if len(results) >= limit:
                 break
         except Exception as error:  # noqa: BLE001 - isolate individual articles
+            fetch_error = error
             logger.warning('Article fetch failed for %s: %s', url, error)
+    if not results and fetch_error is not None:
+        raise fetch_error
     return results
 
 
-def discover_articles(source: dict) -> list[tuple[Episode, Transcript]]:
+def discover_articles(source: dict, *, raise_on_error: bool = False) -> list[tuple[Episode, Transcript]]:
     """Isolate feed/index failures so other publishers can still be discovered.
 
     ``max_articles`` caps successful articles per source (default 10).
+    ``raise_on_error`` lets health checks distinguish outages from empty scans.
     """
     try:
         return _discover_articles(source)
-    except Exception as error:  # noqa: BLE001 - isolate individual sources
+    except Exception as error:
+        if raise_on_error:
+            raise
         logger.warning('Article discovery failed for %s: %s', source.get('name'), error)
         return []

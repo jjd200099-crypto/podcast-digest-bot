@@ -101,6 +101,10 @@ class Store:
                     attempts INTEGER NOT NULL DEFAULT 0
                 );
 
+                CREATE TABLE IF NOT EXISTS article_first_seen (
+                    url TEXT PRIMARY KEY,
+                    first_seen_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS episodes (
                     episode_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -1396,6 +1400,18 @@ class Store:
         if row is None:
             return None
         return str(row["group_key"])[len("episode:") :]
+
+    def article_first_seen(self, url: str, now: datetime) -> datetime:
+        """Persist the first successful discovery of an undated article URL."""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO article_first_seen VALUES (?, ?)",
+                (url, now.isoformat()),
+            )
+            row = connection.execute(
+                "SELECT first_seen_at FROM article_first_seen WHERE url = ?", (url,)
+            ).fetchone()
+        return datetime.fromisoformat(row["first_seen_at"])
 
     def has_episode(self, episode_id: str) -> bool:
         with self._connect() as connection:
