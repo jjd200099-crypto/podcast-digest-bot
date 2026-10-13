@@ -299,6 +299,46 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('次要解释', result)
         self.assertIn('https://example.test/one', result)
 
+    async def test_strict_compacted_daily_enrichment_uses_saved_document_eligibility(self):
+        from news_officer.daily_enrichment import _content
+        with patch.dict('os.environ', {'NEWS_OFFICER_STRICT_SELECTION': 'true'}):
+            item = self.oversized_item('one', '次要段落。' * 15000)
+            message = item.message.replace('推荐星级：★★★☆☆', '推荐星级：★★★★☆')
+            message += '\n<!-- strict-selection-v2 -->\n阅读建议：值得看全文'
+            item = replace(item, message=message, attachment=fixtures.attachment_for(
+                self.store.get_verified_transcript('one'), message))
+            with self.store._connect() as db:
+                db.execute('DELETE FROM episode_digests WHERE episode_id=?', ('one',))
+            self.store.save_transcript_digest('one', message, item.attachment.source_sha256,
+                                             item.attachment.record_revision_sha256)
+            instance, job, _ = self.setup_job([item])
+            await instance._handle_daily_job(job)
+            bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+            section = bundle['enrichment']['sections'][0]
+            self.assertEqual(bundle['enrichment']['eligible'], ['one'])
+            self.assertIs(section['strict_document_allowed'], True)
+            self.assertNotIn('阅读建议：', section['body'])
+            self.assertNotIn('次要段落', section['body'])
+            documents = {'one': {'url': 'https://www.feishu.cn/docx/one'}}
+            delivery = bundle['deliveries'][0]
+            _, content = _content(bundle, documents, delivery)
+            self.assertIn('精读', content)
+            self.assertIn(documents['one']['url'], content)
+
+            section['strict_document_allowed'] = False
+            for advice in ('', '\n阅读建议：值得看全文'):
+                with self.subTest(advice=advice):
+                    section['body'] += advice
+                    _, content = _content(bundle, documents, delivery)
+                    self.assertNotIn(documents['one']['url'], content)
+
+            del section['strict_document_allowed']
+            _, content = _content(bundle, documents, delivery)
+            self.assertIn(documents['one']['url'], content)
+            section['body'] = section['body'].replace('\n阅读建议：值得看全文', '')
+            _, content = _content(bundle, documents, delivery)
+            self.assertNotIn(documents['one']['url'], content)
+
     async def test_plaintext_fallback_warns_without_changing_body(self):
         from news_officer.daily_report import reader_episode
         from news_officer.operations import business_snapshot
@@ -322,6 +362,56 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.messenger.attempts, [])
         self.assertEqual(self.store.outbox_items(job.key), [])
         self.assertTrue(any('daily_message_capacity_exceeded' in w for w in business_snapshot(self.store.path)['warnings']))
+
+    async def test_strict_enrichment_uses_final_score_and_reading_advice(self):
+        from news_officer.daily_enrichment import _content
+        for enabled in ('true', 'false'):
+            with patch.dict('os.environ', {'NEWS_OFFICER_STRICT_SELECTION': enabled}):
+                items = [self.item('three', 3), self.item('four', 4), self.item('summary', 4)]
+                items = [replace(item, message=item.message + '\n链接：' + item.episode.url + '\n<!-- strict-selection-v2 -->\n阅读建议：' + advice)
+                         for item, advice in zip(items, ('看摘要', '值得看全文', '看摘要'), strict=True)]
+                items = [replace(item, attachment=fixtures.attachment_for(
+                    self.store.get_verified_transcript(item.episode.id), item.message)) for item in items]
+                for item in items:
+                    with self.store._connect() as db:
+                        db.execute('DELETE FROM episode_digests WHERE episode_id=?', (item.episode.id,))
+                    self.store.save_transcript_digest(item.episode.id, item.message,
+                        item.attachment.source_sha256, item.attachment.record_revision_sha256)
+                instance, job, _ = self.setup_job(items, key='daily:strict-' + enabled)
+                instance.settings.daily_document_fulltext = True
+                await instance._handle_daily_job(job)
+                bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+                self.assertEqual(bundle['enrichment']['eligible'],
+                                 ['four'] if enabled == 'true' else ['four', 'summary'])
+                for section in bundle['enrichment']['sections']:
+                    if enabled == 'true' and '精读和完整中文对谈' in section['template']:
+                        self.assertLess(section['template'].index('[精读和完整中文对谈]'),
+                                        section['template'].index('[收听节目]'))
+                documents = {i.episode.id: {'url': 'https://example.test/' + i.episode.id} for i in items}
+                _, content = _content(bundle, documents, bundle['deliveries'][0])
+                # Legacy templates include the reading link for every section when
+                # documents are supplied; strict templates only include eligible ones.
+                self.assertEqual(content.count('精读和完整中文对谈'), 1 if enabled == 'true' else 3)
+                _, without_docs = _content(bundle, {}, bundle['deliveries'][0])
+                self.assertNotIn('精读和完整中文对谈', without_docs)
+                self.store.complete(job.key)
+
+    async def test_internal_markers_are_removed_from_archived_body(self):
+        from news_officer.daily_report import render_daily_summary
+        item = self.item('markers')
+        message = item.message + '\n<!-- strict-selection-v2 -->\n<!-- future-internal-v2 -->\n阅读建议：值得看全文'
+        with self.store._connect() as db:
+            db.execute('DELETE FROM episode_digests WHERE episode_id=?', (item.episode.id,))
+        self.store.save_transcript_digest(item.episode.id, message,
+            item.attachment.source_sha256, item.attachment.record_revision_sha256)
+        item = replace(item, message=message, attachment=fixtures.attachment_for(
+            self.store.get_verified_transcript(item.episode.id), message))
+        instance, job, _ = self.setup_job([item])
+        await instance._handle_daily_job(job)
+        for rendered in (render_daily_summary(message), read_daily_digest(self.store, '2026-09-19')['markdown']):
+            self.assertIn('markers 的核心判断', rendered)
+            self.assertNotIn('<!--', rendered)
+            self.assertNotIn('strict-selection-v2', rendered)
 
     async def test_document_label_matches_fulltext_setting(self):
         from news_officer.daily_enrichment import _content

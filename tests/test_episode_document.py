@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
@@ -13,6 +14,36 @@ from news_officer.shownotes import render_episode, transcript_evidence, validate
 
 
 class SelectedDocuments(unittest.TestCase):
+    def test_final_daily_score_and_advice_gate_strict_documents_and_links(self):
+        from test_summarizer import VALID_SUMMARY
+
+        from news_officer.daily_report import reader_episode
+        from news_officer.editorial import EditorialPolicy
+        f = self.fixture
+        record = f.store.get_verified_transcript('one')
+        f.store.save_transcript_digest('one', '推荐星级：★★★★★',
+                                       record.content_sha256, record.record_revision_sha256)
+        for enabled in ('true', 'false'):
+            for rating, advice in ((3, '看摘要'), (3, '值得看摘要'), (4, '值得看全文'), (5, '值得编译'), (4, '看摘要'), (4, '无关')):
+                for minimum in (3, 4, 5):
+                    with self.subTest(enabled=enabled, rating=rating, advice=advice, minimum=minimum), patch.dict(
+                            'os.environ', {'NEWS_OFFICER_STRICT_SELECTION': enabled}):
+                        summary = EditorialPolicy.apply(VALID_SUMMARY, {
+                            'policy': 'strict-selection-v2', 'stars': rating,
+                            'assessment': {'reading_recommendation': advice, 'evidence_quality': 'high', 'reason': '从广告案例讲清模型效果与客户回报之间的因果，适合研究商业化。'}})
+                        item = f.store.get_job_result(f.base, 'one')
+                        item['message'] = summary
+                        with f.store._connect() as db:
+                            db.execute('UPDATE job_results SET payload_json=? WHERE job_key=? AND result_key=?',
+                                       (json.dumps(item), f.base, 'one'))
+                        self.compiler.min_stars = minimum
+                        selected = self.compiler.snapshot(f.base)[1]
+                        allowed = rating >= 4 and advice in {'值得看全文', '值得编译'}
+                        self.assertEqual(bool(selected), (allowed and rating >= minimum) if enabled == 'true' else True)
+                        rendered = reader_episode(summary, 'https://example.test/doc')
+                        self.assertEqual('精读和完整中文对谈' in rendered, allowed if enabled == 'true' else True)
+                        self.assertNotIn('精读和完整中文对谈', reader_episode(summary))
+
     def enrichment_job(self, identity):
         f = self.fixture
         record = f.store.get_verified_transcript(identity)

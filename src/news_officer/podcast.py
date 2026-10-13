@@ -852,12 +852,7 @@ class PodcastService:
                                      'failed', 'Podwise discovery incomplete; retry required'))
         summary_count = 0
         preparation_deadline = time.monotonic() + 480 if preparation else None
-        priority_b_summaries = 0
-        reserve_b_slot = self.max_daily_summaries >= 2
-        priority_a_soft_cap = self.max_daily_summaries - int(reserve_b_slot)
-        deferred_priority_a: list[
-            tuple[Episode, Transcript, StoredTranscript, dict | None]
-        ] = []
+        ranked_candidates: list[tuple[Episode, Transcript, StoredTranscript, dict | None]] = []
         for discovered in candidates:
             if preparation_deadline is not None and time.monotonic() >= preparation_deadline:
                 break
@@ -910,18 +905,8 @@ class PodcastService:
                     results.append(DailyItem(episode, status))
                     self.store.observe_discovery(episode, status, decision.get('stars', 0))
                     continue
-                source_priority = str(
-                    episode.metadata.get("source_priority") or "B"
-                ).upper()
-                if (
-                    reserve_b_slot
-                    and source_priority == "A"
-                    and summary_count >= priority_a_soft_cap
-                    and priority_b_summaries == 0
-                ):
-                    deferred_priority_a.append(
-                        (episode, transcript, stored, decision)
-                    )
+                if self.max_daily_summaries:
+                    ranked_candidates.append((episode, transcript, stored, decision))
                     continue
                 summary = self._daily_digest(episode, transcript, stored, decision)
                 self.store.observe_discovery(episode, 'summarized', (decision or {}).get('stars', 0))
@@ -934,10 +919,6 @@ class PodcastService:
                     )
                 )
                 summary_count += 1
-                if source_priority == "B":
-                    priority_b_summaries += 1
-                if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
-                    break
             except PodwiseRateLimited as error:
                 reason = 'Podwise 暂时限流，全文已列入待办，冷却后继续核验；本次不根据简介生成摘要。'
                 self.store.defer_daily_transcript(episode, reason,
@@ -951,11 +932,14 @@ class PodcastService:
                 logger.exception("Podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
                 self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
-        for episode, transcript, stored, decision in deferred_priority_a:
+        # Python's stable sort preserves discovery order for equal scores.
+        ranked_candidates.sort(key=lambda item: -(item[3] or {}).get('stars', 0))
+        for episode, transcript, stored, decision in ranked_candidates:
             if self.max_daily_summaries and summary_count >= self.max_daily_summaries:
                 break
             try:
                 summary = self._daily_digest(episode, transcript, stored, decision)
+                self.store.observe_discovery(episode, 'summarized', (decision or {}).get('stars', 0))
             except SummaryFormatError as error:
                 logger.warning(
                     "Deferred podcast summary format failed for %s: %s",
@@ -963,10 +947,12 @@ class PodcastService:
                     error,
                 )
                 results.append(DailyItem(episode, "summary_format_error", str(error)))
+                self.store.defer_daily_transcript(episode, '摘要格式待重试')
                 continue
             except Exception as error:
                 logger.exception("Deferred podcast analysis failed for %s", episode.url)
                 results.append(DailyItem(episode, "failed", str(error)))
+                self.store.defer_daily_transcript(episode, '来源或模型暂时失败，待重试')
                 continue
             results.append(
                 DailyItem(

@@ -7,6 +7,7 @@ import re
 from collections import Counter
 
 from .models import DailyItem
+from .strict_selection import strict_document_allowed, strict_selection_enabled
 from .summarizer import remove_editorial_leadins
 
 
@@ -286,7 +287,7 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
         if clean.startswith('节目：') or (not any(v.strip() for v in lines) and clean and not clean.startswith('#')):
             line = '**' + clean + '**'
         lines.append(line)
-    if document_url:
+    if document_url and (not strict_selection_enabled() or strict_document_allowed(markdown)):
         label = '精读和完整中文对谈' if fulltext else '精读'
         lines.extend(['', f'[{label}]({document_url})'])
     if links:
@@ -348,6 +349,9 @@ def render_daily_summary(markdown: str, *, discovered: bool = False, reader_mode
         r'(?m)(^推荐理由：[^\r\n]*?)（AI \d+/40，投资 \d+/20，研究关联 \d+/5，增量 \d+/20，论据 \d+/15）[ \t]*$',
         r'\1', markdown)
     markdown = re.sub(r'(?m)^(推荐星级：[★☆]{5})（[1-5]/5，编辑推荐）[ \t]*$', r'\1', markdown)
+    if re.search(r'<!-- strict-selection-v\d+ -->', markdown):
+        markdown = re.sub(r'(?m)^推荐星级：[^\n]*\n?', '', markdown)
+    markdown = re.sub(r'<!--.*?-->\n?', '', markdown, flags=re.DOTALL)
     advice = {5: '值得编译', 4: '值得看全文', 3: '看摘要', 2: '无关', 1: '无关'}
     # Keep archived scores for ordering/audit, but show only the reading action.
     return re.sub(r'(?m)^推荐星级：([★☆]{5})(?:｜(?:值得编译|值得看全文|看摘要即可|看摘要|可跳过|无关))?[ \t]*$',
