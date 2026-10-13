@@ -19,10 +19,13 @@ class DailyPreviewTests(unittest.TestCase):
     def test_mixed_durations_and_whitespace(self):
         for duration in ['01:02:03', '62:03', '3723', '1小时2分', '62 分钟']:
             with self.subTest(duration=duration):
-                self.assertEqual(render_daily_summary('时长：' + duration + ' \t'), '时长：62 分钟')
-        for duration in ['', '未提供', 'unknown']:
-            self.assertEqual(render_daily_summary('时长：' + duration), '时长：未提供')
-        rendered = reader_episode('## 标题 \t\n节目：Show  \n时长：3723 \t\n\n正文。  \n\n更多正文。 \t')
+                source = '## 标题\n时长：' + duration + ' \t'
+                self.assertEqual(render_daily_summary(source), source)
+                self.assertIn('时长：62 分钟', reader_episode(source, compact=True))
+        for duration, expected in [('', '未提供'), ('未提供', '未提供'), ('unknown', 'unknown')]:
+            self.assertIn('时长：' + expected,
+                          reader_episode('## 标题\n时长：' + duration, compact=True))
+        rendered = reader_episode('## 标题 \t\n节目：Show  \n时长：3723 \t\n\n正文。  \n\n更多正文。 \t', compact=True)
         self.assertTrue(all(line == line.rstrip() for line in rendered.splitlines()))
 
     def test_three_paragraph_model_output_is_merged_with_attribution(self):
@@ -69,7 +72,7 @@ class DailyPreviewTests(unittest.TestCase):
             item = DailyItem(Episode('ep', 'Title', 'https://example.test', 'Show',
                                      duration_seconds=seconds, duration_string=text),
                              'summarized', '## 标题\n节目：Show\n\n正文。')
-            self.assertIn('时长：' + expected, render_reader_daily([item], []))
+            self.assertIn('时长：' + expected, render_reader_daily([item], [], compact=True))
 
     def test_one_paragraph_can_succeed_on_retry(self):
         from unittest.mock import Mock
