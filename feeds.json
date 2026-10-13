@@ -108,6 +108,86 @@
       "priority": "B",
       "url": "https://www.youtube.com/channel/UC5xRQOIT8cfumDr2HaKNd4g/videos",
       "rss_url": "https://api.substack.com/feed/podcast/15764.rss"
+    },
+    {
+      "name": "No Priors",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://feeds.megaphone.fm/nopriors",
+      "enabled": true
+    },
+    {
+      "name": "Latent Space",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://api.substack.com/feed/podcast/1084089.rss",
+      "enabled": true
+    },
+    {
+      "name": "The MAD Podcast with Matt Turck",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://anchor.fm/s/f2ee4948/podcast/rss",
+      "enabled": true
+    },
+    {
+      "name": "Unsupervised Learning with Jacob Effron",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://feeds.simplecast.com/dOSE_bdP",
+      "enabled": true
+    },
+    {
+      "name": "The Pragmatic Engineer",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://api.substack.com/feed/podcast/458709.rss",
+      "enabled": true
+    },
+    {
+      "name": "The Peel with Turner Novak",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://anchor.fm/s/e231a4ec/podcast/rss",
+      "enabled": true
+    },
+    {
+      "name": "Uncapped with Jack Altman",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://anchor.fm/s/1156f1c04/podcast/rss",
+      "enabled": true
+    },
+    {
+      "name": "Core Memory",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://api.substack.com/feed/podcast/320996.rss",
+      "enabled": true
+    },
+    {
+      "name": "Google DeepMind: The Podcast",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://feeds.simplecast.com/JT6pbPkg",
+      "enabled": true
+    },
+    {
+      "name": "Founded & Funded (Madrona)",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://madrona.libsyn.com/rss",
+      "enabled": true
     }
   ]
 }
