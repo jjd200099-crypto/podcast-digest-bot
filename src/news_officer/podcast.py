@@ -838,8 +838,8 @@ class PodcastService:
                 pending.append(episode)
         return self.build_daily(pending=pending)
 
-    def _digest_key(self, stored, decision):
-        identity = getattr(self.summarizer, 'cache_identity', lambda: '')()
+    def _digest_key(self, stored, decision, identity=None):
+        identity = identity or getattr(self.summarizer, 'cache_identity', lambda: '')()
         if not isinstance(identity, str) or not identity:
             return ''  # Custom summarizers explicitly opt into caching.
         return hashlib.sha256(json.dumps([identity, stored.record_revision_sha256, decision],
@@ -848,6 +848,13 @@ class PodcastService:
     def _daily_digest(self, episode, transcript, stored, decision):
         key = self._digest_key(stored, decision)
         summary = self.store.prepared_digest(episode.id, key) if key else ''
+        if not summary and key:
+            identities = getattr(self.summarizer, 'compatible_cache_identities', list)()
+            if isinstance(identities, list):
+                for identity in identities:
+                    summary = self.store.prepared_digest(episode.id, self._digest_key(stored, decision, identity))
+                    if summary:
+                        break
         if not summary:
             summary = self.summarizer.summarize(episode, transcript)
             if decision is not None:

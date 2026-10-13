@@ -209,8 +209,13 @@ previously frozen send byte for byte.
 It displays numbered short show headings, an introduction, reading advice, numbered
 conclusion-first takeaways, and short clickable reading/listening labels. Episodes
 are separated by a visible rule in the existing Feishu rich-text post format.
-Archived digests are formatted without model rewriting; new summaries use the v4
-structure. Document links continue to enrich the same frozen daily message.
+Only summaries that validate as v4 use the complete v4 fields. Archived prose
+and bullet digests retain their original body structure without model rewriting.
+Usable new summaries fall back to this compatible renderer if v4 validation fails.
+Layout changes reuse prepared summaries, including pre-v4 caches, while model,
+selection policy and verified source changes still invalidate cached work.
+The summary_cache_seed_*.txt files freeze historical cache identities; do not edit
+these seeds for rendering or validator changes. Document links continue to enrich the same frozen daily message.
 
 Set `NEWS_OFFICER_DAILY_LAYOUT=compact` (or `false`) to restore the previous renderer
 and generation prompt; `NEWS_OFFICER_DAILY_COMPACT_PARAGRAPHS` retains its existing

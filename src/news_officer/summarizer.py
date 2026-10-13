@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from pathlib import Path
 
@@ -159,6 +158,14 @@ def _valid_editorial_summary(markdown: str) -> bool:
     return _valid_v4_summary(markdown) or _valid_narrative_summary(markdown) or _valid_legacy_editorial_summary(markdown)
 
 
+def _usable_summary(markdown: str) -> bool:
+    """Retain substantive model output when only its presentation fails."""
+    body = [line for line in markdown.splitlines() if line.strip() and not
+            line.startswith(('#', '节目：', '链接：', '时长：', '推荐理由：', '推荐星级：', '要点总结：'))]
+    return bool(re.search(r'(?m)^(?:## |节目：)', markdown) and
+                sum(len(line.strip()) for line in body) >= 40)
+
+
 class SummaryFormatError(ValueError):
     """The model did not return the requested readable editorial structure."""
 
@@ -204,8 +211,16 @@ class TranscriptSummarizer:
         return json.loads(response.output_text)['paragraphs']
 
     def cache_identity(self) -> str:
-        # Prompt/validator edits automatically invalidate prepared summaries.
-        return hashlib.sha256(Path(__file__).read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode() + str(os.environ.get('NEWS_OFFICER_DAILY_LAYOUT', 'v4')).encode()).hexdigest()
+        # Frozen seed preserves existing keys across renderer/validator edits.
+        # Model and selection scope still invalidate; display layout does not.
+        return hashlib.sha256(Path(__file__).with_name('summary_cache_seed_v4.txt').read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode() + b'v4').hexdigest()
+
+    def compatible_cache_identities(self) -> list[str]:
+        """Reuse pre-v4 and compact work with the same model and selection scope."""
+        suffix = self.model.encode() + str(strict_selection_enabled()).encode()
+        return [hashlib.sha256(Path(__file__).with_name(name).read_bytes() + suffix + layout).hexdigest()
+                for name, layout in [('summary_cache_seed_v4.txt', b'compact'),
+                                     ('summary_cache_seed_narrative.txt', b'')]]
 
     def summarize(self, episode: Episode, transcript: Transcript) -> str:
         if not transcript.verified_complete:
@@ -251,6 +266,7 @@ class TranscriptSummarizer:
 {transcript.text}
 --- END UNTRUSTED TRANSCRIPT ---
 """
+        fallback = None
         for attempt in range(2):
             attempt_prompt = prompt
             if attempt and v4:
@@ -270,8 +286,12 @@ class TranscriptSummarizer:
                 store=False,
             )
             summary = remove_editorial_leadins(response.output_text.strip())
+            if v4 and _usable_summary(summary):
+                fallback = fallback or summary
             if (_valid_v4_summary(summary) if v4 else _valid_narrative_summary(summary)):
                 return summary
+        if fallback is not None:
+            return fallback
         raise SummaryFormatError(
             "Summary must contain 2–3 readable paragraphs, a recommendation "
             "reason and a valid star rating, without bullet lists or category labels"

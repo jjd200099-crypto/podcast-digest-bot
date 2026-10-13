@@ -496,10 +496,24 @@ def reader_episode_v4(item, number, document_url=''):
                   if line.startswith('## ') and line != '## 内容解读'), '')
     if not title and lines and lines[0].strip('*').startswith('【'):
         title = lines[0].strip('*【】')
-    show = item.episode.show.split('｜')[0].strip()
-    if title.startswith(show + '｜'):
-        title = title[len(show) + 1:]
+    # Prefer the short model prefix to the verbose RSS brand string.
+    parts = re.split(r'[｜|]', title, maxsplit=1)
+    show = parts[0].strip() if len(parts) == 2 else re.split(r'[｜|:：–—]', item.episode.show, maxsplit=1)[0].strip()
+    title = parts[1].strip() if len(parts) == 2 else title
+    while title.startswith((show + '｜', show + '|')):
+        title = title[len(show) + 1:].strip()
     title = title or '本期讨论'
+    heading = f'**{number}. 【{show}｜{title}】**'
+    from .summarizer import _valid_v4_summary
+    if not _valid_v4_summary(item.message):
+        # Preserve archived paragraphs/lists instead of manufacturing v4 fields.
+        compatible = re.sub(r'(?m)^## (?!内容解读)[^\n]+', heading, content, count=1)
+        if heading not in compatible:
+            compatible = heading + '\n\n' + compatible
+        rendered = reader_episode(compatible, document_url)
+        if item.episode.url not in rendered:
+            rendered += f'\n\n[收听节目]({item.episode.url})'
+        return rendered
     intro, reason, advice, points = '', '', '', []
     for line in lines:
         clean = line.removeprefix('- ').strip('*')

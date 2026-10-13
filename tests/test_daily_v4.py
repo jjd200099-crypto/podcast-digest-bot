@@ -3,7 +3,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 import test_combined_daily as fixtures
-from test_summarizer import EPISODE, TRANSCRIPT, summarizer_for
+from test_summarizer import (
+    EPISODE,
+    LEGACY_SUMMARY,
+    TRANSCRIPT,
+    VALID_SUMMARY,
+    summarizer_for,
+)
 
 from news_officer.config import Settings
 from news_officer.daily_enrichment import DOCUMENT_PLACEHOLDER, _content
@@ -56,6 +62,31 @@ class DailyV4Tests(unittest.TestCase):
                       '只有需求增长，成本下降才可能提高利润。'):
             self.assertIn(claim, text)
 
+    def test_short_title_deduplicates_verbose_rss_brand(self):
+        from dataclasses import replace
+        episode = replace(EPISODE, show='Show: A very long RSS brand about AI and business')
+        for title in ('Show｜AI 成本取决于任务', 'Show｜Show｜AI 成本取决于任务'):
+            text = reader_episode_v4(DailyItem(episode, 'summarized',
+                V4.replace('Show｜AI 成本取决于任务', title)), 1)
+            self.assertEqual(text.splitlines()[0], '**1. 【Show｜AI 成本取决于任务】**')
+
+    def test_legacy_paragraphs_and_bullets_do_not_manufacture_v4_fields(self):
+        for old in (VALID_SUMMARY, LEGACY_SUMMARY):
+            text = reader_episode_v4(DailyItem(EPISODE, 'summarized', old), 1)
+            self.assertNotIn('- 简介：', text)
+            self.assertNotIn('- 要点总结：', text)
+            self.assertNotIn('    1.', text)
+            self.assertEqual(old, DailyItem(EPISODE, 'summarized', old).message)
+
+    def test_v4_format_failure_keeps_usable_output(self):
+        for usable in (VALID_SUMMARY, V4.replace('2. ', '3. '),
+                       V4.replace('简介：', '介绍：'),
+                       V4.split('推荐理由：')[0]):
+            instance = summarizer_for(usable, 'invalid')
+            with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
+                self.assertEqual(instance.summarize(EPISODE, TRANSCRIPT), usable.strip())
+            self.assertEqual(len(instance.client.responses.calls), 2)
+
     def test_clean_display_and_separator_in_actual_post(self):
         value = V4.replace('Mike 讨论', '[新]【新】王颢蓁讨论RSI（递归自我改进）和')
         items = [DailyItem(EPISODE, 'summarized', value)] * 2
@@ -83,7 +114,7 @@ class DailyV4Tests(unittest.TestCase):
             self.assertEqual(instance.summarize(EPISODE, TRANSCRIPT), V4)
             self.assertIn('每条先给结论', instance.client.responses.calls[0]['instructions'])
         with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'compact'}):
-            self.assertNotEqual(identity, instance.cache_identity())
+            self.assertEqual(identity, instance.cache_identity())
 
 
 class DailyV4RuntimeTests(unittest.IsolatedAsyncioTestCase):
