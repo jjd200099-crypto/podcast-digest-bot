@@ -110,6 +110,48 @@
       "rss_url": "https://api.substack.com/feed/podcast/15764.rss"
     },
     {
+      "name": "Anthropic",
+      "type": "youtube",
+      "priority": "B",
+      "url": "https://www.youtube.com/channel/UCrDwWp7EBBv4NwvScIpBDOA/videos"
+    },
+    {
+      "name": "AI Engineer",
+      "type": "youtube",
+      "priority": "B",
+      "url": "https://www.youtube.com/channel/UCLKPca3kwwd-B59HNr-_lvA/videos"
+    },
+    {
+      "name": "Andrej Karpathy",
+      "type": "youtube",
+      "priority": "B",
+      "url": "https://www.youtube.com/channel/UCXUPKJO5MZQN11PqgIvyuvQ/videos"
+    },
+    {
+      "name": "Stripe",
+      "type": "youtube",
+      "priority": "B",
+      "url": "https://www.youtube.com/channel/UCM1guA1E-RHLO2OyfQPOkEQ/videos"
+    },
+    {
+      "name": "Founders You Should Know",
+      "type": "youtube",
+      "priority": "B",
+      "url": "https://www.youtube.com/channel/UC7tPLStIIpO7a9x9ERMXrdg/videos"
+    },
+    {
+      "name": "Generalist",
+      "type": "youtube",
+      "priority": "B",
+      "url": "https://www.youtube.com/channel/UCwV9z8IGmbUQUb5D8KSv3mQ/videos"
+    },
+    {
+      "name": "Index Ventures",
+      "type": "youtube",
+      "priority": "B",
+      "url": "https://www.youtube.com/channel/UCFMxDWNYefVV3XmCdCBCFjQ/videos"
+    },
+    {
       "name": "No Priors",
       "type": "rss",
       "priority": "B",
