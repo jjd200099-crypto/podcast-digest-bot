@@ -193,7 +193,7 @@ def discover_articles(source: dict, *, raise_on_error: bool = False) -> list[tup
     """
     try:
         return _discover_articles(source)
-    except Exception as error:  # noqa: BLE001 - isolate individual sources
+    except Exception as error:
         if raise_on_error:
             raise
         logger.warning('Article discovery failed for %s: %s', source.get('name'), error)

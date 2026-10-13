@@ -9,9 +9,9 @@ from unittest.mock import Mock, patch
 
 from news_officer.feishu import _post_elements
 from news_officer.podcast import (
+    FeedDiscoveryError,
     PodcastService,
     TranscriptResolver,
-    FeedDiscoveryError,
     load_youtube_sources,
 )
 from news_officer.store import Store
@@ -193,9 +193,9 @@ class TextSourcesTests(unittest.TestCase):
                 datetime(2026, 10, 13, 1, tzinfo=UTC))), 1)
             self.assertEqual(service._last_failed_feeds, ())
         with patch('news_officer.podcast.latest_rss_episodes', return_value=[healthy]), \
-                patch('news_officer.text_sources._fetch', side_effect=[RSS, TimeoutError()]):
-            with self.assertRaises(FeedDiscoveryError):
-                service.discover_daily_candidates(datetime(2026, 10, 13, 1, tzinfo=UTC))
+                patch('news_officer.text_sources._fetch', side_effect=[RSS, TimeoutError()]), \
+                self.assertRaises(FeedDiscoveryError):
+            service.discover_daily_candidates(datetime(2026, 10, 13, 1, tzinfo=UTC))
 
     def test_failed_podcast_and_text_sources_trigger_alert_with_healthy_article(self):
         podcast = {'name': 'Podcast', 'type': 'rss', 'rss_url': 'https://example.org/podcast'}
