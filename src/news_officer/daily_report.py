@@ -7,6 +7,7 @@ import re
 from collections import Counter
 
 from .models import DailyItem
+from .strict_selection import strict_document_allowed, strict_selection_enabled
 from .summarizer import remove_editorial_leadins
 
 
@@ -286,7 +287,7 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
         if clean.startswith('节目：') or (not any(v.strip() for v in lines) and clean and not clean.startswith('#')):
             line = '**' + clean + '**'
         lines.append(line)
-    if document_url:
+    if document_url and (not strict_selection_enabled() or strict_document_allowed(markdown)):
         label = '精读和完整中文对谈' if fulltext else '精读'
         lines.extend(['', f'[{label}]({document_url})'])
     if links:
