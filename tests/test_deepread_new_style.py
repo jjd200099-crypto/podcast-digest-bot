@@ -215,6 +215,7 @@ class NewStyleTests(unittest.TestCase):
             lambda v: v["chapters"][0]["turns"].pop(),
             lambda v: v["chapters"][0]["turns"][0].update(speaker="Unknown"),
             lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["王颢蓁"]),
+            lambda v: v["chapters"][0]["turns"][0].update(paragraphs=["A/B测试"]),
             lambda v: v["core"][0].update(evidence_ids=["missing"]),
         ):
             value = copy.deepcopy(sample())
