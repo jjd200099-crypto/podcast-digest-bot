@@ -514,6 +514,7 @@ class NewStyleCompilerTests(unittest.TestCase):
         # Simulate deployment with an edited prompt, including module reload
         # and a fresh compiler so this catches a hash computed at import time.
         import importlib
+
         from news_officer import deepread
 
         source.store.complete(job.key)
