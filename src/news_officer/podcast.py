@@ -95,7 +95,7 @@ class TranscriptResolver:
         errors: list[tuple[str, Exception]] = []
         providers = list(self.providers)
         if is_youtube_url(episode.url):
-            # YouTubeTranscriptProvider tries transcript-api, then yt-dlp captions.
+            # YouTubeTranscriptProvider tries primary API, free proxies, then yt-dlp captions.
             providers = [p for p in providers if not isinstance(p, PodwiseTranscriptProvider)] + [
                 p for p in providers if isinstance(p, PodwiseTranscriptProvider)
             ]
@@ -116,6 +116,8 @@ class TranscriptResolver:
                 )
                 continue
             if transcript and transcript.verified_complete:
+                if is_youtube_url(episode.url) and isinstance(provider, PodwiseTranscriptProvider):
+                    logger.info("YouTube transcript succeeded via Podwise read-only lookup")
                 return transcript
         if errors:
             limited = [error for _, error in errors if isinstance(error, PodwiseRateLimited)]
