@@ -60,6 +60,7 @@ class Settings:
     daily_transcript_attachments: bool = False
     daily_combined_message: bool = True
     daily_compact_paragraphs: bool = False
+    daily_layout: str = "v4"
     daily_reader_mode: bool = True
     podcast_memory_path: Path | None = None
     agent_backend: str = "agents_sdk"
@@ -220,6 +221,7 @@ class Settings:
             podwise_api_token=os.environ.get("PODWISE_API_TOKEN", "").strip(),
             daily_combined_message=os.environ.get("NEWS_OFFICER_DAILY_COMBINED_MESSAGE", "true").lower() == "true",
             daily_compact_paragraphs=os.environ.get("NEWS_OFFICER_DAILY_COMPACT_PARAGRAPHS", "false").lower() in {"true", "1"},
+            daily_layout=os.environ.get("NEWS_OFFICER_DAILY_LAYOUT", "v4"),
             daily_reader_mode=os.environ.get("NEWS_OFFICER_DAILY_READER_MODE", "true").lower() == "true",
             daily_transcript_attachments=os.environ.get(
                 "NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS", "false"

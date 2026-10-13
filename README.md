@@ -202,3 +202,21 @@ previously frozen send byte for byte.
 `NEWS_OFFICER_DEEPREAD_NEW_STYLE=true` 为飞书精读启用“核心内容＋QA 整理”：详细核心 bullets、按原始顺序编号的话题章节、真实说话人姓名、保留第一人称与完整实质对谈。删除广告、开场重复剪辑及无信息语气词，修复可确认的 ASR 错误，English 专有名词保持 English。未确认的身份保留原稿标签。
 
 开关关闭时保留原精读提示词、渲染结果与缓存标识。启用时使用独立版本缓存；QA 已包含完整实质对谈，因此不再重复追加旧全文附录。已有机器人生成的文档切换排版前会冻结旧块并核对回读，发现人工修改则停止替换。仍需开启原有文档功能并遵守原有收件人授权。源文字稿归档保持完整，删除广告仅发生在派生阅读文档中。
+
+### Morning report layout
+
+`NEWS_OFFICER_DAILY_LAYOUT=v4` is the default for the combined reader morning report.
+It displays numbered short show headings, an introduction, reading advice, numbered
+conclusion-first takeaways, and short clickable reading/listening labels. Episodes
+are separated by a visible rule in the existing Feishu rich-text post format.
+Archived digests are formatted without model rewriting; new summaries use the v4
+structure. Document links continue to enrich the same frozen daily message.
+
+Set `NEWS_OFFICER_DAILY_LAYOUT=compact` (or `false`) to restore the previous renderer
+and generation prompt; `NEWS_OFFICER_DAILY_COMPACT_PARAGRAPHS` retains its existing
+behavior on that path. Previously frozen deliveries keep their exact original bytes.
+Preview locally without sending messages:
+
+```bash
+NEWS_OFFICER_DAILY_LAYOUT=v4 PYTHONPATH=src python -m news_officer.daily_preview --dry-run --db /path/to/archive.sqlite3 --date 2026-10-14
+```

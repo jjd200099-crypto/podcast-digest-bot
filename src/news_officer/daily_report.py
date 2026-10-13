@@ -313,8 +313,14 @@ def reader_episode(markdown: str, document_url: str = '', *, fulltext: bool = Tr
 
 
 def render_reader_daily(items, documents, *, fulltext: bool = True, ab_preview: bool = False,
-                        rewriter=None, rewrite_audit=None, compact: bool = False) -> str:
+                        rewriter=None, rewrite_audit=None, compact: bool = False, layout='compact') -> str:
     """Render fresh episode results without consulting any frozen delivery."""
+    if v4_layout_enabled(layout):
+        blocks = [reader_episode_v4(item, number, episode_document_url(item.episode, documents)
+                  if not strict_selection_enabled() or strict_document_allowed(item.message) else '')
+                  for number, item in enumerate((i for i in ranked_daily_items(items)
+                      if i.status == 'summarized'), 1)]
+        return '\n\n━━━━━━━━━━━━━━━━━━━━\n\n'.join(blocks)
     blocks = [reader_episode(episode_summary(item, compact=compact), episode_document_url(item.episode, documents),
                              fulltext=fulltext, rewriter=rewriter, rewrite_audit=rewrite_audit,
                              compact=compact) for item in ranked_daily_items(items)
@@ -470,3 +476,55 @@ def compact_reader_episode(content: str, level: int, listening_url: str) -> str:
     if listening_url not in result:
         result += f'\n\n[收听节目]({listening_url})'
     return result
+
+
+def v4_layout_enabled(value=None):
+    """Default on; compact/false explicitly restore the previous renderer."""
+    import os
+    if value is None:
+        value = os.environ.get('NEWS_OFFICER_DAILY_LAYOUT', 'v4')
+    return str(value).lower() in {'v4', 'true', '1', 'on'}
+
+
+def reader_episode_v4(item, number, document_url=''):
+    """Extract archived prose without rewriting claims or calling a model."""
+    content = render_daily_summary(item.message, reader_mode=True)
+    content = re.sub(r'\[新\]|【新】', '', content).replace('王颢蓁', '')
+    content = re.sub(r'RSI[（(]递归自我改进[）)]', 'RSI', content)
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    title = next((line.removeprefix('## ').strip('*【】') for line in lines
+                  if line.startswith('## ') and line != '## 内容解读'), '')
+    if not title and lines and lines[0].strip('*').startswith('【'):
+        title = lines[0].strip('*【】')
+    show = item.episode.show.split('｜')[0].strip()
+    if title.startswith(show + '｜'):
+        title = title[len(show) + 1:]
+    title = title or '本期讨论'
+    intro, reason, advice, points = '', '', '', []
+    for line in lines:
+        clean = line.removeprefix('- ').strip('*')
+        if clean.startswith('简介：'):
+            intro = clean[3:]
+        elif clean.startswith('推荐理由：'):
+            reason = clean[5:]
+        elif clean.startswith(('阅读建议：', '优先级/阅读建议：')):
+            advice = clean.split('：', 1)[1]
+        elif clean.startswith(('节目：', '时长：', '链接：', '节目链接：', '收听链接：',
+                               '推荐星级：', '要点总结：', '#', '[', '【')):
+            continue
+        else:
+            points.append(re.sub(r'^(?:\d+[.、]\s*|[•*-]\s*)', '', line))
+    if not intro and points:
+        # Reuse existing prose without inventing a new claim or dropping a takeaway.
+        intro = points[0]
+    if not points and intro:
+        points = [intro]
+    fields = [f'**{number}. 【{show}｜{title}】**', '', f'- 简介：{intro}',
+              '- 优先级/阅读建议：' + '，'.join(v for v in (advice, reason) if v),
+              '- 要点总结：', *(f'    {i}. {point}' for i, point in enumerate(points, 1))]
+    if document_url:
+        fields.append(f'[精读和完整中文对谈]({document_url})')
+    fields.append(f'[收听节目]({item.episode.url})')
+    rendered = '\n'.join(fields).replace('王颢蓁', '')
+    # Keep inline source URLs clickable as well, with short visible labels.
+    return re.sub(r'(?<!\()(https?://[^\s)]+)', r'[来源](\1)', rendered)
