@@ -42,7 +42,7 @@ class DailyPreviewTests(unittest.TestCase):
                 rendered = compact_paragraphs(source, model, audit)
                 self.assertFalse(audit[0]['fallback'])
                 self.assertEqual(len(summary_paragraph_spans(rendered)), 2)
-                self.assertIn('Company称仍有风险。 仍需观察。', rendered)
+                self.assertIn('Company称仍有风险。仍需观察。', rendered)
                 model.rewrite_paragraphs.assert_called_once()
 
     def test_one_paragraph_retries_then_falls_back(self):
