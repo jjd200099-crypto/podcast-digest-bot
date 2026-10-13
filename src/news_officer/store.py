@@ -77,6 +77,10 @@ class Store:
                 CREATE INDEX IF NOT EXISTS jobs_ready_idx
                     ON jobs(status, available_at, created_at);
 
+                CREATE TABLE IF NOT EXISTS youtube_podwise_process_requests (
+                    seq INTEGER PRIMARY KEY,
+                    day TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS podwise_process_requests (
                     seq INTEGER PRIMARY KEY,
                     state TEXT NOT NULL,
@@ -1411,6 +1415,29 @@ class Store:
                 'INSERT OR IGNORE INTO podwise_process_requests VALUES (?, ?, ?, ?)',
                 (seq, 'requesting', _now(), _now()),
             ).rowcount == 1
+
+    def reserve_youtube_podwise_processing(self, seq: int, daily_max: int) -> bool:
+        """Atomically reserve a credit; uncertain requests count against the UTC day."""
+        if type(seq) is not int or seq <= 0:
+            raise ValueError('Invalid Podwise asset')
+        if daily_max <= 0:
+            return False
+        now = _now()
+        day = now[:10]
+        with self._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            count = connection.execute(
+                'SELECT COUNT(*) FROM youtube_podwise_process_requests WHERE day=?', (day,)
+            ).fetchone()[0]
+            if count >= daily_max:
+                return False
+            reserved = connection.execute(
+                'INSERT OR IGNORE INTO podwise_process_requests VALUES (?, ?, ?, ?)',
+                (seq, 'requesting', now, now),
+            ).rowcount == 1
+            if reserved:
+                connection.execute('INSERT INTO youtube_podwise_process_requests VALUES (?, ?)', (seq, day))
+            return reserved
 
     def set_podwise_processing_state(self, seq: int, state: str) -> None:
         with self._connect() as connection:
