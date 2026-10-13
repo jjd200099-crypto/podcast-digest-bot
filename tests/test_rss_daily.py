@@ -71,17 +71,19 @@ class RSSDailyTests(unittest.TestCase):
         with patch('news_officer.podcast.latest_rss_episodes', return_value=[self.episode]):
             self.assertEqual(self.service().discover_daily_candidates(), [])
 
-    def test_no_rss_source_is_reported_not_silently_scanned_on_youtube(self):
+    def test_no_rss_source_is_silently_skipped(self):
         self.feeds.write_text(json.dumps({'sources': [{
             'name': 'Missing RSS', 'type': 'youtube', 'url': 'https://www.youtube.com/@show/videos',
         }]}))
-        with patch('news_officer.podcast.latest_videos') as scan, self.assertRaises(FeedDiscoveryError):
-            self.service().discover_daily_candidates()
+        with patch('news_officer.podcast.latest_videos') as scan:
+            service = self.service()
+            self.assertEqual(service.discover_daily_candidates(), [])
+            self.assertEqual(service._last_failed_feeds, ())
         scan.assert_not_called()
 
     def test_interactive_resolver_preserves_youtube_but_prioritizes_podwise(self):
         service = self.service()
         providers = [type(p) for p in service.transcript_resolver.providers]
         self.assertLess(providers.index(PodwiseTranscriptProvider), providers.index(YouTubeTranscriptProvider))
-        self.assertFalse(any(isinstance(p, YouTubeTranscriptProvider)
+        self.assertTrue(any(isinstance(p, YouTubeTranscriptProvider)
                              for p in service.daily_transcript_resolver.providers))

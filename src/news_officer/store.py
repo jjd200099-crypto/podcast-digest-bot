@@ -1434,17 +1434,22 @@ class Store:
                 'ON CONFLICT(provider_key) DO UPDATE SET retry_at=excluded.retry_at, failures=excluded.failures',
                 (key, retry_at, failures))
 
-    def defer_daily_transcript(self, episode: Episode, state: str, *, retry_at: datetime | None = None) -> None:
-        """Keep original publisher identity after the daily 24h window closes."""
+    def defer_daily_transcript(self, episode: Episode, state: str, *, retry_at: datetime | None = None) -> bool:
+        """Retain publisher identity, terminating after three attempts or days.
+
+        Return True when the durable backlog entry is final-skipped.
+        """
         value = episode.to_persisted_dict()
         value['metadata'] = episode.metadata
         now = datetime.now(UTC)
         with self._connect() as connection:
-            prior = connection.execute('SELECT attempts FROM daily_transcript_backlog WHERE episode_id=?',
+            prior = connection.execute('SELECT attempts, created_at, state FROM daily_transcript_backlog WHERE episode_id=?',
                                        (episode.id,)).fetchone()
-            # Pending transcription is checked promptly, persistently unavailable
-            # material backs off after a day instead of hammering paid APIs forever.
-            delay = timedelta(hours=6) if prior and prior['attempts'] >= 48 else timedelta(minutes=30)
+            final = bool(prior and (prior['state'] == 'final_skipped' or prior['attempts'] >= 2
+                         or now - datetime.fromisoformat(prior['created_at']) >= timedelta(days=3)))
+            if final:
+                state = 'final_skipped'
+            delay = timedelta(minutes=30)
             next_check = max(now + delay, retry_at) if retry_at else now + delay
             connection.execute(
                 'INSERT INTO daily_transcript_backlog VALUES (?, ?, ?, ?, ?, 1) '
@@ -1453,6 +1458,14 @@ class Store:
                 (episode.id, json.dumps(value, ensure_ascii=False), state, now.isoformat(),
                  next_check.isoformat()),
             )
+        if final:
+            self.record_episode(episode, 'final_skipped')
+        return final
+
+    def final_skip_daily_transcript(self, episode: Episode) -> None:
+        self.record_episode(episode, 'final_skipped')
+        with self._connect() as connection:
+            connection.execute("UPDATE daily_transcript_backlog SET state='final_skipped' WHERE episode_id=?", (episode.id,))
 
     def due_daily_transcripts(self, limit: int = 50, *, include_discovery: bool = True) -> list[Episode]:
         from dataclasses import replace
@@ -1460,7 +1473,7 @@ class Store:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT episode_json FROM daily_transcript_backlog "
-                "WHERE state != 'delivered' AND next_check_at<=? "
+                "WHERE state NOT IN ('delivered', 'final_skipped') AND next_check_at<=? "
                 "AND (? OR episode_id NOT LIKE 'podwise:%') "
                 "ORDER BY CASE WHEN episode_id LIKE 'podwise:%' THEN 1 ELSE 0 END, next_check_at, created_at LIMIT ?",
                 (_now(), include_discovery, limit),
@@ -1517,6 +1530,9 @@ class Store:
         returned only partial metadata during one scan.
         """
         with self._connect() as connection:
+            backlog = connection.execute("SELECT state FROM daily_transcript_backlog WHERE episode_id=?", (episode_id,)).fetchone()
+            if backlog and backlog['state'] == 'final_skipped':
+                return None
             row = connection.execute(
                 "SELECT result, checked_at FROM episodes WHERE episode_id = ?",
                 (episode_id,),

@@ -40,10 +40,12 @@ from .summarizer import SummaryFormatError
 from .text_sources import discover_articles, load_text_sources, text_sources_enabled
 from .transcript_view import RENDERER_VERSION, render_readable_transcript
 from .youtube import (
+    YouTubeFinalSkip,
     YouTubeTranscriptProvider,
     is_youtube_url,
     latest_videos,
     video_metadata,
+    youtube_skip_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,14 +87,19 @@ class Summarizer(Protocol):
 class TranscriptResolver:
     """Try official transcript adapters first, then captions or other fallbacks."""
 
-    def __init__(self, providers: Sequence[TranscriptProvider]):
+    def __init__(self, providers: Sequence[TranscriptProvider], *, rss_only: bool = False):
         self.providers = providers
+        self.rss_only = rss_only
 
     def fetch(self, episode: Episode) -> Transcript | None:
         errors: list[tuple[str, Exception]] = []
         for provider in self.providers:
+            if self.rss_only and isinstance(provider, YouTubeTranscriptProvider) and not is_youtube_url(episode.url):
+                continue
             try:
                 transcript = provider.fetch(episode)
+            except YouTubeFinalSkip:
+                raise
             except Exception as error:  # noqa: BLE001 - one source must not block fallbacks
                 errors.append((provider.name, error))
                 logger.warning(
@@ -156,9 +163,11 @@ class YouTubeFeedSource:
     priority: str = "B"
 
     def accepts(self, episode: Episode) -> bool:
+        if youtube_skip_reason(episode):
+            return False
         if not self.include_keywords:
             return True
-        title = episode.title.casefold()
+        title = str(episode.metadata.get("youtube_title") or episode.title).casefold()
         return any(
             re.search(rf"(?<![a-z0-9]){re.escape(keyword.casefold())}(?![a-z0-9])", title)
             is not None
@@ -383,8 +392,7 @@ class PodcastService:
             ]
         )
         self.daily_transcript_resolver = (
-            TranscriptResolver([p for p in self.transcript_resolver.providers
-                                if not isinstance(p, YouTubeTranscriptProvider)])
+            TranscriptResolver(self.transcript_resolver.providers, rss_only=True)
             if daily_rss_only else self.transcript_resolver
         )
         # Keep billable processing out of general chat/link lookups. Only the
@@ -394,7 +402,7 @@ class PodcastService:
                 PodwiseTranscriptProvider(podwise_api_token, processing_store=store, auto_process=True)
                 if isinstance(p, PodwiseTranscriptProvider) else p
                 for p in self.daily_transcript_resolver.providers
-            ])
+            ], rss_only=daily_rss_only)
         self.lookback_hours = lookback_hours
         self.max_daily_candidates = max_daily_candidates
         self.max_daily_summaries = max_daily_summaries
@@ -569,6 +577,8 @@ class PodcastService:
                 url=s.get("url", ""), name=s["name"], rss_url=s.get("rss_url", ""),
                 scan_depth=s.get("scan_depth", 30), priority=s.get("priority", "B"),
             ) for s in self.source_registry.list() if s.get("origin") == "conversation")
+        if self.daily_rss_only:
+            sources = [source for source in sources if source.rss_url]
         for source in sources:
             youtube_episodes: list[Episode] = []
             rss_episodes: list[Episode] = []
@@ -598,8 +608,7 @@ class PodcastService:
                         source.rss_url,
                         limit=0 if not self.max_daily_candidates else max(30, source.scan_depth),
                     )
-                    if discovered_rss:
-                        channel_with_results += 1
+                    channel_with_results += 1
                     rss_episodes = [
                         episode
                         for episode in discovered_rss
@@ -896,11 +905,15 @@ class PodcastService:
                         episode, video_metadata(youtube_url)
                     )
                 if episode.published_at is None:
+                    self.store.defer_daily_transcript(episode, 'unverified_date')
                     results.append(DailyItem(episode, "unverified_date"))
                     continue
                 if pending is None and episode.published_at.astimezone(UTC) < cutoff:
                     results.append(DailyItem(episode, "outside_window"))
                     continue
+                skip_reason = youtube_skip_reason(episode)
+                if skip_reason:
+                    raise YouTubeFinalSkip(skip_reason)
                 if episode.metadata.get('source_type') == 'text':
                     record = self.store.get_verified_transcript(episode.id)
                     transcript = record.transcript if record else None
@@ -912,9 +925,12 @@ class PodcastService:
                     reason = next((p.diagnostics[episode.id] for p in providers
                         if isinstance(p, PodwiseTranscriptProvider) and episode.id in p.diagnostics),
                         '尚未找到通过完整性校验的全文，已保留待办继续复查。')
-                    self.store.defer_daily_transcript(episode, reason)
+                    final = self.store.defer_daily_transcript(episode, reason)
+                    if final:
+                        reason = '全文获取已达到重试上限，已停止复查。'
                     self.store.observe_discovery(episode, 'no_transcript')
-                    results.append(DailyItem(episode, "no_transcript", reason))
+                    logger.info("Transcript unavailable for %s: %s", episode.url, reason)
+                    results.append(DailyItem(episode, "final_skipped" if final else "no_transcript", reason))
                     continue
                 stored = self.store.save_verified_transcript(episode, transcript)
                 decision = self.editorial_policy.assess(episode, transcript) if self.editorial_policy else None
@@ -942,6 +958,13 @@ class PodcastService:
                     )
                 )
                 summary_count += 1
+            except YouTubeFinalSkip as error:
+                self.store.final_skip_daily_transcript(episode)
+                results.append(DailyItem(episode, 'final_skipped', str(error)))
+            except TranscriptLookupError as error:
+                logger.warning("Daily transcript unavailable for %s: %s", episode.url, error)
+                final = self.store.defer_daily_transcript(episode, '全文来源暂时不可用')
+                results.append(DailyItem(episode, 'final_skipped' if final else 'no_transcript'))
             except PodwiseRateLimited as error:
                 reason = 'Podwise 暂时限流，全文已列入待办，冷却后继续核验；本次不根据简介生成摘要。'
                 self.store.defer_daily_transcript(episode, reason,

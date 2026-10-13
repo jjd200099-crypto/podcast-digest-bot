@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -37,6 +38,22 @@ VTT_CUE_RE = re.compile(
     r"(?m)^(?P<start>(?:\d{2}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+"
     r"(?P<end>(?:\d{2}:)?\d{2}:\d{2}\.\d{3})"
 )
+
+
+class YouTubeFinalSkip(ValueError):
+    """The video is a clip and must never enter the transcript retry queue."""
+
+
+def youtube_skip_reason(episode: Episode) -> str | None:
+    if not is_youtube_url(episode.url):
+        return None
+    if "/shorts/" in episode.url or re.search(
+        r"#shorts\b", episode.title + " " + str(episode.metadata.get("description") or ""), re.IGNORECASE
+    ):
+        return "YouTube Shorts"
+    if episode.duration_seconds is not None and episode.duration_seconds < 900:
+        return "YouTube video shorter than 15 minutes"
+    return None
 
 
 def run(*args: str, timeout_seconds: int = 180) -> str:
@@ -449,6 +466,58 @@ class YouTubeTranscriptProvider:
     name = "YouTube captions"
 
     def fetch(self, episode: Episode) -> Transcript | None:
+        reason = youtube_skip_reason(episode)
+        if reason:
+            raise YouTubeFinalSkip(reason)
+        try:
+            transcript = self._fetch_api(episode)
+            if transcript:
+                return transcript
+        except YouTubeFinalSkip:
+            raise
+        except Exception as error:  # noqa: BLE001 - transcript errors are logged and skipped
+            logging.getLogger(__name__).warning("YouTube transcript API failed for %s: %s", episode.url, error)
+        try:
+            return self._fetch_captions(episode)
+        except YouTubeFinalSkip:
+            raise
+        except Exception as error:  # noqa: BLE001 - transcript errors are logged and skipped
+            logging.getLogger(__name__).warning("YouTube transcript unavailable for %s: %s", episode.url, error)
+            return None
+
+    def _fetch_api(self, episode: Episode) -> Transcript | None:
+        """Read timed transcript API captions using the session proxy."""
+        from youtube_transcript_api import YouTubeTranscriptApi
+
+        url = episode.url if is_youtube_url(episode.url) else str(episode.metadata.get("youtube_url") or "")
+        video_id = youtube_video_id(url)
+        if not video_id:
+            return None
+        duration = episode.duration_seconds
+        if not duration:
+            enriched = video_metadata(url)
+            reason = youtube_skip_reason(enriched)
+            if reason:
+                raise YouTubeFinalSkip(reason)
+            duration = enriched.duration_seconds
+        if duration and duration < 900:
+            raise YouTubeFinalSkip("YouTube video shorter than 15 minutes")
+        with requests.Session() as session:
+            snippets = YouTubeTranscriptApi(http_client=session).fetch(
+                video_id, languages=["en", "en-US", "zh-Hans", "zh", "zh-Hant"]
+            )
+        # Without real duration we cannot verify full-video coverage.
+        if not duration:
+            return None
+        text = _merge_caption_chunks([snippet.text for snippet in snippets])
+        intervals = [(s.start, s.start + s.duration) for s in snippets]
+        if (intervals_cover_episode(intervals, duration)
+                and len(text) >= max(5_000, round(duration / 60) * 300)
+                and 60 <= len(text.split()) / (duration / 60) <= 260):
+            return Transcript(text, self.name, url, True, snippets.language_code)
+        return None
+
+    def _fetch_captions(self, episode: Episode) -> Transcript | None:
         youtube_url = (
             episode.url
             if is_youtube_url(episode.url)
@@ -486,18 +555,24 @@ class YouTubeTranscriptProvider:
                     youtube_url,
                     timeout_seconds=60,
                 )
-                if duration_seconds <= 0:
-                    info_files = list(Path(temp_dir).glob("*.info.json"))
-                    if info_files:
-                        info = json.loads(info_files[0].read_text())
-                        duration_seconds = float(info.get("duration") or 0)
+                info_files = list(Path(temp_dir).glob("*.info.json"))
+                if info_files:
+                    info = json.loads(info_files[0].read_text())
+                    duration_seconds = float(info.get("duration") or duration_seconds)
+                    if "/shorts/" in str(info.get("webpage_url") or "") or re.search(
+                        r"#shorts\b", str(info.get("title") or "") + " " + str(info.get("description") or ""), re.IGNORECASE
+                    ):
+                        raise YouTubeFinalSkip("YouTube Shorts")
+                if 0 < duration_seconds < 900:
+                    raise YouTubeFinalSkip("YouTube video shorter than 15 minutes")
                 if duration_seconds <= 0:
                     return None
+            except YouTubeFinalSkip:
+                raise
             except (TypeError, ValueError):
                 return None
-            # Extraction/network failures intentionally propagate to the
-            # resolver. They are retryable source errors, not proof that a
-            # complete transcript does not exist.
+            # The wrapper logs extraction errors and lets daily processing
+            # apply the persistent transcript retry cap.
             files = [
                 *Path(temp_dir).glob("*.json3"),
                 *Path(temp_dir).glob("*.vtt"),
