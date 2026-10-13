@@ -277,9 +277,14 @@ class NewStyleCompilerTests(unittest.TestCase):
         )
 
     def test_runtime_passes_config_flag_to_writer_and_compiler(self):
+        import importlib
         import tempfile
 
-        from news_officer.__main__ import build_runtime
+        from news_officer import __main__
+
+        # A read-only preview test imports this module while constructors are
+        # patched. Refresh bindings after those patches have been restored.
+        build_runtime = importlib.reload(__main__).build_runtime
 
         env = {
             "FEISHU_APP_ID": "id",
