@@ -37,6 +37,7 @@ from .rss import (
 from .sequoia import SequoiaOfficialTranscriptProvider
 from .store import Store
 from .summarizer import SummaryFormatError
+from .text_sources import discover_articles, load_text_sources, text_sources_enabled
 from .transcript_view import RENDERER_VERSION, render_readable_transcript
 from .youtube import (
     YouTubeTranscriptProvider,
@@ -642,6 +643,20 @@ class PodcastService:
                     failed_sources[-1],
                 )
 
+        healthy_text_sources = 0
+        if text_sources_enabled():
+            for source in load_text_sources(self.feeds_path):
+                try:
+                    articles = discover_articles(source)
+                    healthy_text_sources += 1
+                    for episode, transcript in articles:
+                        self.store.save_verified_transcript(episode, transcript)
+                    priority = source.get('priority', 'B')
+                    groups_by_priority[priority if priority in {'A', 'B'} else 'B'].append(
+                        [episode for episode, _ in articles])
+                except Exception as error:  # noqa: BLE001 - isolate text source failures
+                    logger.warning('Text discovery failed for %s: %s', source['name'], error)
+
         new_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
         self._discovery_notice = ''
         self._discovery_failed = False
@@ -766,7 +781,7 @@ class PodcastService:
                 key=lambda episode: not bool(episode.metadata.get("rss_feed_url")),
             )
 
-        successful_sources = len(sources) - len(failed_sources)
+        successful_sources = len(sources) - len(failed_sources) + healthy_text_sources
         self._last_failed_feeds = tuple(failed_sources)
         if failed_sources and not any(e.id.startswith('podwise:') for e in candidates) and (
             not candidates or len(failed_sources) >= successful_sources
@@ -809,6 +824,8 @@ class PodcastService:
             summary = self.summarizer.summarize(episode, transcript)
             if decision is not None:
                 summary = self.editorial_policy.apply(summary, decision)
+        if episode.metadata.get('source_type') == 'text':
+            summary = re.sub(r'(?m)^## [^\n]+', lambda _: f'## {episode.show}｜{episode.title}', summary, count=1)
         summary = self.store.save_transcript_digest(
             episode.id, summary, stored.content_sha256, stored.record_revision_sha256)
         if key:
@@ -824,6 +841,8 @@ class PodcastService:
             now = now.replace(tzinfo=UTC)
         cutoff = now.astimezone(UTC) - timedelta(hours=self.lookback_hours)
         candidates = self.discover_daily_candidates(now) if pending is None else pending
+        if not text_sources_enabled():
+            candidates = [e for e in candidates if e.metadata.get('source_type') != 'text']
         if not preparation and pending is None:
             # A crash, slow provider or summary cap must not lose already-seen
             # releases when they fall outside the next day's 24-hour window.
@@ -882,7 +901,11 @@ class PodcastService:
                 if pending is None and episode.published_at.astimezone(UTC) < cutoff:
                     results.append(DailyItem(episode, "outside_window"))
                     continue
-                transcript = self.daily_transcript_resolver.fetch(episode)
+                if episode.metadata.get('source_type') == 'text':
+                    record = self.store.get_verified_transcript(episode.id)
+                    transcript = record.transcript if record else None
+                else:
+                    transcript = self.daily_transcript_resolver.fetch(episode)
                 if transcript is None:
                     providers = getattr(self.daily_transcript_resolver, 'providers', ())
                     providers = providers if isinstance(providers, (list, tuple)) else ()

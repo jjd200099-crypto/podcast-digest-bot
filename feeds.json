@@ -230,6 +230,75 @@
       "url": "",
       "rss_url": "https://madrona.libsyn.com/rss",
       "enabled": true
+    },
+    {
+      "name": "Dario Amodei",
+      "type": "text",
+      "mode": "html",
+      "index_url": "https://www.darioamodei.com/",
+      "link_regex": "^/(essay|post)/"
+    },
+    {
+      "name": "Shunyu Yao",
+      "type": "text",
+      "mode": "rss",
+      "rss_url": "https://ysymyth.github.io/feed.xml"
+    },
+    {
+      "name": "Lilian Weng",
+      "type": "text",
+      "mode": "rss",
+      "rss_url": "https://lilianweng.github.io/index.xml"
+    },
+    {
+      "name": "NFX",
+      "type": "text",
+      "mode": "html",
+      "index_url": "https://www.nfx.com/",
+      "link_regex": "^/post/"
+    },
+    {
+      "name": "First Round",
+      "type": "text",
+      "mode": "html",
+      "index_url": "https://review.firstround.com/articles/ai/",
+      "link_regex": "^/.+",
+      "exclude_regex": "^/(articles|glossary|collections|series|about|newsletter|search|tag|tags|author|authors|podcast|executive-function|signin)(?:/|$)"
+    },
+    {
+      "name": "Chemistry VC",
+      "type": "text",
+      "mode": "html",
+      "index_url": "https://www.chemistry.vc/blog",
+      "link_regex": "^/post/"
+    },
+    {
+      "name": "Compound VC",
+      "type": "text",
+      "mode": "html",
+      "index_url": "https://www.compound.vc/writing",
+      "link_regex": "^(https://www.compound.vc)?/writing/.+"
+    },
+    {
+      "name": "Every",
+      "type": "text",
+      "mode": "html",
+      "index_url": "https://every.to/",
+      "link_regex": "^/p/"
+    },
+    {
+      "name": "SemiAnalysis",
+      "type": "text",
+      "mode": "rss",
+      "rss_url": "https://semianalysis.com/feed/",
+      "free_only": true
+    },
+    {
+      "name": "Stratechery",
+      "type": "text",
+      "mode": "rss",
+      "rss_url": "https://stratechery.com/feed/",
+      "free_only": true
     }
   ]
 }

@@ -1003,7 +1003,7 @@ class Store:
                 ),
             )
             # Read back through the same write transaction. A second worker
-            metadata = {k: episode.metadata[k] for k in ('description', 'chapters', 'rss_feed_url', 'audio_url', 'youtube_url')
+            metadata = {k: episode.metadata[k] for k in ('description', 'chapters', 'rss_feed_url', 'audio_url', 'youtube_url', 'source_type')
                         if k in episode.metadata}
             if metadata:
                 connection.execute('UPDATE episode_transcripts SET episode_metadata_json=? WHERE episode_id=?',
