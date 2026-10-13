@@ -2,7 +2,6 @@ import json
 import unittest
 from pathlib import Path
 
-
 # Audio RSS URLs from dac0a5949bc770cec9202b450264fc7b94cc0eab.
 # Keep this snapshot independent of git history at test time.
 AUDIO_RSS_SNAPSHOT = {
