@@ -87,6 +87,55 @@ class DailyV4Tests(unittest.TestCase):
                 self.assertEqual(instance.summarize(EPISODE, TRANSCRIPT), usable.strip())
             self.assertEqual(len(instance.client.responses.calls), 2)
 
+    def test_fallback_survives_editorial_scoring_and_rendering(self):
+        from news_officer.editorial import EditorialPolicy
+        decision = {'stars': 4, 'assessment': {'reason': '提供模型路由和成本管理的具体案例。'}}
+        for usable in (V4.replace('2. ', '3. '), V4.replace('简介：', '介绍：'),
+                       V4.split('推荐理由：')[0]):
+            instance = summarizer_for(usable, 'invalid')
+            with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
+                scored = EditorialPolicy.apply(instance.summarize(EPISODE, TRANSCRIPT), decision)
+            self.assertEqual(len(instance.client.responses.calls), 2)
+            self.assertIn('推荐理由：' + decision['assessment']['reason'], scored)
+            self.assertIn('推荐星级：★★★★☆', scored)
+            rendered = render_reader_daily([DailyItem(EPISODE, 'summarized', scored)], [], layout='v4')
+            self.assertIn('Mike 认为简单任务可以使用更小的模型。', rendered)
+            self.assertIn('公司称需要先验证客户的真实需求。', rendered)
+
+    def test_fallback_preserves_strict_selection_and_rejects_empty_output(self):
+        from news_officer.editorial import STRICT_POLICY_VERSION, EditorialPolicy
+        from news_officer.summarizer import SummaryFormatError
+        decision = {'policy': STRICT_POLICY_VERSION, 'stars': 5,
+                    'assessment': {'reason': '提供模型路由和成本管理的具体案例。',
+                                   'ai_content_share': 'low', 'evidence_quality': 'high',
+                                   'reading_recommendation': '值得编译'}}
+        with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
+            scored = EditorialPolicy.apply(V4.split('推荐理由：')[0], decision)
+            self.assertIn('推荐星级：★★★☆☆', scored)
+            self.assertIn('阅读建议：值得看摘要', scored)
+            with self.assertRaises(SummaryFormatError):
+                EditorialPolicy.apply('## Show｜主题\n节目：Show', decision)
+        with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'compact'}), self.assertRaises(SummaryFormatError):
+            EditorialPolicy.apply(V4.split('推荐理由：')[0], decision)
+
+    def test_legacy_long_program_line_is_omitted_only_at_render_time(self):
+        old = VALID_SUMMARY.replace('节目：', '节目：' + '很长的原始节目标题' * 50)
+        item = DailyItem(EPISODE, 'summarized', old)
+        rendered = reader_episode_v4(item, 1)
+        self.assertNotIn('很长的原始节目标题', rendered)
+        self.assertNotIn('节目：', rendered)
+        self.assertIn('收听节目', rendered)
+        self.assertEqual(item.message, old)
+
+    def test_rsi_parenthetical_annotations_in_both_directions(self):
+        for summary in (V4, VALID_SUMMARY):
+            for term in ('RSI（递归自我改进）', 'RSI(递归自我改进)',
+                         '递归自我改进（RSI）', '递归自我改进(RSI)'):
+                value = summary.replace('推荐理由：', '推荐理由：' + term)
+                rendered = reader_episode_v4(DailyItem(EPISODE, 'summarized', value), 1)
+                self.assertNotIn(term, rendered)
+                self.assertIn('RSI', rendered)
+
     def test_clean_display_and_separator_in_actual_post(self):
         value = V4.replace('Mike 讨论', '[新]【新】王颢蓁讨论RSI（递归自我改进）和')
         items = [DailyItem(EPISODE, 'summarized', value)] * 2

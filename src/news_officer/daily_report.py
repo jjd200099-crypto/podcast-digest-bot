@@ -490,7 +490,7 @@ def reader_episode_v4(item, number, document_url=''):
     """Extract archived prose without rewriting claims or calling a model."""
     content = render_daily_summary(item.message, reader_mode=True)
     content = re.sub(r'\[新\]|【新】', '', content).replace('王颢蓁', '')
-    content = re.sub(r'RSI[（(]递归自我改进[）)]', 'RSI', content)
+    content = re.sub(r'RSI\s*[（(]递归自我改进[）)]|递归自我改进\s*[（(]RSI[）)]', 'RSI', content)
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     title = next((line.removeprefix('## ').strip('*【】') for line in lines
                   if line.startswith('## ') and line != '## 内容解读'), '')
@@ -507,7 +507,9 @@ def reader_episode_v4(item, number, document_url=''):
     from .summarizer import _valid_v4_summary
     if not _valid_v4_summary(item.message):
         # Preserve archived paragraphs/lists instead of manufacturing v4 fields.
-        compatible = re.sub(r'(?m)^## (?!内容解读)[^\n]+', heading, content, count=1)
+        # The heading identifies the show; omit verbose archived source lines.
+        compatible = re.sub(r'(?m)^[ \t]*(?:\*\*)?节目：[^\n]*\n?', '', content)
+        compatible = re.sub(r'(?m)^## (?!内容解读)[^\n]+', heading, compatible, count=1)
         if heading not in compatible:
             compatible = heading + '\n\n' + compatible
         rendered = reader_episode(compatible, document_url)

@@ -283,7 +283,16 @@ class EditorialPolicy:
             stars = min(stars, 3)
         result = re.sub(r'(?m)^推荐星级：[^\r\n]*$',
                         lambda _: f"推荐星级：{'★' * stars}{'☆' * (5 - stars)}", summary)
-        if not _valid_editorial_summary(result):
+        from .daily_report import v4_layout_enabled
+        from .summarizer import _usable_summary
+        usable_fallback = v4_layout_enabled() and _usable_summary(summary)
+        if usable_fallback:
+            # Keep substantive fallback work even when presentation fields are missing.
+            if not re.search(r'(?m)^推荐理由：', result):
+                result = result.rstrip() + f"\n推荐理由：{value['reason']}"
+            if not re.search(r'(?m)^推荐星级：', result):
+                result = result.rstrip() + f"\n推荐星级：{'★' * stars}{'☆' * (5 - stars)}"
+        if not _valid_editorial_summary(result) and not usable_fallback:
             raise SummaryFormatError('Scored summary failed format validation')
         if decision.get('policy') == STRICT_POLICY_VERSION:
             recommendation = value.get('reading_recommendation', '无关')
