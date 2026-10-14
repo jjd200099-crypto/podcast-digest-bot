@@ -177,8 +177,17 @@ def encoded_message_payload(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str) -> list[tuple[str, str, str]]:
-    """Prefer a schema-2.0 card, compact oversized days, then degrade safely."""
+class DailyCardTooLargeError(ValueError):
+    """The full daily card exceeds the safe serialized message limit."""
+
+
+def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str,
+                              allow_compaction: bool = True) -> list[tuple[str, str, str]]:
+    """Prefer a schema-2.0 card, compact oversized days, then degrade safely.
+
+    With allow_compaction=False, reject an oversized full card before changing
+    its contents or message type, so in-place enrichment preserves the original.
+    """
     body = re.sub(r'(?m)^重做版[^\n]*\n*', '', markdown).strip()
     elements = [{'tag': 'markdown', 'content': f'**{title}**'}]
     sections = re.split(r'\n*━━━━━━━━━━━━━━━━━━━━\n*', body)
@@ -201,6 +210,8 @@ def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str
     result = card_part(elements)
     if result:
         return result
+    if not allow_compaction:
+        raise DailyCardTooLargeError('Full daily card exceeds 29000 bytes')
     # As in the previous daily delivery path, drop optional material in whole
     # units, retaining headings, an extractive summary, and all source links.
     from .daily_report import compact_reader_episode
