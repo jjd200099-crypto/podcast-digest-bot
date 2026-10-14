@@ -149,7 +149,7 @@ def consolidate(client, model, merged, evidence):
                     )
                 ],
             }
-            return validate_deepread(result, evidence)
+            return validate_deepread(result, evidence, final_attempt=attempt == 2)
         except Exception as error:
             if attempt == 2:
                 raise ValueError("Deepread consolidation failed") from error
@@ -202,7 +202,16 @@ def normalize_proper_noun(text):
     )
 
 
-def validate_deepread(value, evidence):
+def proper_noun_matches(noun, text):
+    """Match normalized English tokens, allowing adjacent Chinese text."""
+    return (
+        bool(noun)
+        and re.search(rf"(?<![a-z0-9_]){re.escape(noun)}(?![a-z0-9_])", text)
+        is not None
+    )
+
+
+def validate_deepread(value, evidence, *, final_attempt=True):
     source = "\n".join(body["text"] for body in evidence.values())
     notes = DeepRead.model_validate(preserve_glossary_values(value, source))
     check_output(json.dumps(notes.model_dump(), ensure_ascii=False))
@@ -252,12 +261,18 @@ def validate_deepread(value, evidence):
             f"Incomplete QA source coverage: {len(missing)} blocks missing: {missing[:20]}"
         )
     qa = normalize_proper_noun("\n".join([*names, *dialogue]))
+
+    def retry_or_drop(message):
+        if not final_attempt:
+            raise ValueError(message)
+        LOGGER.warning("Dropping %s", message)
+
     supported_nouns = []
     for noun in notes.proper_nouns:
         refs(noun.evidence_ids)
         original = normalize_proper_noun(noun.original)
         if not original or not any(
-            original in normalize_proper_noun(evidence[key]["text"])
+            proper_noun_matches(original, normalize_proper_noun(evidence[key]["text"]))
             for key in noun.evidence_ids
         ):
             LOGGER.warning(
@@ -266,25 +281,29 @@ def validate_deepread(value, evidence):
                 noun.evidence_ids,
             )
             continue
-        if (
-            not re.search(r"[A-Za-z]", noun.canonical)
-            or re.search(r"[\u3400-\u9fff]", noun.canonical)
+        if not re.search(r"[A-Za-z]", noun.canonical) or re.search(
+            r"[\u3400-\u9fff]", noun.canonical
         ):
-            raise ValueError("English proper noun missing or translated in QA")
-        if normalize_proper_noun(noun.canonical) not in qa:
-            LOGGER.warning(
-                "Dropping proper noun %r missing from QA", noun.canonical
+            retry_or_drop(
+                f"proper noun {noun.canonical!r}: English canonical missing or translated"
             )
+            continue
+        if not proper_noun_matches(normalize_proper_noun(noun.canonical), qa):
+            retry_or_drop(f"proper noun {noun.canonical!r} missing from QA")
             continue
         supported_nouns.append(noun)
     notes.proper_nouns = supported_nouns
+    supported_corrections = []
     for correction in notes.corrections:
         refs([correction.evidence_id])
         if (
             not correction.original.strip()
             or correction.original not in evidence[correction.evidence_id]["text"]
         ):
-            raise ValueError("ASR original not found")
+            retry_or_drop(f"ASR original not found: {correction.original!r}")
+            continue
+        supported_corrections.append(correction)
+    notes.corrections = supported_corrections
     return notes.model_dump()
 
 
@@ -335,7 +354,11 @@ def generate(client, model, record):
                 )
                 if response.output_parsed is None:
                     raise ValueError("Incomplete model output")
-                value = validate_deepread(response.output_parsed.model_dump(), batch)
+                value = validate_deepread(
+                    response.output_parsed.model_dump(),
+                    batch,
+                    final_attempt=attempt == 2,
+                )
                 break
             except Exception as error:
                 if attempt == 2:
