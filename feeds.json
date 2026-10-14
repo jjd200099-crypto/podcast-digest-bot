@@ -307,6 +307,30 @@
       "mode": "rss",
       "rss_url": "https://stratechery.com/feed/",
       "free_only": true
+    },
+    {
+      "name": "Latent Space (text)",
+      "type": "text",
+      "mode": "rss",
+      "rss_url": "https://www.latent.space/feed",
+      "free_only": true
+    },
+    {
+      "name": "Madrona (text)",
+      "type": "text",
+      "mode": "html",
+      "index_url": "https://www.madrona.com/",
+      "link_regex": "^/[a-z0-9]+(?:-[a-z0-9]+)*/?$",
+      "exclude_regex": "^/(about|team|companies|insights|contact|search|privacy-policy|jobs|news|careers|index|tag|category|author|page)(?:/|$)"
+    },
+    {
+      "name": "Andrew Ng",
+      "type": "text",
+      "enabled": false,
+      "mode": "html",
+      "index_url": "https://www.linkedin.com/in/andrewyng/recent-activity/all/",
+      "link_regex": "^/posts/",
+      "disabled_reason": "LinkedIn returns HTTP 999 to unauthenticated requests; no verified public full-text adapter. Keep disabled until supported."
     }
   ]
 }

@@ -1,6 +1,7 @@
 """Offline article fixtures; compatible with pytest and CI unittest discovery."""
 import json
 import os
+import re
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -236,9 +237,9 @@ class TextSourcesTests(unittest.TestCase):
 
     def test_configured_sources_and_first_round_exclusions(self):
         sources = load_text_sources(Path(__file__).resolve().parents[1] / 'feeds.json')
-        self.assertEqual(len(sources), 10)
+        self.assertEqual(len(sources), 12)
         self.assertEqual({s['name'] for s in sources if s.get('free_only')},
-                         {'Every', 'SemiAnalysis', 'Stratechery'})
+                         {'Every', 'SemiAnalysis', 'Stratechery', 'Latent Space (text)'})
         first = next(s for s in sources if s['name'] == 'First Round')
         page = ('<a href="/articles/ai/">Category</a><a href="/glossary/ai/">Glossary</a>'
                 '<a href="/collections/">Collection</a><a href="/series/pmf/">Series</a>'
@@ -246,6 +247,64 @@ class TextSourcesTests(unittest.TestCase):
                 '<a href="https://review.firstround.com/building-ai-products/">Article</a>')
         self.assertEqual(article_links(page, first),
                          ['https://review.firstround.com/building-ai-products/'])
+
+    def test_madrona_article_paths_and_listing_exclusions(self):
+        configured = json.loads((Path(__file__).resolve().parents[1] / 'feeds.json').read_text())
+        source = next(s for s in configured['sources'] if s['name'] == 'Madrona (text)')
+        # Article slugs observed on the live homepage; trailing slash is optional.
+        slugs = ('why-ai-made-your-buyers-harder-to-sell-to',
+                 'is-ai-a-bubble-what-pitchbook-nizar-tarhuni-sees-in-the-data',
+                 'the-best-infrastructure-moment-since-cloud')
+        for slug in slugs:
+            for suffix in ('', '/', '/?utm_source=test#intro'):
+                path = '/' + slug + suffix
+                with self.subTest(path=path):
+                    self.assertEqual(article_links(f'<a href="{path}">Article</a>', source),
+                                     [source['index_url'] + slug + suffix.split('?')[0]])
+        for route in ('about', 'team', 'companies', 'insights', 'contact', 'search',
+                      'privacy-policy', 'jobs', 'news', 'careers', 'index', 'tag',
+                      'category', 'author', 'page'):
+            for suffix in ('', '/', '/x', '/2/', '/?utm_source=test#intro'):
+                path = '/' + route + suffix
+                with self.subTest(path=path):
+                    self.assertIsNotNone(re.search(source['exclude_regex'], path.split('?')[0]))
+                    self.assertEqual(article_links(f'<a href="{path}">Listing</a>', source), [])
+        for path in ('/', '/article/nested/', '/logo.png', '/feed.xml', '/123.html',
+                     'https://outside.org/the-best-infrastructure-moment-since-cloud/',
+                     'https://jobs.madrona.com/the-best-infrastructure-moment-since-cloud/'):
+            with self.subTest(path=path):
+                self.assertEqual(article_links(f'<a href="{path}">Other</a>', source), [])
+        # Exclusions match whole route segments, not article slug prefixes.
+        self.assertEqual(article_links('<a href="/news-from-madrona/">Article</a>', source),
+                         ['https://www.madrona.com/news-from-madrona/'])
+
+    def test_shared_text_sources_are_gated_and_discoverable(self):
+        path = Path(__file__).resolve().parents[1] / 'feeds.json'
+        configured = json.loads(path.read_text())['sources']
+        andrew = next(s for s in configured if s['name'] == 'Andrew Ng')
+        self.assertFalse(andrew['enabled'])
+        self.assertTrue(andrew['disabled_reason'])
+        with patch.dict(os.environ, {'NEWS_OFFICER_TEXT_SOURCES': 'false'}), \
+                patch('pathlib.Path.read_text') as read:
+            self.assertEqual(load_text_sources(path), [])
+            read.assert_not_called()
+        sources = {s['name']: s for s in load_text_sources(path)}
+        self.assertNotIn('Andrew Ng', sources)
+        latent = sources['Latent Space (text)']
+        self.assertEqual(latent['rss_url'], 'https://www.latent.space/feed')
+        madrona = sources['Madrona (text)']
+        index = ('<a href="/why-ai-made-your-buyers-harder-to-sell-to/">Essay</a>'
+                 '<a href="/team/">Team</a><a href="/insights/">Index</a>'
+                 '<a href="/companies/ai/">Companies</a>'
+                 '<a href="https://outside.org/essay/">Outside</a>')
+        links = article_links(index, madrona)
+        self.assertEqual(links, ['https://www.madrona.com/why-ai-made-your-buyers-harder-to-sell-to/'])
+        for source, listing in ((latent, RSS), (madrona, index)):
+            with self.subTest(source=source['name']), \
+                    patch('news_officer.text_sources._fetch', side_effect=[listing, ARTICLE]):
+                [(episode, transcript)] = discover_articles(source, raise_on_error=True)
+                self.assertEqual(episode.show, source['name'])
+                self.assertTrue(transcript.verified_complete)
 
     def test_flag_off_matches_legacy_daily_bytes(self):
         podcast = {'name': 'Podcast', 'type': 'rss', 'rss_url': 'https://example.org/podcast'}
