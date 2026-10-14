@@ -486,9 +486,10 @@ def v4_layout_enabled(value=None):
     return str(value).lower() in {'v4', 'true', '1', 'on'}
 
 
-def reader_episode_v4(item, number, document_url=''):
+def reader_episode_v4(item, number, document_url='', *, source_text=''):
     """Extract archived prose without rewriting claims or calling a model."""
-    content = render_daily_summary(item.message, reader_mode=True)
+    from .glossary import preserve_english_terms
+    content = preserve_english_terms(render_daily_summary(item.message, reader_mode=True), source_text)
     content = re.sub(r'\[新\]|【新】', '', content).replace('王颢蓁', '')
     content = re.sub(r'RSI\s*[（(]递归自我改进[）)]|递归自我改进\s*[（(]RSI[）)]', 'RSI', content)
     lines = [line.strip() for line in content.splitlines() if line.strip()]
@@ -537,7 +538,7 @@ def reader_episode_v4(item, number, document_url=''):
         points = [intro]
     fields = [f'**{number}. 【{show}｜{title}】**', '', f'- 简介：{intro}',
               '- 优先级/阅读建议：' + '，'.join(v for v in (advice, reason) if v),
-              '- 要点总结：', *(f'    {i}. {point}' for i, point in enumerate(points, 1))]
+              '- 要点总结：', '\n\n'.join(f'    {i}. {point}' for i, point in enumerate(points, 1))]
     if document_url:
         fields.append(f'[精读和完整中文对谈]({document_url})')
     fields.append(f'[收听节目]({item.episode.url})')

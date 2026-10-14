@@ -48,6 +48,7 @@ class DailyV4Tests(unittest.TestCase):
         self.assertIn('- 简介：Mike', text)
         self.assertIn('- 优先级/阅读建议：值得看全文，', text)
         self.assertIn('    1. 成本取决于任务。Mike 认为', text)
+        self.assertIn('模型。\n\n    2. ', text)
         self.assertIn('[精读和完整中文对谈](https://example.com/doc)', text)
         self.assertIn(f'[收听节目]({EPISODE.url})', text)
         self.assertEqual(item.message, V4)
@@ -190,9 +191,13 @@ class DailyV4RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(DOCUMENT_PLACEHOLDER, sections[0]['template'])
         delivery = bundle['deliveries'][0]
         kind, edited = _content(bundle, {'one': {'url': 'https://example.test/doc'}}, delivery)
-        self.assertEqual(kind, 'post')
+        self.assertEqual(kind, 'interactive')
+        card = json.loads(edited)
+        self.assertEqual(card['schema'], '2.0')
+        self.assertEqual([e['tag'] for e in card['body']['elements']],
+                         ['markdown', 'markdown', 'hr', 'markdown'])
         self.assertIn('精读和完整中文对谈', edited)
-        self.assertIn('━━━━━━━━━━━━━━━━━━━━', edited)
+        self.assertNotIn('━━━━━━━━━━━━━━━━━━━━', edited)
         instance.settings.daily_layout = 'compact'
         instance._prepare_combined_daily(job, finalize=True)
         self.assertEqual(bundle, self.store.list_job_results(job.key, 'daily_bundle')[0])

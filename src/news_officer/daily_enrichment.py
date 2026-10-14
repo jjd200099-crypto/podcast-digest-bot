@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import date, timedelta
 
-from .feishu import combined_delivery_parts
+from .feishu import combined_delivery_parts, daily_card_delivery_parts
 from .library import LibraryError
 from .models import DailyItem
 from .operations import record_warning
@@ -100,6 +100,10 @@ def normalized_content(kind, content):
     value = json.loads(content)
     if kind == 'text':
         return {'text': value['text']}
+    if kind == 'interactive':
+        if value.get('schema') != '2.0' or 'body' not in value:
+            raise LibraryError('飞书未返回可核验卡片正文，保留原消息')
+        return value
     if kind != 'post':
         raise LibraryError('日报消息类型不支持编辑')
     value = value.get('zh_cn', value)
@@ -128,7 +132,8 @@ def _content(bundle, documents, delivery):
             '[精读与完整中文对谈](', '[精读和完整中文对谈](')
         blocks.append(template.replace(DOCUMENT_PLACEHOLDER, doc['url'])
                       if doc else section['body'])
-    parts = combined_delivery_parts('\n\n'.join(blocks), delivery['key'], title=edition['title'])
+    renderer = daily_card_delivery_parts if edition.get('format') == 'interactive' else combined_delivery_parts
+    parts = renderer('\n\n'.join(blocks), delivery['key'], title=edition['title'])
     if len(parts) != 1 or parts[0][0] != delivery['parts'][0][0]:
         raise LibraryError('补充链接后超过原消息容量，保留原日报，不拆分发送')
     return parts[0][0], parts[0][1]
@@ -148,6 +153,17 @@ def _read_receipt(api, row):
             or message.get('msg_type') != row['msg_type']
             or (row['target_type'] == 'chat_id' and message.get('chat_id') != row['target_id'])):
         raise LibraryError('日报回执身份或会话不符，停止编辑')
+    if row['msg_type'] == 'interactive':
+        value = json.loads(message['body']['content'])
+        if value.get('schema') != '2.0':
+            # Schema-2.0 cards are returned as an upgrade placeholder by IM GET.
+            # The server's revision can protect edits without inventing a body.
+            text = json.dumps(value, ensure_ascii=False)
+            revision = str(message.get('update_time') or message.get('create_time') or '')
+            if ('请升级至最新版本客户端，以查看内容' not in text
+                    or not revision.isdigit() or 'updated' not in message):
+                raise LibraryError('飞书未返回可核验卡片正文或版本，保留原消息')
+            return {'opaque_card_revision': revision, 'updated': message['updated']}
     return normalized_content(row['msg_type'], message['body']['content'])
 
 
@@ -185,6 +201,9 @@ def _update_target(store, api, base, bundle, ready, delivery, audience_filter):
     kind, content = _content(bundle, documents, delivery)
     desired = normalized_content(kind, content)
     remote = _read_receipt(api, row)
+    if kind == 'interactive' and 'opaque_card_revision' in remote:
+        return _update_opaque_card(store, api, base, bundle, documents, row, target,
+                                   content, remote, audience_filter)
     intents = [v for v in store.list_job_results(base, 'daily_edit_intent')
                if v['message_id'] == row['remote_message_id']]
     if remote != desired:
@@ -206,13 +225,55 @@ def _update_target(store, api, base, bundle, ready, delivery, audience_filter):
             'message_id': row['remote_message_id'], 'msg_type': kind, 'content': content})
         if not _audience(store, [target], audience_filter):
             return
-        api.request('PUT', f"/im/v1/messages/{row['remote_message_id']}",
-                    data={'msg_type': kind, 'content': content})
+        if kind == 'interactive':
+            api.request('PATCH', f"/im/v1/messages/{row['remote_message_id']}",
+                        data={'content': content})
+        else:
+            api.request('PUT', f"/im/v1/messages/{row['remote_message_id']}",
+                        data={'msg_type': kind, 'content': content})
         if _read_receipt(api, row) != desired:
             raise LibraryError('日报链接更新回读不符，暂不标记完成')
     digest = hashlib.sha256((row['remote_message_id'] + content).encode()).hexdigest()
     store.save_job_result(base, 'daily:edit-receipt:' + digest, 'daily_edit_receipt', {
         'message_id': row['remote_message_id'], 'episode_ids': sorted(documents)})
+
+def _update_opaque_card(store, api, base, bundle, documents, row, target, content, remote, audience_filter):
+    """Use PATCH acknowledgement and server revisions when GET hides card JSON.
+
+    An untouched original or our last confirmed revision may be edited. A lost
+    PATCH response is ambiguous: leave it for review rather than overwriting it.
+    """
+    message_id = row['remote_message_id']
+    receipts = [v for v in store.list_job_results(base, 'daily_edit_receipt')
+                if v['message_id'] == message_id and v.get('card_revision')]
+    known = next((v for v in receipts if v['card_revision'] == remote['opaque_card_revision']), None)
+    if remote['updated'] and known is None:
+        raise LibraryError('卡片版本存在未确认修改，保留原消息，不覆盖或重发')
+    if known and known.get('content') == content:
+        return
+    intents = [v for v in store.list_job_results(base, 'daily_edit_intent')
+               if v['message_id'] == message_id]
+    if len(intents) >= 19 and set(documents) != set(bundle['enrichment']['eligible']):
+        return
+    if len(intents) >= 20:
+        raise LibraryError('日报已用完安全编辑预算，保留已发送消息')
+    digest = hashlib.sha256((message_id + content).encode()).hexdigest()
+    store.save_job_result(base, 'daily:edit:' + digest, 'daily_edit_intent', {
+        'message_id': message_id, 'msg_type': 'interactive', 'content': content})
+    if not _audience(store, [target], audience_filter):
+        return
+    # Recheck immediately before PATCH to detect intervening external edits.
+    if _read_receipt(api, row) != remote:
+        raise LibraryError('卡片版本已改变，保留原消息')
+    api.request('PATCH', f'/im/v1/messages/{message_id}', data={'content': content})
+    after = _read_receipt(api, row)
+    if ('opaque_card_revision' not in after or not after['updated']
+            or after['opaque_card_revision'] == remote['opaque_card_revision']):
+        raise LibraryError('卡片更新版本回读不符，暂不标记完成')
+    store.save_job_result(base, 'daily:edit-receipt:' + digest, 'daily_edit_receipt', {
+        'message_id': message_id, 'episode_ids': sorted(documents), 'content': content,
+        'card_revision': after['opaque_card_revision'], 'verification': 'patch_ack_and_revision'})
+
 
 def publish_enrichment(store, compiler, job):
     base = job.payload['base_job']

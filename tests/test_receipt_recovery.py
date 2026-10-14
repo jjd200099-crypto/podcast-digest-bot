@@ -208,6 +208,16 @@ class ReceiptRecoveryTests(unittest.IsolatedAsyncioTestCase):
             with patch('news_officer.library.FeishuLibraryAPI.request', return_value={'items': [message]}):
                 self.assertEqual(messenger.reconcile_delivery(item, started), '')
 
+    def test_opaque_card_history_cannot_be_mistaken_for_absence(self):
+        _, _, original, messenger = self.prepare()
+        item = replace(original, msg_type='interactive', content=json.dumps({
+            'schema': '2.0', 'body': {'elements': [{'tag': 'markdown', 'content': 'Daily'}]}}))
+        message = {**self.message, 'msg_type': 'interactive', 'body': {'content': json.dumps({
+            'title': None, 'elements': [[{'tag': 'text', 'text': '请升级至最新版本客户端，以查看内容'}]]})}}
+        with (patch('news_officer.library.FeishuLibraryAPI.request', return_value={'items': [message]}),
+              self.assertRaisesRegex(RuntimeError, 'cannot be replayed')):
+            messenger.reconcile_delivery(item, self.store.outbox_created_at(original.id))
+
     def test_paginated_receipt_normalizes_platform_post(self):
         _, _, item, messenger = self.prepare()
         message = copy.deepcopy(self.message)

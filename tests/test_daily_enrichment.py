@@ -42,7 +42,7 @@ class MessageAPI:
                         node.setdefault('style', [])
             result['body']['content'] = json.dumps(value)
             return {'items': [result]}
-        assert method == 'PUT'
+        assert method in ('PUT', 'PATCH')
         self.puts.append(copy.deepcopy(data))
         message['body']['content'] = data['content']
         if self.lose_response:
