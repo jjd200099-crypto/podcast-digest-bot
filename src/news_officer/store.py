@@ -72,7 +72,13 @@ class Store:
             db.execute("UPDATE outbox SET remote_message_id='' WHERE job_key=? "
                        "AND group_key='message:progress' AND remote_message_id=?", (job_key, message_id))
 
-    def latest_fetch_status(self) -> dict:
+    def latest_fetch_status(self, sources: list[dict] | None = None) -> dict:
+        now = datetime.now(UTC)
+        cutoff = (now - timedelta(days=3)).isoformat()
+        configured = None if sources is None else {
+            (source["name"], source.get("rss_url") or source.get("url", ""))
+            for source in sources
+        }
         with self._connect() as db:
             run = db.execute('SELECT run_at FROM feed_fetch_runs ORDER BY run_at DESC LIMIT 1').fetchone()
             # A manual search may check only one source; retain the latest
@@ -81,7 +87,12 @@ class Store:
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY source_name, url ORDER BY run_at DESC, rowid DESC
                 ) AS latest_rank FROM feed_fetch_status
-            ) WHERE latest_rank=1 ORDER BY source_name, url""").fetchall()
+                WHERE julianday(run_at) >= julianday(?)
+                  AND julianday(run_at) <= julianday(?)
+            ) WHERE latest_rank=1 ORDER BY source_name, url""",
+                              (cutoff, now.isoformat())).fetchall()
+            if configured is not None:
+                rows = [r for r in rows if (r["source_name"], r["url"]) in configured]
             return {'run_at': run['run_at'] if run else None,
                     'failed_feeds': [dict(r) for r in rows if r['status'] == 'failed'],
                     'recovered_feeds': [dict(r) for r in rows if r['status'] == 'ok' and r['reason']],

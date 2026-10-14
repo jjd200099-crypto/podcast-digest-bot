@@ -431,7 +431,7 @@ class ResearchTools:
             self.system_answer = True
         if name == 'get_fetch_status':
             self.fetch_status_checked = True
-            result = self.agent.store.latest_fetch_status()
+            result = self.agent.store.latest_fetch_status(registry.list())
             self.fetch_status_result = result
             return self.system_result(result)
 
@@ -819,8 +819,8 @@ class ResearchTools:
             raise ValueError("Invalid message")
         question = self.message.text if self.message else ''
         research_request = bool(re.search(
-            r'总结|摘要|纪要|文字稿|逐字稿|转录|全文|内容|讲了什么|观点|重点|分析|整理|'
-            r'transcript|summari[sz]e|summary|episode\s+content', question, re.IGNORECASE))
+            r'总结|摘要|文字稿|逐字稿|转录|'
+            r'\b(?:transcript|summari[sz]e|summary)\b', question, re.IGNORECASE))
         episode_citations = any(
             isinstance(citation, dict) and citation.get('id') in self.evidence
             and citation.get('id') not in self.system_evidence
@@ -836,7 +836,7 @@ class ResearchTools:
         if fetch_question:
             if not self.fetch_status_checked:
                 raise ValueError('Call get_fetch_status before answering fetch/system status questions')
-            system = not self.task
+            system = not self.task and not episode_citations
         if system:
             value = {**value, 'message': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', value['message']),
                      'points': [{**p, 'text': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', p['text'])}

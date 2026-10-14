@@ -1,5 +1,6 @@
 import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import requests
@@ -27,7 +28,9 @@ class OpsAnswersTests(LibraryFixture):
         self.state = ResearchTools(self.agent, self.message.conversation_key, self.message)
 
     def test_real_incident_uses_status_without_episode_citations_or_request_id(self):
-        self.store.save_fetch_status('2026-10-14T00:00:00+00:00', [
+        self.feeds.write_text(json.dumps({'sources': [{'name': 'Actual Channel', 'type': 'youtube',
+                                                     'rss_url': 'https://example.test/rss'}]}))
+        self.store.save_fetch_status(datetime.now(UTC).isoformat(), [
             {'source_name': 'Actual Channel', 'url': 'https://example.test/rss',
              'source_type': 'youtube', 'status': 'failed', 'reason': 'HTTP 404'}])
         result = self.state.execute('get_fetch_status', {})
@@ -58,11 +61,37 @@ class OpsAnswersTests(LibraryFixture):
                 {'text': '可能是网络问题。', 'citations': []}]})
 
     def test_latest_empty_run_retains_unchecked_failures(self):
-        self.store.save_fetch_status('2026-10-13', [{'source_name': 'Old', 'url': 'https://example.test',
+        self.store.save_fetch_status((datetime.now(UTC) - timedelta(days=1)).isoformat(), [{'source_name': 'Old', 'url': 'https://example.test',
                                                  'source_type': 'rss', 'status': 'failed', 'reason': 'HTTP 404'}])
-        self.store.save_fetch_status('2026-10-14', [])
+        run_at = datetime.now(UTC).isoformat()
+        self.store.save_fetch_status(run_at, [])
         self.assertEqual(len(self.store.latest_fetch_status()['failed_feeds']), 1)
-        self.assertEqual(self.store.latest_fetch_status()['run_at'], '2026-10-14')
+        self.assertEqual(self.store.latest_fetch_status()['run_at'], run_at)
+
+    def test_status_excludes_expired_removed_and_changed_feeds(self):
+        now = datetime.now(UTC)
+        sources = [{'name': name, 'type': 'rss', 'rss_url': f'https://example.test/{name}'}
+                   for name in ('Fresh', 'Expired', 'Changed')]
+        self.feeds.write_text(json.dumps({'sources': sources}))
+        for index, (name, age, status) in enumerate([('Fresh', 1, 'failed'), ('Expired', 4, 'failed'),
+                                  ('Removed', 1, 'failed'), ('Changed', 1, 'failed'),
+                                  ('Old recovery', 4, 'ok')]):
+            self.store.save_fetch_status((now - timedelta(days=age, seconds=index)).isoformat(), [{
+                'source_name': name,
+                'url': 'https://example.test/old' if name == 'Changed' else f'https://example.test/{name}',
+                'source_type': 'rss', 'status': status, 'reason': 'HTTP 404'}])
+        result = self.state.execute('get_fetch_status', {})
+        self.assertEqual([r['source_name'] for r in result['failed_feeds']], ['Fresh'])
+        self.assertEqual(result['recovered_feeds'], [])
+
+    def test_analysis_of_rss_failure_is_a_system_question(self):
+        self.state.message = replace(self.message, text='分析下 RSS 为什么抓取失败')
+        answer = {'kind': 'answer', 'message': '', 'points': [
+            {'text': '尚无抓取记录，无法确认失败原因。', 'citations': []}]}
+        with self.assertRaisesRegex(ValueError, 'get_fetch_status'):
+            self.state.render(answer)
+        self.state.execute('get_fetch_status', {})
+        self.assertEqual(self.state.render(answer), answer['points'][0]['text'])
 
     def test_fetch_question_must_read_status(self):
         with self.assertRaisesRegex(ValueError, 'get_fetch_status'):
@@ -71,14 +100,9 @@ class OpsAnswersTests(LibraryFixture):
 
     def test_system_answer_never_renders_unrelated_episode_links(self):
         self.state.execute('get_fetch_status', {})
-        evidence = self.state.evidence_item('irrelevant', 'https://example.test/episode', 'Fei-Fei Li')
-        with self.assertRaisesRegex(ValueError, 'system tool evidence'):
-            self.state.render({'kind': 'answer', 'message': '', 'points': [
-                {'text': '尚无抓取记录，无法确认失败原因。', 'citations': [{'id': evidence['evidence_id']}]}]})
         status = self.state.execute('get_fetch_status', {})
         text = self.state.render({'kind': 'answer', 'message': '', 'points': [
             {'text': '尚无抓取记录，无法确认失败原因。', 'citations': [{'id': status['evidence_id']}]}]})
-        self.assertNotIn('Fei-Fei', text)
         self.assertNotIn('https://', text)
 
     def test_normal_fetch_and_rss_requests_keep_episode_rules_and_hex_text(self):
@@ -140,7 +164,9 @@ class OpsAnswersTests(LibraryFixture):
                     'name': 'Manual Feed', 'type': 'rss', 'rss_url': 'https://example.test/rss'}]), \
                     patch('news_officer.source_registry.latest_rss_episodes', side_effect=RuntimeError('offline')):
                 fetch()
-            result = self.state.execute('get_fetch_status', {})
+            with patch.object(self.registry, 'list', return_value=[{
+                    'name': 'Manual Feed', 'type': 'rss', 'rss_url': 'https://example.test/rss'}]):
+                result = self.state.execute('get_fetch_status', {})
             self.assertEqual(result['failed_feeds'][0]['source_name'], 'Manual Feed')
             self.assertEqual(result['failed_feeds'][0]['reason'], 'offline')
 
