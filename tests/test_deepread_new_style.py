@@ -205,7 +205,7 @@ class NewStyleTests(unittest.TestCase):
             )
         )
 
-    def test_proper_nouns_are_required_and_never_translated_by_renderer(self):
+    def test_proper_noun_absent_from_qa_is_dropped_without_changing_dialogue(self):
         self.assertIn("English 专有名词保留 English", NEW_INSTRUCTIONS)
         self.assertNotIn("王颢蓁", NEW_INSTRUCTIONS)
         self.assertNotIn("A/B", NEW_INSTRUCTIONS)
@@ -214,8 +214,90 @@ class NewStyleTests(unittest.TestCase):
         value = sample()
         value["chapters"][0]["turns"][0]["paragraphs"] = ["你怎样构建产品？"]
         value["chapters"][0]["turns"][1]["paragraphs"] = ["我使用开放人工智能。"]
-        with self.assertRaisesRegex(ValueError, "proper noun"):
-            validate_deepread(value, transcript_evidence(record().transcript.text))
+        with self.assertLogs("news_officer.deepread", level="WARNING") as logs:
+            result = validate_deepread(
+                value, transcript_evidence(record().transcript.text)
+            )
+        self.assertIn("OpenAI", logs.output[0])
+        self.assertIn("missing from QA", logs.output[0])
+        self.assertEqual(result, {**value, "proper_nouns": []})
+        self.assertEqual(len(value["proper_nouns"]), 1)
+
+    def test_proper_noun_canonical_is_normalized_against_qa(self):
+        for canonical, qa in (
+            ("OPENAI", "openai"),
+            ("OpenAI, Inc.", "OPENAI inc"),
+            ("OpenAI-Inc", "OpenAI—Inc"),
+            ("OpenAI\t Inc", "OpenAI \n  Inc"),
+        ):
+            with self.subTest(canonical=canonical, qa=qa):
+                value = sample()
+                value["proper_nouns"][0]["canonical"] = canonical
+                value["chapters"][0]["turns"][0]["paragraphs"] = [qa]
+                self.assertEqual(
+                    validate_deepread(
+                        value, transcript_evidence(record().transcript.text)
+                    ),
+                    value,
+                )
+
+    def test_cjk_or_non_latin_canonical_still_raises(self):
+        for canonical in ("开放人工智能", "OpenAI人工智能", "123", "---"):
+            for appears_in_qa in (False, True):
+                with self.subTest(canonical=canonical, appears_in_qa=appears_in_qa):
+                    value = sample()
+                    value["proper_nouns"][0]["canonical"] = canonical
+                    if appears_in_qa:
+                        value["chapters"][0]["turns"][0]["paragraphs"] = [canonical]
+                    with self.assertRaisesRegex(ValueError, "proper noun"):
+                        validate_deepread(
+                            value, transcript_evidence(record().transcript.text)
+                        )
+
+    def test_proper_noun_case_whitespace_and_punctuation_are_normalized(self):
+        for original, source in (
+            ("OPENAI", "openai"),
+            ("OpenAI, Inc.", "OPENAI inc"),
+            ("OpenAI-Inc", "OpenAI—Inc"),
+            ("OpenAI\t Inc", "OpenAI \n  Inc"),
+        ):
+            with self.subTest(original=original, source=source):
+                value = sample()
+                value["proper_nouns"][0]["original"] = original
+                evidence = transcript_evidence(record().transcript.text)
+                evidence["C0001"]["text"] = source
+                self.assertEqual(validate_deepread(value, evidence), value)
+
+    def test_unknown_proper_noun_is_dropped_without_changing_notes(self):
+        value = sample()
+        value["proper_nouns"].append(
+            {
+                "original": "Steve Jamison",
+                "canonical": "Steve Jamison",
+                "evidence_ids": ["C0001"],
+            }
+        )
+        evidence = transcript_evidence(record().transcript.text)
+        evidence["C0001"]["text"] += (
+            Path(__file__).parent
+            / "fixtures/youtube-captions-jellyfish-2026-10-13.txt"
+        ).read_text(encoding="utf-8")
+        with self.assertLogs("news_officer.deepread", level="WARNING") as logs:
+            result = validate_deepread(value, evidence)
+        self.assertIn("Steve Jamison", logs.output[0])
+        self.assertEqual(result, sample())
+        self.assertEqual(len(value["proper_nouns"]), 2)
+
+    def test_proper_noun_must_match_cited_evidence(self):
+        value = sample()
+        evidence = transcript_evidence(record().transcript.text)
+        evidence["C0001"]["text"] = "An unrelated question."
+        with self.assertLogs("news_officer.deepread", level="WARNING"):
+            result = validate_deepread(value, evidence)
+        self.assertEqual(result, {**value, "proper_nouns": []})
+        value["proper_nouns"][0]["evidence_ids"] = ["missing"]
+        with self.assertRaisesRegex(ValueError, "Unknown deepread evidence"):
+            validate_deepread(value, evidence)
 
     def test_rejects_missing_source_unknown_speaker_and_workflow_leaks(self):
         for mutate in (

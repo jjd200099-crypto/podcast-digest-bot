@@ -1,7 +1,9 @@
 """Opt-in, source-covered Chinese interview study notes and chronological QA."""
 
 import json
+import logging
 import re
+import unicodedata
 from pathlib import Path
 from typing import Literal
 
@@ -10,6 +12,8 @@ from pydantic import BaseModel, Field
 from .glossary import GLOSSARY_INSTRUCTIONS, preserve_glossary_values
 from .shownotes import Correction, NotePoint, text_node, transcript_evidence
 from .titles import normalize_deepread_title
+
+LOGGER = logging.getLogger(__name__)
 
 INSTRUCTIONS = (Path(__file__).parent / "prompts" / "deepread_new_style.md").read_text(
     encoding="utf-8"
@@ -188,6 +192,16 @@ def check_output(text):
         raise ValueError("Internal workflow label in document")
 
 
+def normalize_proper_noun(text):
+    """Treat punctuation (including Unicode hyphens) as word separators."""
+    return " ".join(
+        "".join(
+            " " if unicodedata.category(char).startswith("P") else char
+            for char in text.casefold()
+        ).split()
+    )
+
+
 def validate_deepread(value, evidence):
     source = "\n".join(body["text"] for body in evidence.values())
     notes = DeepRead.model_validate(preserve_glossary_values(value, source))
@@ -237,17 +251,33 @@ def validate_deepread(value, evidence):
         raise ValueError(
             f"Incomplete QA source coverage: {len(missing)} blocks missing: {missing[:20]}"
         )
-    qa = "\n".join([*names, *dialogue])
+    qa = normalize_proper_noun("\n".join([*names, *dialogue]))
+    supported_nouns = []
     for noun in notes.proper_nouns:
         refs(noun.evidence_ids)
-        if not any(noun.original in evidence[key]["text"] for key in noun.evidence_ids):
-            raise ValueError("Unknown original proper noun")
+        original = normalize_proper_noun(noun.original)
+        if not original or not any(
+            original in normalize_proper_noun(evidence[key]["text"])
+            for key in noun.evidence_ids
+        ):
+            LOGGER.warning(
+                "Dropping unsupported proper noun %r from cited evidence %s",
+                noun.original,
+                noun.evidence_ids,
+            )
+            continue
         if (
             not re.search(r"[A-Za-z]", noun.canonical)
             or re.search(r"[\u3400-\u9fff]", noun.canonical)
-            or noun.canonical not in qa
         ):
             raise ValueError("English proper noun missing or translated in QA")
+        if normalize_proper_noun(noun.canonical) not in qa:
+            LOGGER.warning(
+                "Dropping proper noun %r missing from QA", noun.canonical
+            )
+            continue
+        supported_nouns.append(noun)
+    notes.proper_nouns = supported_nouns
     for correction in notes.corrections:
         refs([correction.evidence_id])
         if (
