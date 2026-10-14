@@ -223,6 +223,166 @@ class NewStyleTests(unittest.TestCase):
         self.assertEqual(result, {**value, "proper_nouns": []})
         self.assertEqual(len(value["proper_nouns"]), 1)
 
+    def test_missing_canonical_retries_before_final_drop(self):
+        value = sample()
+        for turn in value["chapters"][0]["turns"]:
+            turn["paragraphs"] = ["我使用开放人工智能。"]
+        evidence = source_evidence(record().transcript.text)
+        for attempt in range(2):
+            with (
+                self.subTest(attempt=attempt),
+                self.assertRaisesRegex(ValueError, "missing from QA"),
+            ):
+                validate_deepread(value, evidence, final_attempt=attempt == 2)
+        with self.assertLogs("news_officer.deepread", level="WARNING"):
+            result = validate_deepread(value, evidence, final_attempt=True)
+        self.assertEqual(result, {**value, "proper_nouns": []})
+
+    def test_ai_requires_token_boundaries_in_evidence_and_qa(self):
+        for source, qa, supported in (
+            ("He said this.", "AI的成本", False),
+            ("AI costs", "他说 said", False),
+            ("AI的成本", "使用AI的成本", True),
+        ):
+            with self.subTest(source=source, qa=qa):
+                value = sample()
+                value["proper_nouns"] = [
+                    {"original": "AI", "canonical": "AI", "evidence_ids": ["C0001"]}
+                ]
+                value["chapters"][0]["turns"][0]["paragraphs"] = [qa]
+                evidence = source_evidence(record().transcript.text)
+                evidence["C0001"]["text"] = source
+                result = validate_deepread(value, evidence)
+                self.assertEqual(
+                    result["proper_nouns"], value["proper_nouns"] if supported else []
+                )
+
+    def test_captions_only_generate_preserves_dialogue_and_drops_bad_entries(self):
+        from news_officer.deepread import Consolidation, generate
+
+        rec = record()
+        rec.transcript.text = (
+            Path(__file__).parent / "fixtures/youtube-captions-jellyfish-2026-10-13.txt"
+        ).read_text(encoding="utf-8")
+        rec.transcript.source = "YouTube captions"
+        rec.episode.title = "Steve Jameson: Tokens are the cheap part"
+        evidence = source_evidence(rec.transcript.text)
+        paragraphs = [
+            "我是 Steve Jameson，负责 Jellyfish的研究。成本上涨 60 倍，合并 PR 增加 43%，但这两个数字不足以判断投资效果。",
+            "我把薪资和人工智能支出合计为每个 PR 的成本。薪资占 97.5%，token 占 2.5%；每个合并 PR 的成本下降 26%。",
+            "重度使用组的吞吐量增长 67%，成本下降 32%。回报递减仍然是回报；我们也比较同一开发者的不同工作周。",
+            "我们没有看到严重质量问题，但微小的回退率变化不能证明改善。PR 变多也并非因为代码块变小。",
+            "请每月跟踪总成本、吞吐量及质量。我的说法 said 只是引述，不能当作术语。",
+            "预算讨论要关注每个 PR 的总成本。欢迎关注 Jellyfish的研究与博客。",
+        ]
+        self.assertEqual(len(evidence), len(paragraphs))
+        expected_turns = [
+            {
+                "speaker": "Steve Jameson",
+                "paragraphs": [paragraph],
+                "evidence_ids": [key],
+            }
+            for key, paragraph in zip(evidence, paragraphs)
+        ]
+        client = Mock()
+
+        def respond(**kwargs):
+            data = json.loads(kwargs["input"])
+            if kwargs["text_format"] is Consolidation:
+                return SimpleNamespace(
+                    output_parsed=Consolidation.model_validate(
+                        {
+                            "core": [
+                                {
+                                    "text": "**总成本：**薪资与 token 一起计算。",
+                                    "evidence_ids": ["C0001"],
+                                }
+                            ]
+                            * 5,
+                            "chapters": [
+                                {"title": "成本与回报", "start_turn": 0},
+                                {"title": "质量与预算", "start_turn": 3},
+                            ],
+                        }
+                    )
+                )
+            batch = data["transcript"]
+            turns = [
+                {
+                    "speaker": "Steve Jameson",
+                    "paragraphs": [paragraphs[list(evidence).index(key)]],
+                    "evidence_ids": [key],
+                }
+                for key in batch
+            ]
+            nouns = []
+            corrections = []
+            if "C0001" in batch:
+                nouns = [
+                    {
+                        "original": "Jellyfish",
+                        "canonical": "Jellyfish",
+                        "evidence_ids": ["C0001"],
+                    },
+                    {
+                        "original": "AI",
+                        "canonical": "人工智能",
+                        "evidence_ids": ["C0001"],
+                    },
+                ]
+            if "C0005" in batch:
+                nouns.append(
+                    {"original": "AI", "canonical": "AI", "evidence_ids": ["C0005"]}
+                )
+                corrections = [
+                    {
+                        "original": "the human salary spending",
+                        "corrected": "human salary spend",
+                        "reason": "修正字幕重复",
+                        "evidence_id": "C0005",
+                    }
+                ]
+            return SimpleNamespace(
+                output_parsed=DeepRead.model_validate(
+                    {
+                        "speakers": [
+                            {
+                                "name": "Steve Jameson",
+                                "role": "guest",
+                                "evidence_ids": list(batch),
+                            }
+                        ],
+                        "core": [
+                            {
+                                "text": "**成本：**合并 PR 的总成本比 token 账单更有意义。",
+                                "evidence_ids": [next(iter(batch))],
+                            }
+                        ],
+                        "chapters": [{"title": "研究结果", "turns": turns}],
+                        "proper_nouns": nouns,
+                        "exclusions": [],
+                        "corrections": corrections,
+                    }
+                )
+            )
+
+        client.responses.parse.side_effect = respond
+        with self.assertLogs("news_officer.deepread", level="WARNING") as logs:
+            result = generate(client, "model", rec)
+        self.assertEqual(
+            [turn for chapter in result["chapters"] for turn in chapter["turns"]],
+            expected_turns,
+        )
+        self.assertEqual(
+            [noun["canonical"] for noun in result["proper_nouns"]], ["Jellyfish"]
+        )
+        self.assertEqual(result["corrections"], [])
+        self.assertTrue(any("missing from QA" in message for message in logs.output))
+        self.assertTrue(
+            any("ASR original not found" in message for message in logs.output)
+        )
+        self.assertEqual(client.responses.parse.call_count, 11)
+
     def test_proper_noun_canonical_is_normalized_against_qa(self):
         for canonical, qa in (
             ("OPENAI", "openai"),
@@ -241,7 +401,7 @@ class NewStyleTests(unittest.TestCase):
                     value,
                 )
 
-    def test_cjk_or_non_latin_canonical_still_raises(self):
+    def test_cjk_or_non_latin_canonical_retries_then_drops(self):
         for canonical in ("开放人工智能", "OpenAI人工智能", "123", "---"):
             for appears_in_qa in (False, True):
                 with self.subTest(canonical=canonical, appears_in_qa=appears_in_qa):
@@ -251,8 +411,17 @@ class NewStyleTests(unittest.TestCase):
                         value["chapters"][0]["turns"][0]["paragraphs"] = [canonical]
                     with self.assertRaisesRegex(ValueError, "proper noun"):
                         validate_deepread(
-                            value, transcript_evidence(record().transcript.text)
+                            value,
+                            transcript_evidence(record().transcript.text),
+                            final_attempt=False,
                         )
+                    with self.assertLogs("news_officer.deepread", level="WARNING"):
+                        result = validate_deepread(
+                            value,
+                            transcript_evidence(record().transcript.text),
+                            final_attempt=True,
+                        )
+                    self.assertEqual(result, {**value, "proper_nouns": []})
 
     def test_proper_noun_case_whitespace_and_punctuation_are_normalized(self):
         for original, source in (
@@ -279,8 +448,7 @@ class NewStyleTests(unittest.TestCase):
         )
         evidence = transcript_evidence(record().transcript.text)
         evidence["C0001"]["text"] += (
-            Path(__file__).parent
-            / "fixtures/youtube-captions-jellyfish-2026-10-13.txt"
+            Path(__file__).parent / "fixtures/youtube-captions-jellyfish-2026-10-13.txt"
         ).read_text(encoding="utf-8")
         with self.assertLogs("news_officer.deepread", level="WARNING") as logs:
             result = validate_deepread(value, evidence)
@@ -611,13 +779,19 @@ class NewStyleCompilerTests(unittest.TestCase):
         instructions = deepread.INSTRUCTIONS
         module_state = deepread.__dict__.copy()
         try:
-            with patch.object(Path, "read_text", return_value=instructions + "\nPrompt edit"):
+            with patch.object(
+                Path, "read_text", return_value=instructions + "\nPrompt edit"
+            ):
                 importlib.reload(deepread)
             self.assertNotEqual(deepread.INSTRUCTIONS, instructions)
             restarted = SelectedEpisodeCompiler(
-                source.store, source.api, source.writer,
-                start_date="2026-09-21", today=lambda: "2026-09-21",
-                include_fulltext=True, new_style=True,
+                source.store,
+                source.api,
+                source.writer,
+                start_date="2026-09-21",
+                today=lambda: "2026-09-21",
+                include_fulltext=True,
+                new_style=True,
             )
             restarted.initialize()
             self.assertEqual(restarted.document_identity(source.record), identity)
