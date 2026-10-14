@@ -177,6 +177,53 @@ def encoded_message_payload(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str) -> list[tuple[str, str, str]]:
+    """Prefer a schema-2.0 card, compact oversized days, then degrade safely."""
+    body = re.sub(r'(?m)^重做版[^\n]*\n*', '', markdown).strip()
+    elements = [{'tag': 'markdown', 'content': f'**{title}**'}]
+    sections = re.split(r'\n*━━━━━━━━━━━━━━━━━━━━\n*', body)
+    for index, section in enumerate(sections):
+        if index:
+            elements.append({'tag': 'hr'})
+        section = re.sub(r'(?m)^\[(精读与完整中文对谈|精读)\]\(',
+                         '[精读和完整中文对谈](', section)
+        section = re.sub(r'(?m)^\[(精读和完整中文对谈|收听节目)\]\(', r'- [\1](', section)
+        elements.append({'tag': 'markdown', 'content': section.strip()})
+    def card_part(candidate):
+        content = json.dumps({'schema': '2.0', 'body': {'elements': candidate}},
+                             ensure_ascii=False, separators=(',', ':'))
+        envelope = {'receive_id': 'x' * 128, 'msg_type': 'interactive', 'content': content,
+                    'uuid': 'x' * 36, 'reply_in_thread': False}
+        if len(encoded_message_payload(envelope)) <= 29_000:
+            return [('interactive', content, idempotency_uuid(idempotency_key, 1))]
+        return None
+
+    result = card_part(elements)
+    if result:
+        return result
+    # As in the previous daily delivery path, drop optional material in whole
+    # units, retaining headings, an extractive summary, and all source links.
+    from .daily_report import compact_reader_episode
+    for level in (1, 2, 3):
+        compact = [elements[0]]
+        for element in elements[1:]:
+            if element['tag'] == 'hr':
+                compact.append(element)
+                continue
+            section = element['content']
+            section = re.sub(r'(?m)^- 优先级/阅读建议：[^\n]*\n?', '', section)
+            links = list(MARKDOWN_LINK_RE.finditer(section))
+            listening_url = next((m[2] for m in links if m[1] == '收听节目'), '')
+            compact.append({'tag': 'markdown', 'content': compact_reader_episode(
+                section, level, listening_url)})
+        result = card_part(compact)
+        if result:
+            return result
+    # Preserve all original prose if even the compact card cannot fit. The
+    # established post/text/overflow path measures every serialized envelope.
+    return combined_delivery_parts(body, idempotency_key, title=title)
+
+
 def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str = BRAND_HEADER) -> list[tuple[str, str, str]]:
     """Prefer one post; measure the serialized request, not visible characters.
 
@@ -462,6 +509,9 @@ class FeishuMessenger:
                     actual = normalized_content(item.msg_type, content) if item.msg_type in {'post', 'text'} else json.loads(content)
                 except (ValueError, TypeError, KeyError):
                     raise RuntimeError('Message reconciliation receipt invalid') from None
+                if (start <= timestamp <= end and item.msg_type == 'interactive'
+                        and actual.get('schema') != '2.0'):
+                    raise RuntimeError('Card history body unavailable; uncertain send cannot be replayed')
                 if start <= timestamp <= end and actual == desired:
                     identity = message.get('message_id')
                     if not isinstance(identity, str) or not identity:

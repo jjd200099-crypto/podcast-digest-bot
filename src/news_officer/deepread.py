@@ -7,12 +7,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .glossary import GLOSSARY_INSTRUCTIONS, preserve_glossary_values
 from .shownotes import Correction, NotePoint, text_node, transcript_evidence
 from .titles import normalize_deepread_title
 
 INSTRUCTIONS = (Path(__file__).parent / "prompts" / "deepread_new_style.md").read_text(
     encoding="utf-8"
-)
+) + GLOSSARY_INSTRUCTIONS
 # Pinned to the pre-#58 prompt hash so deployed docs keep their identity;
 # prompt edits apply only to episodes without an existing document.
 # Bump explicitly only when existing documents must be regenerated.
@@ -188,7 +189,8 @@ def check_output(text):
 
 
 def validate_deepread(value, evidence):
-    notes = DeepRead.model_validate(value)
+    source = "\n".join(body["text"] for body in evidence.values())
+    notes = DeepRead.model_validate(preserve_glossary_values(value, source))
     check_output(json.dumps(notes.model_dump(), ensure_ascii=False))
     order = {key: index for index, key in enumerate(evidence)}
 

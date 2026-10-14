@@ -26,6 +26,7 @@ from .episode_document import DocumentRetryStopped
 from .feishu import (
     FeishuMessenger,
     combined_delivery_parts,
+    daily_card_delivery_parts,
     delivery_parts,
     file_delivery_part,
 )
@@ -704,7 +705,9 @@ class NewsOfficerRuntime:
                 rewriter = getattr(self.podcast_service, 'summarizer', None) if compact else None
                 if not callable(getattr(rewriter, 'rewrite_paragraphs', None)):
                     rewriter = None
-                content = (reader_episode_v4(item, number) if v4 else
+                record = self.store.get_verified_transcript(item.episode.id) if v4 else None
+                source_text = record.transcript.text if record else ''
+                content = (reader_episode_v4(item, number, source_text=source_text) if v4 else
                            reader_episode(episode_summary(item, compact=compact), rewriter=rewriter, compact=compact))
                 strict = strict_selection_enabled()
                 allowed = (stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4)
@@ -750,7 +753,8 @@ class NewsOfficerRuntime:
             from .daily_report import compact_reader_episode
             from .operations import record_warning
             edition_title = f'🎧 播客精选 · {when:%Y-%m-%d}'
-            probe = combined_delivery_parts(markdown, job.key, title=edition_title)
+            reader_delivery = daily_card_delivery_parts if v4 else combined_delivery_parts
+            probe = reader_delivery(markdown, job.key, title=edition_title)
             if len(probe) != 1:
                 prefix = blocks[:-len(sections)] if sections else blocks
                 original_sections = sections
@@ -761,14 +765,15 @@ class NewsOfficerRuntime:
                         for section, item in zip(original_sections, summaries)]
                     blocks = [*prefix, *(section['body'] for section in sections)]
                     markdown = '\n\n'.join(blocks)
-                    probe = combined_delivery_parts(markdown, job.key, title=edition_title)
+                    probe = reader_delivery(markdown, job.key, title=edition_title)
                     if len(probe) == 1:
                         break
                 record_warning(self.store, job.key,
                     'daily_message_degraded' if len(probe) == 1 else 'daily_message_capacity_exceeded',
                     when.date().isoformat())
-                if len(probe) != 1:
+                if len(probe) != 1 and not v4:
                     raise ValueError('Daily edition exceeds single-message capacity')
+                # Interactive editions retain the exceptional overflow fallback.
             elif probe[0][0] == 'text':
                 record_warning(self.store, job.key, 'daily_message_plaintext_fallback',
                                when.date().isoformat())
@@ -776,9 +781,9 @@ class NewsOfficerRuntime:
         deliveries = []
         for target_type, target_id in self._daily_targets(job):
             key = f"{job.key}:{group}:{target_type}:{target_id}"
-            parts = (combined_delivery_parts(markdown, key, title=f'🎧 播客精选 · {when:%Y-%m-%d}')
+            parts = (reader_delivery(markdown, key, title=f'🎧 播客精选 · {when:%Y-%m-%d}')
                      if reader_mode else combined_delivery_parts(markdown, key))
-            if reader_mode and len(parts) != 1:
+            if reader_mode and len(parts) != 1 and not v4:
                 raise ValueError('Daily edition exceeds single-message capacity')
             deliveries.append({"key": key, "target_type": target_type, "target_id": target_id,
                                "parts": parts})
@@ -791,6 +796,7 @@ class NewsOfficerRuntime:
             "deliveries": deliveries,
             "enrichment": {'version': 1, 'day': when.date().isoformat(),
                            'title': f'🎧 播客精选 · {when:%Y-%m-%d}',
+                           'format': 'interactive' if v4 else 'post',
                            'prefix': blocks[:-len(sections)] if sections else blocks,
                            'sections': sections, 'eligible': eligible} if reader_mode else None,
         })

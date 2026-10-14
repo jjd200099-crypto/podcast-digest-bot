@@ -244,11 +244,13 @@ class TranscriptSummarizer:
 8. 最后一行写“推荐星级：★★★★☆”，总共5颗星、实心星1–5颗。只按相关度和信息密度判断，不设置其他评分维度。相关度优先 model frontier、AI research、成功 AI 公司创始人的一手深度访谈（例如 Fireworks），其中 OpenAI、Anthropic 等基础模型实验室的实质讨论，或热门 AI 独角兽创始人作为主要嘉宾（例如用户指定的 Fireworks），是必收录内容，至少四星“值得看全文”，不因信息偏薄降为无关；广告、顺带提名、普通 API 使用不算。信息密度仍需如实评价，名气不等于高质量。五星只给同时高度相关且信息极其密集、值得深度编译的少数节目，允许当天没有五星；四星值得看全文，三星看摘要即可；一二星相关度或密度不足。不要输出分项分数和公式。程序会统一补上阅读建议，星级不是收益预测。
 9. 保留必要的英文产品名；美元金额使用 $ 前缀。不要把多个概念用顿号堆成一口气读不完的句子。
 """
+        from .glossary import GLOSSARY_INSTRUCTIONS, preserve_english_terms
+        instructions += GLOSSARY_INSTRUCTIONS
         from .daily_report import v4_layout_enabled
         v4 = v4_layout_enabled()
         if v4:
             instructions += ('\n新版日报结构优先于上面关于自然段和不要编号的格式要求：'
-                             '标题写“## 短节目名｜一句中文核心主题”，不要堆入原始长剧集名。'
+                             '标题写“## 短节目名｜真实嘉宾姓名｜一句中文核心主题”，不要堆入原始长剧集名。'
                              '保留节目、链接、时长来源行。然后写“简介：”一段，接着“要点总结：”，'
                              '用1.、2.等连续编号写3–6条，每条先给结论，再用具体例子、数字或机制支撑。'
                              '最后保留推荐理由和推荐星级。篇幅可稍长，不为压字数丢失支撑和限定。'
@@ -285,7 +287,7 @@ class TranscriptSummarizer:
                 input=attempt_prompt,
                 store=False,
             )
-            summary = remove_editorial_leadins(response.output_text.strip())
+            summary = preserve_english_terms(remove_editorial_leadins(response.output_text.strip()), transcript.text)
             if v4 and _usable_summary(summary):
                 fallback = fallback or summary
             if (_valid_v4_summary(summary) if v4 else _valid_narrative_summary(summary)):
