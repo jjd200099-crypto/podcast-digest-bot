@@ -10,7 +10,11 @@ import json
 import logging
 from datetime import date, timedelta
 
-from .feishu import combined_delivery_parts, daily_card_delivery_parts
+from .feishu import (
+    DailyCardTooLargeError,
+    combined_delivery_parts,
+    daily_card_delivery_parts,
+)
 from .library import LibraryError
 from .models import DailyItem
 from .operations import record_warning
@@ -132,8 +136,16 @@ def _content(bundle, documents, delivery):
             '[精读与完整中文对谈](', '[精读和完整中文对谈](')
         blocks.append(template.replace(DOCUMENT_PLACEHOLDER, doc['url'])
                       if doc else section['body'])
-    renderer = daily_card_delivery_parts if edition.get('format') == 'interactive' else combined_delivery_parts
-    parts = renderer('\n\n'.join(blocks), delivery['key'], title=edition['title'])
+    markdown = '\n\n'.join(blocks)
+    if edition.get('format') == 'interactive':
+        try:
+            parts = daily_card_delivery_parts(markdown, delivery['key'], title=edition['title'],
+                                              allow_compaction=False)
+        except DailyCardTooLargeError as error:
+            logger.error('Daily enrichment card exceeds 29000 bytes; preserving original message')
+            raise LibraryError('补充链接后超过原消息容量，保留原日报，不压缩或降级') from error
+    else:
+        parts = combined_delivery_parts(markdown, delivery['key'], title=edition['title'])
     if len(parts) != 1 or parts[0][0] != delivery['parts'][0][0]:
         raise LibraryError('补充链接后超过原消息容量，保留原日报，不拆分发送')
     return parts[0][0], parts[0][1]
