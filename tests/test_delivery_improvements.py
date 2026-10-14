@@ -76,6 +76,19 @@ class DeliveryImprovements(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summarizer.summarize.call_count, 1)
         self.assertFalse(self.store.episode_is_delivered(self.episode))
 
+    def test_legacy_cache_migration_reuses_verified_digest(self):
+        service, _, summarizer = self.service()
+        service.build_daily(self.now, preparation=True)
+        summarizer.cache_identity.return_value = 'v4-compatible'
+        summarizer.compatible_cache_identities.return_value = ['narrative-v1']
+        result = service.build_daily(self.now)
+        self.assertEqual(result[0].status, 'summarized')
+        self.assertEqual(summarizer.summarize.call_count, 1)
+        # Migration stamps the current key and remains reusable thereafter.
+        summarizer.compatible_cache_identities.return_value = []
+        service.build_daily(self.now)
+        self.assertEqual(summarizer.summarize.call_count, 1)
+
     def test_rate_limit_keeps_fulltext_pending_and_never_summarizes(self):
         service, resolver, summarizer = self.service()
         retry = datetime.now(UTC) + timedelta(hours=2)

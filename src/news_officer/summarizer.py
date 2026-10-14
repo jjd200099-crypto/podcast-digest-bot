@@ -130,9 +130,40 @@ def _valid_narrative_summary(markdown: str) -> bool:
     return True
 
 
+def _valid_v4_summary(markdown: str) -> bool:
+    if not re.match(r'\A## [^\r\n]{3,100}\n', markdown):
+        return False
+    if not re.search(r'(?m)^节目：\S.+$', markdown):
+        return False
+    if not re.search(r'(?m)^简介：[^\r\n]+$', markdown):
+        return False
+    if markdown.count('\n要点总结：\n') != 1:
+        return False
+    points = markdown.split('\n要点总结：\n', 1)[1].split('\n推荐理由：', 1)[0]
+    lines = [line for line in points.splitlines() if line.strip()]
+    if not 1 <= len(lines) <= 10:
+        return False
+    if any(not re.fullmatch(rf'{i}\. \S[^\r\n]*', line) for i, line in enumerate(lines, 1)):
+        return False
+    rating = re.search(r'\n推荐星级：([★☆]{5})\s*$', markdown)
+    if not rating or not re.search(r'(?m)^推荐理由：[^\r\n]{8,160}$', markdown):
+        return False
+    score = rating[1].count('★')
+    return (1 <= score <= 5 and rating[1] == '★' * score + '☆' * (5 - score)
+            and not re.search(r'王颢蓁|\[新\]|【新】|RSI[（(]', markdown))
+
+
 def _valid_editorial_summary(markdown: str) -> bool:
     # Scoring and archived-document paths must still accept previously saved work.
-    return _valid_narrative_summary(markdown) or _valid_legacy_editorial_summary(markdown)
+    return _valid_v4_summary(markdown) or _valid_narrative_summary(markdown) or _valid_legacy_editorial_summary(markdown)
+
+
+def _usable_summary(markdown: str) -> bool:
+    """Retain substantive model output when only its presentation fails."""
+    body = [line for line in markdown.splitlines() if line.strip() and not
+            line.startswith(('#', '节目：', '链接：', '时长：', '推荐理由：', '推荐星级：', '要点总结：'))]
+    return bool(re.search(r'(?m)^(?:## |节目：)', markdown) and
+                sum(len(line.strip()) for line in body) >= 40)
 
 
 class SummaryFormatError(ValueError):
@@ -180,8 +211,16 @@ class TranscriptSummarizer:
         return json.loads(response.output_text)['paragraphs']
 
     def cache_identity(self) -> str:
-        # Prompt/validator edits automatically invalidate prepared summaries.
-        return hashlib.sha256(Path(__file__).read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode()).hexdigest()
+        # Frozen seed preserves existing keys across renderer/validator edits.
+        # Model and selection scope still invalidate; display layout does not.
+        return hashlib.sha256(Path(__file__).with_name('summary_cache_seed_v4.txt').read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode() + b'v4').hexdigest()
+
+    def compatible_cache_identities(self) -> list[str]:
+        """Reuse pre-v4 and compact work with the same model and selection scope."""
+        suffix = self.model.encode() + str(strict_selection_enabled()).encode()
+        return [hashlib.sha256(Path(__file__).with_name(name).read_bytes() + suffix + layout).hexdigest()
+                for name, layout in [('summary_cache_seed_v4.txt', b'compact'),
+                                     ('summary_cache_seed_narrative.txt', b'')]]
 
     def summarize(self, episode: Episode, transcript: Transcript) -> str:
         if not transcript.verified_complete:
@@ -205,6 +244,15 @@ class TranscriptSummarizer:
 8. 最后一行写“推荐星级：★★★★☆”，总共5颗星、实心星1–5颗。只按相关度和信息密度判断，不设置其他评分维度。相关度优先 model frontier、AI research、成功 AI 公司创始人的一手深度访谈（例如 Fireworks），其中 OpenAI、Anthropic 等基础模型实验室的实质讨论，或热门 AI 独角兽创始人作为主要嘉宾（例如用户指定的 Fireworks），是必收录内容，至少四星“值得看全文”，不因信息偏薄降为无关；广告、顺带提名、普通 API 使用不算。信息密度仍需如实评价，名气不等于高质量。五星只给同时高度相关且信息极其密集、值得深度编译的少数节目，允许当天没有五星；四星值得看全文，三星看摘要即可；一二星相关度或密度不足。不要输出分项分数和公式。程序会统一补上阅读建议，星级不是收益预测。
 9. 保留必要的英文产品名；美元金额使用 $ 前缀。不要把多个概念用顿号堆成一口气读不完的句子。
 """
+        from .daily_report import v4_layout_enabled
+        v4 = v4_layout_enabled()
+        if v4:
+            instructions += ('\n新版日报结构优先于上面关于自然段和不要编号的格式要求：'
+                             '标题写“## 短节目名｜一句中文核心主题”，不要堆入原始长剧集名。'
+                             '保留节目、链接、时长来源行。然后写“简介：”一段，接着“要点总结：”，'
+                             '用1.、2.等连续编号写3–6条，每条先给结论，再用具体例子、数字或机制支撑。'
+                             '最后保留推荐理由和推荐星级。篇幅可稍长，不为压字数丢失支撑和限定。'
+                             '不要[新]或【新】，RSI等术语不要括号释义，不要出现王颢蓁。\n')
         if strict_selection_enabled():
             instructions += ('\n严格筛选模式：对于包含大量非 AI 内容的混合主题节目（例如量子计算、制药），'
                              '日报摘要只聚焦 AI 相关部分，不总结非 AI 段落；标题、正文和推荐理由均遵守此范围。\n')
@@ -218,9 +266,12 @@ class TranscriptSummarizer:
 {transcript.text}
 --- END UNTRUSTED TRANSCRIPT ---
 """
+        fallback = None
         for attempt in range(2):
             attempt_prompt = prompt
-            if attempt:
+            if attempt and v4:
+                attempt_prompt += '\n请严格使用简介、要点总结和连续编号，以及推荐理由和推荐星级的新结构。\n'
+            elif attempt:
                 attempt_prompt += (
                     "\n上一次输出没有满足格式校验。请重新独立生成最终 Markdown，"
                     "标题使用‘## 嘉宾或节目｜中文主题’，保留‘节目：’元信息；"
@@ -235,8 +286,12 @@ class TranscriptSummarizer:
                 store=False,
             )
             summary = remove_editorial_leadins(response.output_text.strip())
-            if _valid_narrative_summary(summary):
+            if v4 and _usable_summary(summary):
+                fallback = fallback or summary
+            if (_valid_v4_summary(summary) if v4 else _valid_narrative_summary(summary)):
                 return summary
+        if fallback is not None:
+            return fallback
         raise SummaryFormatError(
             "Summary must contain 2–3 readable paragraphs, a recommendation "
             "reason and a valid star rating, without bullet lists or category labels"
