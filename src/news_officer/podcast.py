@@ -639,7 +639,10 @@ class PodcastService:
                     errors.append(f"YouTube channel RSS {reason}" if youtube_feed else reason)
                     if self.daily_rss_only and youtube_feed:
                         try:
-                            discovered_youtube = latest_videos(source.url, playlist_end=source.scan_depth)
+                            channel_id = source.rss_url.split('channel_id=', 1)[1].split('&', 1)[0]
+                            discovered_youtube = latest_videos(
+                                f'https://www.youtube.com/channel/{channel_id}/videos',
+                                playlist_end=source.scan_depth)
                             youtube_episodes = [e for e in discovered_youtube if source.accepts(e)]
                             channel_with_results += 1
                         except Exception as fallback_error:  # noqa: BLE001 - isolate source failures

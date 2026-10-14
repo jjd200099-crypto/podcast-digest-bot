@@ -123,6 +123,7 @@ class SourceRegistry:
         now = datetime.now(UTC)
         cutoff = now - timedelta(days=days)
         result, failures, checked = [], [], []
+        fetch_statuses = []
         for source in self.list():
             if name and name.casefold() not in source["name"].casefold():
                 continue
@@ -138,6 +139,9 @@ class SourceRegistry:
                 continue
             try:
                 episodes = latest_rss_episodes(source["name"], feed, limit=100)
+                fetch_statuses.append({
+                    "source_name": source["name"], "url": feed,
+                    "source_type": source.get("type", "rss"), "status": "ok", "reason": ""})
                 for ep in episodes:
                     if ep.published_at and cutoff <= ep.published_at <= now:
                         keywords = source.get("include_keywords", [])
@@ -165,13 +169,20 @@ class SourceRegistry:
                             "reason": "超过单源 100 条扫描上限，可能不完整",
                         }
                     )
-            except Exception:  # noqa: BLE001 - one unavailable feed must not hide other updates
+            except Exception as error:  # noqa: BLE001 - one unavailable feed must not hide other updates
+                response = getattr(error, "response", None)
+                reason = f"HTTP {response.status_code}" if response is not None else str(error)
+                fetch_statuses.append({
+                    "source_name": source["name"], "url": feed,
+                    "source_type": source.get("type", "rss"), "status": "failed", "reason": reason})
                 failures.append(
                     {
                         "source": source["name"],
                         "reason": "RSS 获取失败，不能视作没有更新",
                     }
                 )
+        if fetch_statuses:
+            self.store.save_fetch_status(now.isoformat(), fetch_statuses)
         return {
             "from": cutoff.isoformat(),
             "to": now.isoformat(),
@@ -206,11 +217,13 @@ class SourceRegistry:
 
         def scan(source):
             if not source.get('rss_url'):
-                return [], {'source': source['name'], 'reason': '未配置 RSS，未检查'}, False
+                return [], {'source': source['name'], 'reason': '未配置 RSS，未检查'}, False, None
             try:
                 episodes = latest_rss_episodes(source['name'], source['rss_url'], limit=100)
-            except Exception:  # noqa: BLE001 - never confuse provider failure with no match
-                return [], {'source': source['name'], 'reason': 'RSS 获取失败，不能视作没有匹配节目'}, False
+            except Exception as error:  # noqa: BLE001 - never confuse provider failure with no match
+                response = getattr(error, 'response', None)
+                reason = f'HTTP {response.status_code}' if response is not None else str(error)
+                return [], {'source': source['name'], 'reason': 'RSS 获取失败，不能视作没有匹配节目'}, False, reason
             matches = []
             for ep in episodes:
                 if ep.published_at and not cutoff <= ep.published_at <= now:
@@ -230,16 +243,25 @@ class SourceRegistry:
                     '_score': title_hits * 4 + hits,
                     '_episode': ep.to_persisted_dict(), '_metadata': ep.metadata,
                 })
-            return matches, None, len(episodes) >= 100
+            return matches, None, len(episodes) >= 100, None
 
         entries, failures, capped = [], [], []
+        fetch_statuses = []
         with ThreadPoolExecutor(max_workers=6) as pool:
-            for source, (matches, failure, limited) in zip(sources, pool.map(scan, sources)):
+            for source, (matches, failure, limited, fetch_error) in zip(sources, pool.map(scan, sources)):
+                if source.get("rss_url"):
+                    fetch_statuses.append({
+                        "source_name": source["name"], "url": source["rss_url"],
+                        "source_type": source.get("type", "rss"),
+                        "status": "failed" if fetch_error is not None else "ok",
+                        "reason": fetch_error or ""})
                 entries.extend(matches)
                 if failure:
                     failures.append(failure)
                 if limited:
                     capped.append(source['name'])
+        if fetch_statuses:
+            self.store.save_fetch_status(now.isoformat(), fetch_statuses)
         entries.sort(key=lambda x: (x['_score'], x['published_at'] or ''), reverse=True)
         unique = {entry['_episode']['id']: entry for entry in entries}
         selected = list(unique.values())[:12]

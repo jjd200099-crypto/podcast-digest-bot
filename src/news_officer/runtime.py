@@ -558,6 +558,19 @@ class NewsOfficerRuntime:
             )
         await asyncio.to_thread(self.store.mark_analysis_complete, job.key)
         await self._drain_outbox(job)
+        if replies:
+            await self._recall_progress(job)
+
+    async def _recall_progress(self, job):
+        receipts = await asyncio.to_thread(self.store.retire_progress, job.key)
+        recall = getattr(self.messenger, 'delete_message', None)
+        if callable(recall):
+            for receipt in receipts:
+                try:
+                    await asyncio.to_thread(recall, receipt)
+                    await asyncio.to_thread(self.store.mark_progress_recalled, job.key, receipt)
+                except Exception as error:  # noqa: BLE001 - final answer must still arrive
+                    logger.warning('Progress recall failed: %s', type(error).__name__)
 
     def _persisted_daily_items(self, job: Job) -> list[DailyItem]:
         from .daily_report import ranked_daily_items
@@ -1047,15 +1060,6 @@ class NewsOfficerRuntime:
                 except Exception as error:  # noqa: BLE001 - preserve running analysis and retry delivery
                     logger.warning('Progress notice deferred: %s', type(error).__name__)
             result = await work
-            receipts = await asyncio.to_thread(self.store.retire_progress, job.key)
-            recall = getattr(self.messenger, 'delete_message', None)
-            if callable(recall):
-                for receipt in receipts:
-                    try:
-                        await asyncio.to_thread(recall, receipt)
-                        await asyncio.to_thread(self.store.mark_progress_recalled, job.key, receipt)
-                    except Exception as error:  # noqa: BLE001 - final answer must still arrive
-                        logger.warning('Progress recall failed: %s', type(error).__name__)
             return result
         finally:
             # Do not start a second tool loop after a progress-send failure.

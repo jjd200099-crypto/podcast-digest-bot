@@ -46,7 +46,7 @@ def function(name, description, **properties):
 STRING = {"type": "string"}
 INTEGER = {"type": "integer"}
 TOOLS = [
-    function("get_fetch_status", "读取最近抓取的真实失败来源、类型、原因及历史节目和全文数量。RSS、抓取、历史数据库问题必须先查此工具。"),
+    function("get_fetch_status", "读取最近抓取的真实失败来源、类型、原因及历史节目和全文数量。抓取失败或抓取/系统状态问题必须先查此工具。"),
     function("get_delivery_health", "读取早报实际发送状态、全文积压和失败任务数量。用户问日报为什么没到、只收到几期时先查；不是连接正常就代表日报成功，不含他人的聊天内容。"),
     function("record_editorial_feedback", "保存用户明确提出的内容或表达偏好，供维护者审阅。scope=personal 为个人建议，scope=group 为群级变更提议；两者均先登记，不自动修改全群规则或模型。", feedback=STRING,
              scope={"type": "string", "enum": ["personal", "group"]}),
@@ -140,7 +140,7 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
 每轮结束前检查当前用户真正要求的交付是否完成。不要只说“我会检查/下面有几点：”就停止；冒号或标题后必须有实质内容。不要用道歉代替答案，不要声称已修复代码或保证永不出错。解释功能应结合真实工具，不许虚构操作能力。
 用户反馈“为什么截断/没回复/检查错误”时，先 get_request_status，再根据真实记录说明已确认的事实、无法确认的原因以及下一步。如果工具不支持某项新功能，帮助整理可执行需求并在用户明确提出需求时 record_feature_request，只说“我把这个建议记下来了，会由维护者评估”，不得声称已登记待开发，不给编号。权限限制只解释受限部分，继续完成能完成的部分。
 用户明确提出内容筛选或表达偏好时，可以 record_editorial_feedback 保存建议；分清个人建议与群级变更提议，明确仍待审阅，不能声称已训练或已改全群规则。单次对当前答案的“短一点”应先直接改写，不必把每次临时指令永久记录。用户问整份日报未送达或全文积压时先 get_delivery_health，不把系统在线等同于任务成功。
-系统问题（RSS/抓取、发送状态、请求状态、功能建议、历史档案）用简短平实中文，总计约150字以内。RSS/抓取/档案问题必须先 get_fetch_status；只能说工具确认的原因，只能点名该工具返回的失败来源，不从对话中的名字推断，不罗列可能原因。系统 answer 的 citations 可为空或引用系统工具证据，不引用播客，也不写来源链接。功能建议只留给维护者评估，不承诺已登记开发，不输出内部编号。
+系统问题（抓取失败或抓取/系统状态、发送状态、请求状态、功能建议、历史档案）用简短平实中文，总计约150字以内。抓取失败或抓取/系统状态问题必须先 get_fetch_status；普通抓取节目、添加 RSS 请求按原流程处理；只能说工具确认的原因，只能点名该工具返回的失败来源，不从对话中的名字推断，不罗列可能原因。系统 answer 的 citations 可为空或引用系统工具证据，不引用播客，也不写来源链接。功能建议只留给维护者评估，不承诺已登记开发，不输出内部编号。
 重要边界：
 0. 用户说“今天的日报”“重发日报”“发一下日报”时，必须先 get_daily_digest(date=当天北京时间日期)。后端原样附上已归档的每期摘要、推荐理由和星级；不要用 recent_updates(days=1) 的发布目录代替日报，不要重写或压缩成总共十条。工具成功后用空 conversation 结束。只有用户另行问更新目录才 recent_updates。日报尚未生成时如实说明，不把它说成没有更新或没有全文。
 1. 查询“监听哪些播客”必须 list_sources；查询“过去一周更新什么”必须 recent_updates(days=7)，不能拿资料库替代全网/订阅源更新；失败来源必须披露。
@@ -817,16 +817,21 @@ class ResearchTools:
             or not isinstance(value["points"], list)
         ):
             raise ValueError("Invalid message")
-        value = {**value, 'message': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', value['message']),
-                 'points': [{**p, 'text': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', p['text'])}
-                            if isinstance(p, dict) and isinstance(p.get('text'), str) else p
-                            for p in value['points']]}
         system = getattr(self, 'system_answer', False) and not self.task
-        if self.message and re.search(r'RSS|抓取|获取失败|历史.*(?:数据库|档案|检索)', self.message.text, re.IGNORECASE):
+        question = self.message.text if self.message else ''
+        fetch_question = bool(re.search(
+            r'(?:RSS|抓取|获取|fetch).{0,16}(?:失败|故障|错误|状态|正常|成功|异常|failure|status)'
+            r'|(?:失败|故障|错误|状态|异常).{0,16}(?:RSS|抓取|fetch)'
+            r'|系统.{0,8}(?:状态|正常|异常|故障)', question, re.IGNORECASE))
+        if fetch_question:
             if not self.fetch_status_checked:
-                raise ValueError('Call get_fetch_status before answering fetch/archive questions')
+                raise ValueError('Call get_fetch_status before answering fetch/system status questions')
             system = True
         if system:
+            value = {**value, 'message': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', value['message']),
+                     'points': [{**p, 'text': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', p['text'])}
+                                if isinstance(p, dict) and isinstance(p.get('text'), str) else p
+                                for p in value['points']]}
             visible = value.get('message', '') + ''.join(p.get('text', '') for p in value.get('points', []) if isinstance(p, dict) and isinstance(p.get('text'), str))
             if len(visible) > 180:
                 raise ValueError('System answers must be short plain Chinese (about 150 characters)')

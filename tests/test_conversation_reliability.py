@@ -166,10 +166,9 @@ class ConcurrentSessionsTests(unittest.IsolatedAsyncioTestCase):
         instance.settings = SimpleNamespace(progress_delay_seconds=0.01)
         self.enqueue('slow-retry')
         job = self.store.claim_next('message')
-        incoming = IncomingMessage('slow-retry', 'team', 'hello', 'group', 'alice')
         for _ in range(2):
             release.clear()
-            work = asyncio.create_task(instance._invoke_with_progress(job, plugin, 'hello', incoming))
+            work = asyncio.create_task(instance._handle_message_job(job))
             try:
                 await asyncio.sleep(0.06)
             finally:
@@ -177,7 +176,38 @@ class ConcurrentSessionsTests(unittest.IsolatedAsyncioTestCase):
                 await work
         with self.store._connect() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox WHERE group_key='message:progress'").fetchone()[0], 1)
-        self.assertIn('progress-id', recalled)
+        self.assertEqual(recalled, ['progress-id'])
+
+    async def test_answer_send_failure_keeps_progress_until_successful_retry(self):
+        messenger = FakeMessenger()
+        recalled = []
+        messenger.delete_message = recalled.append
+        original = messenger.deliver
+        fail_answer = True
+
+        def deliver(item):
+            if item.group_key != 'message:progress' and fail_answer:
+                raise RuntimeError('send failed')
+            original(item)
+            return 'progress-id' if item.group_key == 'message:progress' else 'answer-id'
+
+        messenger.deliver = deliver
+        instance = runtime(self.store, messenger, SequencePodcast([]), FakePlugin())
+        self.enqueue('send-failure')
+        job = self.store.claim_next('message')
+        instance._ensure_reply(job, 'message:progress', '仍在处理中。',
+                               'send-failure', f'{job.key}:progress', False)
+        await instance._drain_outbox(job)
+        with self.assertRaisesRegex(RuntimeError, 'outbox delivery'):
+            await instance._handle_message_job(job)
+        self.assertEqual(recalled, [])
+        with self.store._connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT remote_message_id FROM outbox WHERE group_key='message:progress'"
+            ).fetchone()[0], 'progress-id')
+        fail_answer = False
+        await instance._handle_message_job(job)
+        self.assertEqual(recalled, ['progress-id'])
 
     def test_restart_preserves_session_order(self):
         self.enqueue('a1')

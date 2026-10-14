@@ -81,6 +81,36 @@ class OpsAnswersTests(LibraryFixture):
         self.assertNotIn('Fei-Fei', text)
         self.assertNotIn('https://', text)
 
+    def test_normal_fetch_and_rss_requests_keep_episode_rules_and_hex_text(self):
+        for question in ('帮我抓取这期做详细版', '添加这个 RSS'):
+            with self.subTest(question=question):
+                state = ResearchTools(self.agent, self.message.conversation_key,
+                                      replace(self.message, text=question))
+                with self.assertRaisesRegex(ValueError, 'Missing citations'):
+                    state.render({'kind': 'answer', 'message': '', 'points': [
+                        {'text': '内容编号 7d5a1c1af707。', 'citations': []}]})
+                evidence = state.evidence_item('内容编号 7d5a1c1af707。', 'https://example.test/episode', '节目')
+                text = state.render({'kind': 'answer', 'message': '', 'points': [
+                    {'text': '内容编号 7d5a1c1af707。', 'citations': [{'id': evidence['evidence_id']}]}]})
+                self.assertIn('7d5a1c1af707', text)
+                self.assertIn('https://example.test/episode', text)
+
+    def test_fetch_and_system_status_questions_require_status(self):
+        for question in ('RSS 状态正常吗？', '抓取成功了吗？', '系统状态怎么样？'):
+            self.state.message = replace(self.message, text=question)
+            with self.subTest(question=question), self.assertRaisesRegex(ValueError, 'get_fetch_status'):
+                self.state.render({'kind': 'conversation', 'message': '目前正常。', 'points': []})
+
+    def test_manual_fetch_failure_is_visible_to_status_tool(self):
+        for fetch in (lambda: self.registry.recent(1), lambda: self.registry.search_episodes('AI')):
+            with patch.object(self.registry, 'list', return_value=[{
+                    'name': 'Manual Feed', 'type': 'rss', 'rss_url': 'https://example.test/rss'}]), \
+                    patch('news_officer.source_registry.latest_rss_episodes', side_effect=RuntimeError('offline')):
+                fetch()
+            result = self.state.execute('get_fetch_status', {})
+            self.assertEqual(result['failed_feeds'][0]['source_name'], 'Manual Feed')
+            self.assertEqual(result['failed_feeds'][0]['reason'], 'offline')
+
     def test_episode_answer_still_requires_citations(self):
         self.state.message = replace(self.message, text='这期讲了什么')
         with self.assertRaisesRegex(ValueError, 'Missing citations'):
@@ -99,6 +129,17 @@ class YouTubeFallbackTests(YouTubeRSSTrackingTests):
         self.assertEqual(status['failed_feeds'], [])
         self.assertIn('HTTP 404', status['recovered_feeds'][0]['reason'])
         self.assertEqual(status['recovered_feeds'][0]['source_type'], 'youtube')
+
+    def test_rss_only_channel_without_source_url_falls_back(self):
+        feeds = json.loads(self.feeds.read_text())
+        feeds['sources'][0].pop('url')
+        self.feeds.write_text(json.dumps(feeds))
+        with patch('news_officer.podcast.latest_rss_episodes', side_effect=RuntimeError('HTTP 404')), \
+                patch('news_officer.podcast.latest_videos', return_value=[self.episode]) as videos:
+            self.assertEqual(len(self.service(None).discover_daily_candidates()), 1)
+        videos.assert_called_once_with(
+            'https://www.youtube.com/channel/UCXUPKJO5MZQN11PqgIvyuvQ/videos', playlist_end=4)
+        self.assertEqual(self.store.latest_fetch_status()['failed_feeds'], [])
 
     def test_successful_channel_rss_does_not_use_ytdlp(self):
         with patch('news_officer.podcast.latest_rss_episodes', return_value=[]), \
