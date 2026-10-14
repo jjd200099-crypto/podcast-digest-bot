@@ -36,6 +36,45 @@ V4 = ('## Show｜AI 成本取决于任务\n节目：Show｜Very long original ep
 
 
 class DailyV4Tests(unittest.TestCase):
+    def test_real_blank_line_output_normalizes_and_delivers_v4_card(self):
+        raw = (Path(__file__).parent / 'fixtures' /
+               'v4-summary-blank-lines-2026-10-14.md').read_text()
+        normalized = normalize_v4_summary(raw)
+        self.assertFalse(_valid_v4_summary(raw))
+        self.assertTrue(_valid_v4_summary(normalized))
+        self.assertEqual(normalize_v4_summary(normalized), normalized)
+        self.assertEqual(normalized.splitlines(), [line for line in raw.splitlines() if line.strip()])
+        item = DailyItem(EPISODE, 'summarized', raw)
+        rendered = reader_episode_v4(item, 1)
+        parts = daily_card_delivery_parts(rendered, 'blank-lines', title='播客精选')
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0][0], 'interactive')
+        content = json.loads(parts[0][1])['body']['elements'][1]['content']
+        for label in ('- 简介：', '- 优先级/阅读建议：', '- 要点总结：'):
+            self.assertIn(label, content)
+        points = [line for line in normalized.splitlines() if line[:1].isdigit()]
+        self.assertEqual(len(points), 5)
+        for point in points:
+            self.assertIn('\n    ' + point, content)
+        self.assertNotRegex(content, r'\n\s*\n    \d+\. ')
+        self.assertEqual(item.message, raw)
+        instance = summarizer_for(raw)
+        with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
+            self.assertEqual(instance.summarize(EPISODE, TRANSCRIPT), normalized)
+        self.assertEqual(len(instance.client.responses.calls), 1)
+
+    def test_blank_lines_at_every_v4_boundary_preserve_strict_validation(self):
+        padded = V4.replace('\n', '\n\n \t\n')
+        self.assertEqual(normalize_v4_summary(padded), V4)
+        for malformed in (padded.replace('2. ', '3. '),
+                          padded.replace('简介：', '介绍：'),
+                          padded.replace('推荐理由：', '额外正文。\n推荐理由：'),
+                          padded.replace('节目：', '节目第二行。\n节目：'),
+                          padded.replace('★★★★☆', '★☆★★☆'),
+                          padded + '\n\n额外正文。'):
+            with self.subTest(malformed=malformed):
+                self.assertFalse(_valid_v4_summary(normalize_v4_summary(malformed)))
+
     def test_real_model_output_normalizes_and_delivers_v4_card(self):
         raw = (Path(__file__).parent / 'fixtures' /
                'v4-summary-model-output-2026-10-14.md').read_text()

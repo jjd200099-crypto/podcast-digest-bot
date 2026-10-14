@@ -150,16 +150,13 @@ def normalize_v4_summary(markdown: str) -> str:
         elif NUMBERED_TAKEAWAY_RE.fullmatch(line):
             line = line.lstrip()
         lines.append(line)
-    # Remove blank lines only within the numbered list, leaving any unexpected
-    # prose in place for the strict validator to reject.
+    # Blank lines are presentation throughout v4, including the metadata and
+    # recommendation fields. Keep every nonempty line so the strict validator
+    # still rejects unexpected prose, missing fields, and invalid numbering.
     text = '\n'.join(lines).strip()
-    header, marker, remainder = text.partition('\n要点总结：\n')
-    if not marker:
+    if '\n要点总结：\n' not in text:
         return text
-    points, reason_marker, footer = remainder.partition('\n推荐理由：')
-    points = re.sub(r'(?m)(^\d+\. [^\n]+)\n(?:[ \t]*\n)+(?=\d+\. )',
-                    r'\1\n', points.lstrip('\n'))
-    return header + marker + points + reason_marker + footer
+    return '\n'.join(line for line in text.splitlines() if line.strip())
 
 
 def _valid_v4_summary(markdown: str) -> bool:
