@@ -489,7 +489,9 @@ def v4_layout_enabled(value=None):
 def reader_episode_v4(item, number, document_url='', *, source_text=''):
     """Extract archived prose without rewriting claims or calling a model."""
     from .glossary import preserve_english_terms
-    content = preserve_english_terms(render_daily_summary(item.message, reader_mode=True), source_text)
+    from .summarizer import _valid_v4_summary, normalize_v4_summary
+    summary = normalize_v4_summary(item.message)
+    content = preserve_english_terms(render_daily_summary(summary, reader_mode=True), source_text)
     content = re.sub(r'\[新\]|【新】', '', content).replace('王颢蓁', '')
     content = re.sub(r'RSI\s*[（(]递归自我改进[）)]|递归自我改进\s*[（(]RSI[）)]', 'RSI', content)
     lines = [line.strip() for line in content.splitlines() if line.strip()]
@@ -518,18 +520,23 @@ def reader_episode_v4(item, number, document_url='', *, source_text=''):
     topic = re.sub(r'[｜|]', ' / ', topic)
     title = f'{guest}｜{topic}'
     heading = f'**{number}. 【{show}｜{title}】**'
-    from .summarizer import _valid_v4_summary
-    if not _valid_v4_summary(item.message):
-        # Preserve archived paragraphs/lists instead of manufacturing v4 fields.
-        # The heading identifies the show; omit verbose archived source lines.
-        compatible = re.sub(r'(?m)^[ \t]*(?:\*\*)?节目：[^\n]*\n?', '', content)
-        compatible = re.sub(r'(?m)^## (?!内容解读)[^\n]+', heading, compatible, count=1)
-        if heading not in compatible:
-            compatible = heading + '\n\n' + compatible
-        rendered = reader_episode(compatible, document_url)
-        if item.episode.url not in rendered:
-            rendered += f'\n\n[收听节目]({item.episode.url})'
-        return rendered
+    if not _valid_v4_summary(summary):
+        # Keep the full body in the archive; cards show a bounded extract.
+        intro = next((line[3:] for line in lines if line.startswith('简介：')), '')
+        if not intro:
+            intro = next((re.sub(r'^(?:\d+[.、]\s*|[•*-]\s*)', '', line)
+                          for line in lines if not line.startswith(
+                              ('#', '节目：', '时长：', '链接：', '节目链接：', '收听链接：',
+                               '推荐理由：', '阅读建议：', '推荐星级：', '要点总结：',
+                               '优先级/阅读建议：', '[', '【'))), '')
+        excerpt = intro if len(intro) <= 160 else intro[:159].rstrip() + '…'
+        fields = [heading, '', '- 简介：' + excerpt] if excerpt else [heading]
+        fields.extend(line for line in lines if line.startswith(
+            ('推荐理由：', '阅读建议：', '优先级/阅读建议：')))
+        if document_url:
+            fields.append(f'[精读和完整中文对谈]({document_url})')
+        fields.append(f'[收听节目]({item.episode.url})')
+        return '\n'.join(fields)
     intro, reason, advice, points = '', '', '', []
     for line in lines:
         clean = line.removeprefix('- ').strip('*')

@@ -130,24 +130,55 @@ def _valid_narrative_summary(markdown: str) -> bool:
     return True
 
 
+def normalize_v4_summary(markdown: str) -> str:
+    """Canonicalize presentation only; never repair missing fields or numbering."""
+    lines = []
+    for line in markdown.splitlines():
+        line = line.rstrip()
+        candidate = re.sub(r'^\s*- ', '', line)
+        if re.fullmatch(r'\*\*[^*]+\*\*', candidate):
+            candidate = candidate[2:-2]
+        # Support bold labels (including a colon outside the bold markers) and
+        # whole bold field lines without touching emphasis inside the prose.
+        candidate = re.sub(r'^\*\*(节目|简介|要点总结|推荐理由|推荐星级)([:：]?)\*\*',
+                           r'\1\2', candidate)
+        field = re.match(r'^(节目|简介|要点总结|推荐理由|推荐星级)[:：](.*)$', candidate)
+        if field:
+            line = field[1] + '：' + field[2]
+            if field[1] == '要点总结' and re.match(r'\s*\d+\.\s+\S', field[2]):
+                line = '要点总结：\n' + field[2].lstrip()
+        elif NUMBERED_TAKEAWAY_RE.fullmatch(line):
+            line = line.lstrip()
+        lines.append(line)
+    # Remove blank lines only within the numbered list, leaving any unexpected
+    # prose in place for the strict validator to reject.
+    text = '\n'.join(lines).strip()
+    header, marker, remainder = text.partition('\n要点总结：\n')
+    if not marker:
+        return text
+    points, reason_marker, footer = remainder.partition('\n推荐理由：')
+    points = re.sub(r'(?m)(^\d+\. [^\n]+)\n(?:[ \t]*\n)+(?=\d+\. )',
+                    r'\1\n', points.lstrip('\n'))
+    return header + marker + points + reason_marker + footer
+
+
 def _valid_v4_summary(markdown: str) -> bool:
-    if not re.match(r'\A## [^\r\n]{3,100}\n', markdown):
+    # Reject wrapped introductions and all prose outside the numbered list.
+    structure = re.fullmatch(
+        r'## [^\r\n]{3,100}\n节目：\S[^\r\n]+\n'
+        r'(?:链接：[^\r\n]+\n)?(?:时长：[^\r\n]+\n)?'
+        r'\n*简介：[^\r\n]+\n\n*要点总结：\n(?P<points>.*?)'
+        r'\n推荐理由：[^\r\n]{8,160}\n推荐星级：([★☆]{5})[ \t]*',
+        markdown, re.DOTALL,
+    )
+    if not structure:
         return False
-    if not re.search(r'(?m)^节目：\S.+$', markdown):
-        return False
-    if not re.search(r'(?m)^简介：[^\r\n]+$', markdown):
-        return False
-    if markdown.count('\n要点总结：\n') != 1:
-        return False
-    points = markdown.split('\n要点总结：\n', 1)[1].split('\n推荐理由：', 1)[0]
-    lines = [line for line in points.splitlines() if line.strip()]
+    lines = [line for line in structure['points'].splitlines() if line.strip()]
     if not 1 <= len(lines) <= 10:
         return False
     if any(not re.fullmatch(rf'{i}\. \S[^\r\n]*', line) for i, line in enumerate(lines, 1)):
         return False
-    rating = re.search(r'\n推荐星级：([★☆]{5})\s*$', markdown)
-    if not rating or not re.search(r'(?m)^推荐理由：[^\r\n]{8,160}$', markdown):
-        return False
+    rating = re.search(r'\n推荐星级：([★☆]{5})[ \t]*$', markdown)
     score = rating[1].count('★')
     return (1 <= score <= 5 and rating[1] == '★' * score + '☆' * (5 - score)
             and not re.search(r'王颢蓁|\[新\]|【新】|RSI[（(]', markdown))
@@ -288,6 +319,8 @@ class TranscriptSummarizer:
                 store=False,
             )
             summary = preserve_english_terms(remove_editorial_leadins(response.output_text.strip()), transcript.text)
+            if v4:
+                summary = normalize_v4_summary(summary)
             if v4 and _usable_summary(summary):
                 fallback = fallback or summary
             if (_valid_v4_summary(summary) if v4 else _valid_narrative_summary(summary)):
