@@ -52,12 +52,66 @@ class Store:
         finally:
             connection.close()
 
+    def save_fetch_status(self, run_at: str, statuses: list[dict]) -> None:
+        with self._connect() as db:
+            db.execute('INSERT INTO feed_fetch_runs VALUES (?)', (run_at,))
+            db.executemany('INSERT INTO feed_fetch_status VALUES (?, ?, ?, ?, ?, ?)',
+                           [(run_at, r['source_name'], r['url'], r['source_type'],
+                             r['status'], r['reason']) for r in statuses])
+
+    def retire_progress(self, job_key: str) -> list[str]:
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET status='cancelled' WHERE job_key=? "
+                       "AND group_key='message:progress' AND status='pending'", (job_key,))
+            return [r[0] for r in db.execute("SELECT remote_message_id FROM outbox WHERE job_key=? "
+                                            "AND group_key='message:progress' AND status='sent' "
+                                            "AND remote_message_id != ''", (job_key,))]
+
+    def mark_progress_recalled(self, job_key: str, message_id: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET remote_message_id='' WHERE job_key=? "
+                       "AND group_key='message:progress' AND remote_message_id=?", (job_key, message_id))
+
+    def latest_fetch_status(self, sources: list[dict] | None = None) -> dict:
+        now = datetime.now(UTC)
+        cutoff = (now - timedelta(days=3)).isoformat()
+        configured = None if sources is None else {
+            (source.get("name") or source.get("url", ""),
+             source.get("rss_url") or source.get("url", ""))
+            for source in sources
+        }
+        with self._connect() as db:
+            run = db.execute('SELECT run_at FROM feed_fetch_runs ORDER BY run_at DESC LIMIT 1').fetchone()
+            # A manual search may check only one source; retain the latest
+            # observation for each source across partial fetch rounds.
+            rows = db.execute("""SELECT run_at, source_name, url, source_type, status, reason FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY source_name, url ORDER BY run_at DESC, rowid DESC
+                ) AS latest_rank FROM feed_fetch_status
+                WHERE julianday(run_at) >= julianday(?)
+                  AND julianday(run_at) <= julianday(?)
+            ) WHERE latest_rank=1 ORDER BY source_name, url""",
+                              (cutoff, now.isoformat())).fetchall()
+            if configured is not None:
+                rows = [r for r in rows if r["source_type"] in {"text", "web"}
+                        or (r["source_name"], r["url"]) in configured]
+            return {'run_at': run['run_at'] if run else None,
+                    'failed_feeds': [dict(r) for r in rows if r['status'] == 'failed'],
+                    'recovered_feeds': [dict(r) for r in rows if r['status'] == 'ok' and r['reason']],
+                    'archived_transcripts': db.execute('SELECT COUNT(*) FROM episode_transcripts').fetchone()[0],
+                    'archived_episodes': db.execute('SELECT COUNT(*) FROM episodes').fetchone()[0]}
+
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS feed_fetch_runs (run_at TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS feed_fetch_status (
+                    run_at TEXT NOT NULL, source_name TEXT NOT NULL, url TEXT NOT NULL,
+                    source_type TEXT NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS feed_fetch_status_run_idx ON feed_fetch_status(run_at);
                 CREATE TABLE IF NOT EXISTS episode_document_attempts (
                     episode_id TEXT NOT NULL, revision TEXT NOT NULL, day TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',

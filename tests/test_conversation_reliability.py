@@ -127,6 +127,88 @@ class ConcurrentSessionsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(progress), 1)
             self.assertIn('仍在处理中', json.dumps(json.loads(progress[0][0]), ensure_ascii=False))
 
+    async def test_fast_answer_has_no_progress_message(self):
+        class Plugin(FakePlugin):
+            def acknowledgement(self, text):
+                return None
+
+        messenger = FakeMessenger()
+        instance = runtime(self.store, messenger, SequencePodcast([]), Plugin())
+        instance.settings = SimpleNamespace(progress_delay_seconds=0.1)
+        self.enqueue('quick')
+        await instance._handle_message_job(self.store.claim_next('message'))
+        with self.store._connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox WHERE group_key='message:progress'").fetchone()[0], 0)
+
+    async def test_slow_progress_recalled_and_not_duplicated_on_retry(self):
+        release = threading.Event()
+
+        class Plugin(FakePlugin):
+            def acknowledgement(self, text):
+                return None
+
+            def handle(self, text, message):
+                release.wait(2)
+                return super().handle(text, message)
+
+        messenger = FakeMessenger()
+        recalled = []
+        messenger.delete_message = recalled.append
+        original = messenger.deliver
+
+        def deliver(item):
+            original(item)
+            return 'progress-id' if item.group_key == 'message:progress' else 'answer-id'
+
+        messenger.deliver = deliver
+        plugin = Plugin()
+        instance = runtime(self.store, messenger, SequencePodcast([]), plugin)
+        instance.settings = SimpleNamespace(progress_delay_seconds=0.01)
+        self.enqueue('slow-retry')
+        job = self.store.claim_next('message')
+        for _ in range(2):
+            release.clear()
+            work = asyncio.create_task(instance._handle_message_job(job))
+            try:
+                await asyncio.sleep(0.06)
+            finally:
+                release.set()
+                await work
+        with self.store._connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox WHERE group_key='message:progress'").fetchone()[0], 1)
+        self.assertEqual(recalled, ['progress-id'])
+
+    async def test_answer_send_failure_keeps_progress_until_successful_retry(self):
+        messenger = FakeMessenger()
+        recalled = []
+        messenger.delete_message = recalled.append
+        original = messenger.deliver
+        fail_answer = True
+
+        def deliver(item):
+            if item.group_key != 'message:progress' and fail_answer:
+                raise RuntimeError('send failed')
+            original(item)
+            return 'progress-id' if item.group_key == 'message:progress' else 'answer-id'
+
+        messenger.deliver = deliver
+        instance = runtime(self.store, messenger, SequencePodcast([]), FakePlugin())
+        self.enqueue('send-failure')
+        job = self.store.claim_next('message')
+        instance._ensure_reply(job, 'message:progress', '仍在处理中。',
+                               'send-failure', f'{job.key}:progress', False)
+        await instance._drain_outbox(job)
+        with self.assertRaisesRegex(RuntimeError, 'outbox delivery'):
+            await instance._handle_message_job(job)
+        self.assertEqual(recalled, [])
+        with self.store._connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT remote_message_id FROM outbox WHERE group_key='message:progress'"
+            ).fetchone()[0], 'progress-id')
+        fail_answer = False
+        await instance._handle_message_job(job)
+        self.assertEqual(recalled, ['progress-id'])
+
     def test_restart_preserves_session_order(self):
         self.enqueue('a1')
         self.enqueue('a2')

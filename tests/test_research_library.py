@@ -521,8 +521,9 @@ class ResearchTests(LibraryFixture):
         first = self.state.execute('record_feature_request', {'summary': '增加每周播客对比功能'})
         again = self.state.execute('record_feature_request', {'summary': '重复登记'})
         self.assertEqual(first, again)
-        self.assertEqual(first['status'], 'recorded')
-        self.assertIn('尚未实现', first['meaning'])
+        self.assertNotIn('id', first)
+        self.assertNotIn('status', first)
+        self.assertIn('维护者评估', first['meaning'])
 
     def test_diagnostics_never_read_other_members(self):
         from news_officer.request_status import request_status

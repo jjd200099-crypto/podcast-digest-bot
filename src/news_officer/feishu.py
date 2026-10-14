@@ -425,6 +425,12 @@ class FeishuMessenger:
             self._check(response, "file upload")
         raise RuntimeError("Feishu file upload did not complete")
 
+    def delete_message(self, message_id: str) -> None:
+        response = requests.delete(
+            f"{FEISHU_API}/im/v1/messages/{message_id}",
+            headers={"Authorization": f"Bearer {self.token()}"}, timeout=30)
+        self._check(response, "message recall")
+
     def reply(self, markdown: str, message_id: str, idempotency_key: str) -> None:
         parts = combined_delivery_parts(markdown, idempotency_key)
         for index, (msg_type, content, item_uuid) in enumerate(parts, start=1):
