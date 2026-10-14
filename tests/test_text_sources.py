@@ -1,6 +1,7 @@
 """Offline article fixtures; compatible with pytest and CI unittest discovery."""
 import json
 import os
+import re
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -246,6 +247,36 @@ class TextSourcesTests(unittest.TestCase):
                 '<a href="https://review.firstround.com/building-ai-products/">Article</a>')
         self.assertEqual(article_links(page, first),
                          ['https://review.firstround.com/building-ai-products/'])
+
+    def test_madrona_article_paths_and_listing_exclusions(self):
+        configured = json.loads((Path(__file__).resolve().parents[1] / 'feeds.json').read_text())
+        source = next(s for s in configured['sources'] if s['name'] == 'Madrona (text)')
+        # Article slugs observed on the live homepage; trailing slash is optional.
+        slugs = ('why-ai-made-your-buyers-harder-to-sell-to',
+                 'is-ai-a-bubble-what-pitchbook-nizar-tarhuni-sees-in-the-data',
+                 'the-best-infrastructure-moment-since-cloud')
+        for slug in slugs:
+            for suffix in ('', '/', '/?utm_source=test#intro'):
+                path = '/' + slug + suffix
+                with self.subTest(path=path):
+                    self.assertEqual(article_links(f'<a href="{path}">Article</a>', source),
+                                     [source['index_url'] + slug + suffix.split('?')[0]])
+        for route in ('about', 'team', 'companies', 'insights', 'contact', 'search',
+                      'privacy-policy', 'jobs', 'news', 'careers', 'index', 'tag',
+                      'category', 'author', 'page'):
+            for suffix in ('', '/', '/x', '/2/', '/?utm_source=test#intro'):
+                path = '/' + route + suffix
+                with self.subTest(path=path):
+                    self.assertIsNotNone(re.search(source['exclude_regex'], path.split('?')[0]))
+                    self.assertEqual(article_links(f'<a href="{path}">Listing</a>', source), [])
+        for path in ('/', '/article/nested/', '/logo.png', '/feed.xml', '/123.html',
+                     'https://outside.org/the-best-infrastructure-moment-since-cloud/',
+                     'https://jobs.madrona.com/the-best-infrastructure-moment-since-cloud/'):
+            with self.subTest(path=path):
+                self.assertEqual(article_links(f'<a href="{path}">Other</a>', source), [])
+        # Exclusions match whole route segments, not article slug prefixes.
+        self.assertEqual(article_links('<a href="/news-from-madrona/">Article</a>', source),
+                         ['https://www.madrona.com/news-from-madrona/'])
 
     def test_shared_text_sources_are_gated_and_discoverable(self):
         path = Path(__file__).resolve().parents[1] / 'feeds.json'

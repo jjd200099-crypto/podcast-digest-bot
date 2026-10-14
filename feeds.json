@@ -320,8 +320,8 @@
       "type": "text",
       "mode": "html",
       "index_url": "https://www.madrona.com/",
-      "link_regex": "^/[^/]+/?$",
-      "exclude_regex": "^/(about|team|companies|insights|contact|search|privacy-policy|jobs)(?:/|$)"
+      "link_regex": "^/[a-z0-9]+(?:-[a-z0-9]+)*/?$",
+      "exclude_regex": "^/(about|team|companies|insights|contact|search|privacy-policy|jobs|news|careers|index|tag|category|author|page)(?:/|$)"
     },
     {
       "name": "Andrew Ng",
