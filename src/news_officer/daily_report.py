@@ -489,7 +489,9 @@ def v4_layout_enabled(value=None):
 def reader_episode_v4(item, number, document_url='', *, source_text=''):
     """Extract archived prose without rewriting claims or calling a model."""
     from .glossary import preserve_english_terms
-    content = preserve_english_terms(render_daily_summary(item.message, reader_mode=True), source_text)
+    from .summarizer import _valid_v4_summary, normalize_v4_summary
+    summary = normalize_v4_summary(item.message)
+    content = preserve_english_terms(render_daily_summary(summary, reader_mode=True), source_text)
     content = re.sub(r'\[新\]|【新】', '', content).replace('王颢蓁', '')
     content = re.sub(r'RSI\s*[（(]递归自我改进[）)]|递归自我改进\s*[（(]RSI[）)]', 'RSI', content)
     lines = [line.strip() for line in content.splitlines() if line.strip()]
@@ -518,8 +520,7 @@ def reader_episode_v4(item, number, document_url='', *, source_text=''):
     topic = re.sub(r'[｜|]', ' / ', topic)
     title = f'{guest}｜{topic}'
     heading = f'**{number}. 【{show}｜{title}】**'
-    from .summarizer import _valid_v4_summary
-    if not _valid_v4_summary(item.message):
+    if not _valid_v4_summary(summary):
         # Preserve archived paragraphs/lists instead of manufacturing v4 fields.
         # The heading identifies the show; omit verbose archived source lines.
         compatible = re.sub(r'(?m)^[ \t]*(?:\*\*)?节目：[^\n]*\n?', '', content)

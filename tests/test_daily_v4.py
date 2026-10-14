@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import test_combined_daily as fixtures
@@ -18,9 +19,13 @@ from news_officer.daily_report import (
     render_reader_daily,
     v4_layout_enabled,
 )
-from news_officer.feishu import combined_delivery_parts
+from news_officer.feishu import combined_delivery_parts, daily_card_delivery_parts
 from news_officer.models import DailyItem
-from news_officer.summarizer import _valid_editorial_summary, _valid_v4_summary
+from news_officer.summarizer import (
+    _valid_editorial_summary,
+    _valid_v4_summary,
+    normalize_v4_summary,
+)
 
 V4 = ('## Show｜AI 成本取决于任务\n节目：Show｜Very long original episode title\n'
       '链接：https://example.com/listen\n时长：40分钟\n'
@@ -31,6 +36,49 @@ V4 = ('## Show｜AI 成本取决于任务\n节目：Show｜Very long original ep
 
 
 class DailyV4Tests(unittest.TestCase):
+    def test_real_model_output_normalizes_and_delivers_v4_card(self):
+        raw = (Path(__file__).parent / 'fixtures' /
+               'v4-summary-model-output-2026-10-14.md').read_text()
+        normalized = normalize_v4_summary(raw)
+        self.assertFalse(_valid_v4_summary(raw))
+        self.assertTrue(_valid_v4_summary(normalized))
+        self.assertEqual(normalize_v4_summary(normalized), normalized)
+        self.assertNotRegex(normalized, r'\n\s*\n\d+\. ')
+        item = DailyItem(EPISODE, 'summarized', raw)
+        rendered = reader_episode_v4(item, 1)
+        parts = daily_card_delivery_parts(rendered, 'fixture', title='播客精选')
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0][0], 'interactive')
+        card = json.loads(parts[0][1])
+        content = card['body']['elements'][1]['content']
+        for label in ('- 简介：', '- 优先级/阅读建议：', '- 要点总结：'):
+            self.assertIn(label, content)
+        self.assertEqual(sum(line.startswith('    ') for line in content.splitlines()), 6)
+        for number in range(1, 7):
+            self.assertIn(f'\n    {number}. ', content)
+        self.assertNotRegex(content, r'\n\s*\n    \d+\. ')
+        self.assertEqual(item.message, raw)
+        instance = summarizer_for(raw)
+        with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
+            summary = instance.summarize(EPISODE, TRANSCRIPT)
+        self.assertEqual(summary, normalized)
+        self.assertTrue(_valid_v4_summary(summary))
+        self.assertEqual(len(instance.client.responses.calls), 1)
+
+    def test_normalization_tolerates_labels_but_rejects_malformed_content(self):
+        for heading in ('要点总结:', '**要点总结：**', '- **要点总结**:', '- 要点总结：'):
+            with self.subTest(heading=heading):
+                value = V4.replace('要点总结：', heading).replace('\n2. ', '\n\n2. ')
+                self.assertEqual(normalize_v4_summary(value), V4)
+                self.assertIn('- 要点总结：', reader_episode_v4(DailyItem(EPISODE, 'summarized', value), 1))
+        for malformed in (V4.replace('2. ', '3. '), V4.replace('简介：', '介绍：'),
+                          V4.replace('2. ', 'un-numbered prose\n2. '),
+                          V4.replace('要点总结：', '要点总结：\n要点总结：'),
+                          V4.replace('★★★★☆', '★☆★★☆'), V4.split('推荐理由：')[0]):
+            with self.subTest(malformed=malformed):
+                self.assertFalse(_valid_v4_summary(normalize_v4_summary(malformed)))
+                self.assertNotIn('- 要点总结：', reader_episode_v4(DailyItem(EPISODE, 'summarized', malformed), 1))
+
     def test_flag_and_config_default_and_rollback(self):
         with patch.dict('os.environ', {}, clear=True):
             self.assertTrue(v4_layout_enabled())

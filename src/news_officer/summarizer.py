@@ -130,6 +130,34 @@ def _valid_narrative_summary(markdown: str) -> bool:
     return True
 
 
+def normalize_v4_summary(markdown: str) -> str:
+    """Canonicalize presentation only; never repair missing fields or numbering."""
+    lines = []
+    for line in markdown.splitlines():
+        line = line.rstrip()
+        candidate = re.sub(r'^\s*- ', '', line)
+        if re.fullmatch(r'\*\*[^*]+\*\*', candidate):
+            candidate = candidate[2:-2]
+        # Support bold labels (including a colon outside the bold markers) and
+        # whole bold field lines without touching emphasis inside the prose.
+        candidate = re.sub(r'^\*\*(节目|简介|要点总结|推荐理由|推荐星级)([:：]?)\*\*',
+                           r'\1\2', candidate)
+        field = re.match(r'^(节目|简介|要点总结|推荐理由|推荐星级)[:：](.*)$', candidate)
+        if field:
+            line = field[1] + '：' + field[2]
+        lines.append(line)
+    # Remove blank lines only within the numbered list, leaving any unexpected
+    # prose in place for the strict validator to reject.
+    text = '\n'.join(lines).strip()
+    header, marker, remainder = text.partition('\n要点总结：\n')
+    if not marker:
+        return text
+    points, reason_marker, footer = remainder.partition('\n推荐理由：')
+    points = re.sub(r'(?m)(^\d+\. [^\n]+)\n(?:[ \t]*\n)+(?=\d+\. )',
+                    r'\1\n', points.lstrip('\n'))
+    return header + marker + points + reason_marker + footer
+
+
 def _valid_v4_summary(markdown: str) -> bool:
     if not re.match(r'\A## [^\r\n]{3,100}\n', markdown):
         return False
@@ -288,6 +316,8 @@ class TranscriptSummarizer:
                 store=False,
             )
             summary = preserve_english_terms(remove_editorial_leadins(response.output_text.strip()), transcript.text)
+            if v4:
+                summary = normalize_v4_summary(summary)
             if v4 and _usable_summary(summary):
                 fallback = fallback or summary
             if (_valid_v4_summary(summary) if v4 else _valid_narrative_summary(summary)):
