@@ -60,6 +60,26 @@ class OpsAnswersTests(LibraryFixture):
             self.state.render({'kind': 'answer', 'message': '', 'points': [
                 {'text': '可能是网络问题。', 'citations': []}]})
 
+    def test_named_failed_source_can_match_name_or_url(self):
+        source = {'name': 'Actual Channel', 'url': 'https://example.test/channel',
+                  'type': 'web'}
+        answer = {'kind': 'conversation', 'message': 'Actual Channel 抓取失败。', 'points': []}
+        for identifier in (source['url'], source['name'], 'https://example.test/other'):
+            with self.subTest(identifier=identifier), patch.object(
+                    self.registry, 'list', return_value=[source]):
+                self.store.save_fetch_status(datetime.now(UTC).isoformat(), [{
+                    'source_name': identifier, 'url': source['url'],
+                    'source_type': 'web', 'status': 'failed', 'reason': 'offline'}])
+                self.state.execute('get_fetch_status', {})
+                self.state.fetch_status_result['failed_feeds'] = [
+                    row for row in self.state.fetch_status_result['failed_feeds']
+                    if row['source_name'] == identifier]
+                if identifier == 'https://example.test/other':
+                    with self.assertRaisesRegex(ValueError, 'Only name failed'):
+                        self.state.render(answer)
+                else:
+                    self.assertEqual(self.state.render(answer), answer['message'])
+
     def test_latest_empty_run_retains_unchecked_failures(self):
         self.store.save_fetch_status((datetime.now(UTC) - timedelta(days=1)).isoformat(), [{'source_name': 'Old', 'url': 'https://example.test',
                                                  'source_type': 'rss', 'status': 'failed', 'reason': 'HTTP 404'}])
