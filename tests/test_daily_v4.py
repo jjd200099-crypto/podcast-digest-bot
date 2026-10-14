@@ -79,6 +79,33 @@ class DailyV4Tests(unittest.TestCase):
                 self.assertFalse(_valid_v4_summary(normalize_v4_summary(malformed)))
                 self.assertNotIn('- 要点总结：', reader_episode_v4(DailyItem(EPISODE, 'summarized', malformed), 1))
 
+    def test_multiline_intro_and_extra_lines_are_rejected(self):
+        for value in (V4.replace('。\n要点总结', '。\n简介的第二行。\n要点总结'),
+                      V4.replace('推荐星级：', '额外正文。\n推荐星级：'),
+                      V4.replace('简介：', '额外正文。\n简介：')):
+            with self.subTest(value=value):
+                self.assertFalse(_valid_v4_summary(normalize_v4_summary(value)))
+                rendered = reader_episode_v4(DailyItem(EPISODE, 'summarized', value), 1)
+                self.assertNotIn('    1.', rendered)
+                self.assertNotIn('简介的第二行', rendered)
+
+    def test_inline_and_indented_points_normalize(self):
+        value = V4.replace('要点总结：\n1. ', '要点总结：1. ').replace('\n2. ', '\n  2. ')
+        self.assertEqual(normalize_v4_summary(value), V4)
+        self.assertEqual(normalize_v4_summary(normalize_v4_summary(value)), V4)
+
+    def test_fallback_excerpt_is_bounded_and_keeps_links(self):
+        value = V4.replace('Mike 讨论模型选择和 AI 成本。', '长简介' * 100).replace('2. ', '3. ')
+        item = DailyItem(EPISODE, 'summarized', value)
+        rendered = reader_episode_v4(item, 1, 'https://example.com/doc')
+        excerpt = next(line[5:] for line in rendered.splitlines() if line.startswith('- 简介：'))
+        self.assertEqual(len(excerpt), 160)
+        self.assertTrue(excerpt.endswith('…'))
+        self.assertNotIn('成本取决于任务。Mike', rendered)
+        self.assertIn('[精读和完整中文对谈](https://example.com/doc)', rendered)
+        self.assertIn(f'[收听节目]({EPISODE.url})', rendered)
+        self.assertEqual(item.message, value)
+
     def test_flag_and_config_default_and_rollback(self):
         with patch.dict('os.environ', {}, clear=True):
             self.assertTrue(v4_layout_enabled())
@@ -101,15 +128,14 @@ class DailyV4Tests(unittest.TestCase):
         self.assertIn(f'[收听节目]({EPISODE.url})', text)
         self.assertEqual(item.message, V4)
 
-    def test_archive_claims_survive_without_rewriting(self):
+    def test_archive_fallback_shows_only_first_excerpt(self):
         old = ('## Guest｜主题\n节目：Show｜Long title\n\n'
                '公司认为效率可能提高1000倍，但仍需验证。\n\n'
                '只有需求增长，成本下降才可能提高利润。\n'
                '推荐理由：有具体条件和数字作为支撑。\n推荐星级：★★★★☆')
         text = reader_episode_v4(DailyItem(EPISODE, 'summarized', old), 1)
-        for claim in ('公司认为效率可能提高1000倍，但仍需验证。',
-                      '只有需求增长，成本下降才可能提高利润。'):
-            self.assertIn(claim, text)
+        self.assertIn('- 简介：公司认为效率可能提高1000倍，但仍需验证。', text)
+        self.assertNotIn('只有需求增长', text)
 
     def test_short_title_deduplicates_verbose_rss_brand(self):
         from dataclasses import replace
@@ -122,7 +148,7 @@ class DailyV4Tests(unittest.TestCase):
     def test_legacy_paragraphs_and_bullets_do_not_manufacture_v4_fields(self):
         for old in (VALID_SUMMARY, LEGACY_SUMMARY):
             text = reader_episode_v4(DailyItem(EPISODE, 'summarized', old), 1)
-            self.assertNotIn('- 简介：', text)
+            self.assertIn('- 简介：', text)
             self.assertNotIn('- 要点总结：', text)
             self.assertNotIn('    1.', text)
             self.assertEqual(old, DailyItem(EPISODE, 'summarized', old).message)
@@ -148,8 +174,13 @@ class DailyV4Tests(unittest.TestCase):
             self.assertIn('推荐理由：' + decision['assessment']['reason'], scored)
             self.assertIn('推荐星级：★★★★☆', scored)
             rendered = render_reader_daily([DailyItem(EPISODE, 'summarized', scored)], [], layout='v4')
-            self.assertIn('Mike 认为简单任务可以使用更小的模型。', rendered)
-            self.assertIn('公司称需要先验证客户的真实需求。', rendered)
+            self.assertIn('- 简介：', rendered)
+            self.assertIn('Mike 讨论模型选择和 AI 成本。', rendered)
+            if _valid_v4_summary(scored):
+                self.assertIn('- 要点总结：', rendered)
+            else:
+                self.assertNotIn('Mike 认为简单任务可以使用更小的模型。', rendered)
+                self.assertNotIn('公司称需要先验证客户的真实需求。', rendered)
 
     def test_fallback_preserves_strict_selection_and_rejects_empty_output(self):
         from news_officer.editorial import STRICT_POLICY_VERSION, EditorialPolicy
