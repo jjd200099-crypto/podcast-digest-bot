@@ -159,6 +159,14 @@
       "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCFMxDWNYefVV3XmCdCBCFjQ"
     },
     {
+      "name": "Cheeky Pint",
+      "type": "rss",
+      "priority": "A",
+      "url": "",
+      "rss_url": "https://cheekypint.substack.com/feed",
+      "enabled": true
+    },
+    {
       "name": "No Priors",
       "type": "rss",
       "priority": "B",

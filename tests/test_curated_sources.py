@@ -10,6 +10,28 @@ from news_officer.podcast import load_youtube_sources
 
 
 class CuratedSourcesTests(unittest.TestCase):
+    def test_cheeky_pint_source_loads(self):
+        feeds_path = ROOT / "feeds.json"
+        sources = json.loads(feeds_path.read_text())["sources"]
+        configured = [source for source in sources if source["name"] == "Cheeky Pint"]
+        self.assertEqual(configured, [{
+            "name": "Cheeky Pint",
+            "type": "rss",
+            "priority": "A",
+            "url": "",
+            "rss_url": "https://cheekypint.substack.com/feed",
+            "enabled": True,
+        }])
+        self.assertIs(configured[0]["enabled"], True)
+
+        loaded = [source for source in load_youtube_sources(feeds_path)
+                  if source.name == "Cheeky Pint"]
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].source_type, "rss")
+        self.assertEqual(loaded[0].priority, "A")
+        self.assertEqual(loaded[0].url, "")
+        self.assertEqual(loaded[0].rss_url, "https://cheekypint.substack.com/feed")
+
     def test_curated_youtube_sources_load(self):
         expected = {
             "Anthropic": "UCrDwWp7EBBv4NwvScIpBDOA",
