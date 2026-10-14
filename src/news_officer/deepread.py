@@ -251,7 +251,7 @@ def validate_deepread(value, evidence):
         raise ValueError(
             f"Incomplete QA source coverage: {len(missing)} blocks missing: {missing[:20]}"
         )
-    qa = "\n".join([*names, *dialogue])
+    qa = normalize_proper_noun("\n".join([*names, *dialogue]))
     supported_nouns = []
     for noun in notes.proper_nouns:
         refs(noun.evidence_ids)
@@ -269,9 +269,13 @@ def validate_deepread(value, evidence):
         if (
             not re.search(r"[A-Za-z]", noun.canonical)
             or re.search(r"[\u3400-\u9fff]", noun.canonical)
-            or noun.canonical not in qa
         ):
             raise ValueError("English proper noun missing or translated in QA")
+        if normalize_proper_noun(noun.canonical) not in qa:
+            LOGGER.warning(
+                "Dropping proper noun %r missing from QA", noun.canonical
+            )
+            continue
         supported_nouns.append(noun)
     notes.proper_nouns = supported_nouns
     for correction in notes.corrections:
