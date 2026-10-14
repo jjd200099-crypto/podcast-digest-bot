@@ -819,7 +819,7 @@ class ResearchTools:
             raise ValueError("Invalid message")
         question = self.message.text if self.message else ''
         research_request = bool(re.search(
-            r'总结|摘要|文字稿|逐字稿|转录|'
+            r'总结|摘要|文字稿|逐字稿|转录|这期讲了什么|'
             r'\b(?:transcript|summari[sz]e|summary)\b', question, re.IGNORECASE))
         episode_citations = any(
             isinstance(citation, dict) and citation.get('id') in self.evidence
@@ -836,7 +836,7 @@ class ResearchTools:
         if fetch_question:
             if not self.fetch_status_checked:
                 raise ValueError('Call get_fetch_status before answering fetch/system status questions')
-            system = not self.task and not episode_citations
+            system = not self.task
         if system:
             value = {**value, 'message': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', value['message']),
                      'points': [{**p, 'text': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', p['text'])}

@@ -93,6 +93,28 @@ class OpsAnswersTests(LibraryFixture):
         self.state.execute('get_fetch_status', {})
         self.assertEqual(self.state.render(answer), answer['points'][0]['text'])
 
+    def test_text_and_web_failures_survive_current_feed_filter(self):
+        self.store.save_fetch_status(datetime.now(UTC).isoformat(), [
+            {'source_name': kind + ' source', 'url': f'https://example.test/{kind}',
+             'source_type': kind, 'status': 'failed', 'reason': 'offline'}
+            for kind in ('text', 'web')])
+        with patch.object(self.registry, 'list', return_value=[]):
+            result = self.state.execute('get_fetch_status', {})
+        self.assertEqual([r['source_type'] for r in result['failed_feeds']], ['text', 'web'])
+        self.assertTrue(all(r['reason'] == 'offline' for r in result['failed_feeds']))
+
+    def test_current_source_matches_name_or_url(self):
+        for name in ('', None):
+            with self.subTest(name=name):
+                source = {'name': name, 'url': 'https://example.test/channel',
+                          'rss_url': 'https://example.test/rss', 'type': 'rss'}
+                self.store.save_fetch_status(datetime.now(UTC).isoformat(), [{
+                    'source_name': source['name'] or source['url'], 'url': source['rss_url'],
+                    'source_type': 'rss', 'status': 'failed', 'reason': 'offline'}])
+                result = self.store.latest_fetch_status([source])
+                self.assertEqual(len(result['failed_feeds']), 1)
+                self.assertEqual(result['failed_feeds'][0]['source_name'], source['url'])
+
     def test_fetch_question_must_read_status(self):
         with self.assertRaisesRegex(ValueError, 'get_fetch_status'):
             self.state.render({'kind': 'answer', 'message': '', 'points': [
@@ -100,9 +122,14 @@ class OpsAnswersTests(LibraryFixture):
 
     def test_system_answer_never_renders_unrelated_episode_links(self):
         self.state.execute('get_fetch_status', {})
+        evidence = self.state.evidence_item('irrelevant', 'https://example.test/episode', 'Fei-Fei Li')
+        with self.assertRaisesRegex(ValueError, 'system tool evidence'):
+            self.state.render({'kind': 'answer', 'message': '', 'points': [
+                {'text': '尚无抓取记录，无法确认失败原因。', 'citations': [{'id': evidence['evidence_id']}]}]})
         status = self.state.execute('get_fetch_status', {})
         text = self.state.render({'kind': 'answer', 'message': '', 'points': [
             {'text': '尚无抓取记录，无法确认失败原因。', 'citations': [{'id': status['evidence_id']}]}]})
+        self.assertNotIn('Fei-Fei', text)
         self.assertNotIn('https://', text)
 
     def test_normal_fetch_and_rss_requests_keep_episode_rules_and_hex_text(self):

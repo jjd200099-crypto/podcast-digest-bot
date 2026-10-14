@@ -76,7 +76,8 @@ class Store:
         now = datetime.now(UTC)
         cutoff = (now - timedelta(days=3)).isoformat()
         configured = None if sources is None else {
-            (source["name"], source.get("rss_url") or source.get("url", ""))
+            (source.get("name") or source.get("url", ""),
+             source.get("rss_url") or source.get("url", ""))
             for source in sources
         }
         with self._connect() as db:
@@ -92,7 +93,8 @@ class Store:
             ) WHERE latest_rank=1 ORDER BY source_name, url""",
                               (cutoff, now.isoformat())).fetchall()
             if configured is not None:
-                rows = [r for r in rows if (r["source_name"], r["url"]) in configured]
+                rows = [r for r in rows if r["source_type"] in {"text", "web"}
+                        or (r["source_name"], r["url"]) in configured]
             return {'run_at': run['run_at'] if run else None,
                     'failed_feeds': [dict(r) for r in rows if r['status'] == 'failed'],
                     'recovered_feeds': [dict(r) for r in rows if r['status'] == 'ok' and r['reason']],
