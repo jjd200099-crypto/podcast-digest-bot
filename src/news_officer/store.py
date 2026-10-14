@@ -75,8 +75,13 @@ class Store:
     def latest_fetch_status(self) -> dict:
         with self._connect() as db:
             run = db.execute('SELECT run_at FROM feed_fetch_runs ORDER BY run_at DESC LIMIT 1').fetchone()
-            rows = db.execute('SELECT * FROM feed_fetch_status WHERE run_at=?',
-                              (run['run_at'],)).fetchall() if run else []
+            # A manual search may check only one source; retain the latest
+            # observation for each source across partial fetch rounds.
+            rows = db.execute("""SELECT run_at, source_name, url, source_type, status, reason FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY source_name, url ORDER BY run_at DESC, rowid DESC
+                ) AS latest_rank FROM feed_fetch_status
+            ) WHERE latest_rank=1 ORDER BY source_name, url""").fetchall()
             return {'run_at': run['run_at'] if run else None,
                     'failed_feeds': [dict(r) for r in rows if r['status'] == 'failed'],
                     'recovered_feeds': [dict(r) for r in rows if r['status'] == 'ok' and r['reason']],

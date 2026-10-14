@@ -57,11 +57,11 @@ class OpsAnswersTests(LibraryFixture):
             self.state.render({'kind': 'answer', 'message': '', 'points': [
                 {'text': '可能是网络问题。', 'citations': []}]})
 
-    def test_latest_empty_run_clears_old_failures(self):
+    def test_latest_empty_run_retains_unchecked_failures(self):
         self.store.save_fetch_status('2026-10-13', [{'source_name': 'Old', 'url': 'https://example.test',
                                                  'source_type': 'rss', 'status': 'failed', 'reason': 'HTTP 404'}])
         self.store.save_fetch_status('2026-10-14', [])
-        self.assertEqual(self.store.latest_fetch_status()['failed_feeds'], [])
+        self.assertEqual(len(self.store.latest_fetch_status()['failed_feeds']), 1)
         self.assertEqual(self.store.latest_fetch_status()['run_at'], '2026-10-14')
 
     def test_fetch_question_must_read_status(self):
@@ -82,7 +82,9 @@ class OpsAnswersTests(LibraryFixture):
         self.assertNotIn('https://', text)
 
     def test_normal_fetch_and_rss_requests_keep_episode_rules_and_hex_text(self):
-        for question in ('帮我抓取这期做详细版', '添加这个 RSS'):
+        for question in ('帮我抓取这期做详细版', '添加这个 RSS', '获取这期文字稿，成功的话总结一下',
+                         '抓取失败的话换个来源总结', 'RSS 状态如何，顺便给我这期文字稿',
+                         '系统状态怎么样？', '抓取成功了吗？', 'Summarize this episode and check fetch status'):
             with self.subTest(question=question):
                 state = ResearchTools(self.agent, self.message.conversation_key,
                                       replace(self.message, text=question))
@@ -96,10 +98,41 @@ class OpsAnswersTests(LibraryFixture):
                 self.assertIn('https://example.test/episode', text)
 
     def test_fetch_and_system_status_questions_require_status(self):
-        for question in ('RSS 状态正常吗？', '抓取成功了吗？', '系统状态怎么样？'):
+        for question in ('RSS 状态正常吗？', '抓取失败了吗？', '哪些 RSS 异常？', 'fetch status?', 'RSS获取失败是什么情况？'):
             self.state.message = replace(self.message, text=question)
             with self.subTest(question=question), self.assertRaisesRegex(ValueError, 'get_fetch_status'):
                 self.state.render({'kind': 'conversation', 'message': '目前正常。', 'points': []})
+
+    def test_status_tool_allows_mixed_reply_with_episode_citations(self):
+        # No research task is set: status-tool use alone must not lock the reply.
+        self.state.message = replace(self.message, text='RSS 状态如何？也说说这期讲了什么。')
+        status = self.state.execute('get_fetch_status', {})
+        episode = self.state.evidence_item('嘉宾讨论人工智能。', 'https://example.test/episode', '节目')
+        text = self.state.render({'kind': 'answer', 'message': '', 'points': [
+            {'text': '尚无抓取记录。', 'citations': [{'id': status['evidence_id']}]},
+            {'text': '嘉宾讨论人工智能。', 'citations': [{'id': episode['evidence_id']}]}]})
+        self.assertIn('https://example.test/episode', text)
+        self.assertIn('尚无抓取记录', text)
+
+    def test_partial_fetch_preserves_other_sources_and_replaces_recovered_source(self):
+        sources = [{'name': name, 'type': 'rss', 'rss_url': f'https://example.test/{name}'}
+                   for name in ('Lex', 'Other')]
+        for method in ('recent', 'search_episodes'):
+            with self.subTest(method=method), patch.object(self.registry, 'list', return_value=sources):
+                def fetch(name='', method=method):
+                    return (self.registry.recent(1, name=name) if method == 'recent'
+                            else self.registry.search_episodes('AI', show=name))
+
+                with patch('news_officer.source_registry.latest_rss_episodes', side_effect=RuntimeError('offline')):
+                    fetch()
+                with patch('news_officer.source_registry.latest_rss_episodes', return_value=[]):
+                    fetch('Lex')
+                failures = self.store.latest_fetch_status()['failed_feeds']
+                self.assertEqual([r['source_name'] for r in failures], ['Other'])
+                self.assertEqual(failures[0]['reason'], 'offline')
+                with patch('news_officer.source_registry.latest_rss_episodes', return_value=[]):
+                    fetch('Other')
+                self.assertEqual(self.store.latest_fetch_status()['failed_feeds'], [])
 
     def test_manual_fetch_failure_is_visible_to_status_tool(self):
         for fetch in (lambda: self.registry.recent(1), lambda: self.registry.search_episodes('AI')):
@@ -147,6 +180,16 @@ class YouTubeFallbackTests(YouTubeRSSTrackingTests):
             self.service(None).discover_daily_candidates()
         videos.assert_not_called()
         self.assertEqual(self.store.latest_fetch_status()['failed_feeds'], [])
+
+    def test_empty_youtube_fallback_remains_a_fetch_failure(self):
+        with patch('news_officer.podcast.latest_rss_episodes', side_effect=RuntimeError('HTTP 404')), \
+                patch('news_officer.podcast.latest_videos', return_value=[]), \
+                self.assertRaises(FeedDiscoveryError):
+            self.service(None).discover_daily_candidates()
+        status = self.store.latest_fetch_status()
+        self.assertEqual(len(status['failed_feeds']), 1)
+        self.assertIn('HTTP 404', status['failed_feeds'][0]['reason'])
+        self.assertEqual(status['recovered_feeds'], [])
 
     def test_both_failures_persist_before_discovery_error(self):
         with patch('news_officer.podcast.latest_rss_episodes', side_effect=RuntimeError('HTTP 404')), \

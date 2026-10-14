@@ -140,7 +140,7 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
 每轮结束前检查当前用户真正要求的交付是否完成。不要只说“我会检查/下面有几点：”就停止；冒号或标题后必须有实质内容。不要用道歉代替答案，不要声称已修复代码或保证永不出错。解释功能应结合真实工具，不许虚构操作能力。
 用户反馈“为什么截断/没回复/检查错误”时，先 get_request_status，再根据真实记录说明已确认的事实、无法确认的原因以及下一步。如果工具不支持某项新功能，帮助整理可执行需求并在用户明确提出需求时 record_feature_request，只说“我把这个建议记下来了，会由维护者评估”，不得声称已登记待开发，不给编号。权限限制只解释受限部分，继续完成能完成的部分。
 用户明确提出内容筛选或表达偏好时，可以 record_editorial_feedback 保存建议；分清个人建议与群级变更提议，明确仍待审阅，不能声称已训练或已改全群规则。单次对当前答案的“短一点”应先直接改写，不必把每次临时指令永久记录。用户问整份日报未送达或全文积压时先 get_delivery_health，不把系统在线等同于任务成功。
-系统问题（抓取失败或抓取/系统状态、发送状态、请求状态、功能建议、历史档案）用简短平实中文，总计约150字以内。抓取失败或抓取/系统状态问题必须先 get_fetch_status；普通抓取节目、添加 RSS 请求按原流程处理；只能说工具确认的原因，只能点名该工具返回的失败来源，不从对话中的名字推断，不罗列可能原因。系统 answer 的 citations 可为空或引用系统工具证据，不引用播客，也不写来源链接。功能建议只留给维护者评估，不承诺已登记开发，不输出内部编号。
+系统问题（抓取失败或抓取/系统状态、发送状态、请求状态、功能建议、历史档案）用简短平实中文，总计约150字以内。抓取失败或抓取/系统状态问题必须先 get_fetch_status；普通抓取节目、添加 RSS 请求按原流程处理；只能说工具确认的原因，只能点名该工具返回的失败来源，不从对话中的名字推断，不罗列可能原因。纯系统 answer 的 citations 可为空或引用系统工具证据，不引用播客，也不写来源链接。若同时请求总结、文字稿或节目内容，按研究流程回复；调用状态工具不影响节目引用。功能建议只留给维护者评估，不承诺已登记开发，不输出内部编号。
 重要边界：
 0. 用户说“今天的日报”“重发日报”“发一下日报”时，必须先 get_daily_digest(date=当天北京时间日期)。后端原样附上已归档的每期摘要、推荐理由和星级；不要用 recent_updates(days=1) 的发布目录代替日报，不要重写或压缩成总共十条。工具成功后用空 conversation 结束。只有用户另行问更新目录才 recent_updates。日报尚未生成时如实说明，不把它说成没有更新或没有全文。
 1. 查询“监听哪些播客”必须 list_sources；查询“过去一周更新什么”必须 recent_updates(days=7)，不能拿资料库替代全网/订阅源更新；失败来源必须披露。
@@ -817,16 +817,26 @@ class ResearchTools:
             or not isinstance(value["points"], list)
         ):
             raise ValueError("Invalid message")
-        system = getattr(self, 'system_answer', False) and not self.task
         question = self.message.text if self.message else ''
-        fetch_question = bool(re.search(
-            r'(?:RSS|抓取|获取|fetch).{0,16}(?:失败|故障|错误|状态|正常|成功|异常|failure|status)'
-            r'|(?:失败|故障|错误|状态|异常).{0,16}(?:RSS|抓取|fetch)'
-            r'|系统.{0,8}(?:状态|正常|异常|故障)', question, re.IGNORECASE))
+        research_request = bool(re.search(
+            r'总结|摘要|纪要|文字稿|逐字稿|转录|全文|内容|讲了什么|观点|重点|分析|整理|'
+            r'transcript|summari[sz]e|summary|episode\s+content', question, re.IGNORECASE))
+        episode_citations = any(
+            isinstance(citation, dict) and citation.get('id') in self.evidence
+            and citation.get('id') not in self.system_evidence
+            for point in value['points'] if isinstance(point, dict)
+            for citation in (point.get('citations', []) if isinstance(point.get('citations'), list) else [])
+        )
+        fetch_question = not research_request and bool(re.search(
+            r'(?:RSS|抓取|fetch).{0,16}(?:失败|故障|错误|状态|正常|异常|failure|status)'
+            r'|(?:失败|故障|错误|状态|异常).{0,16}(?:RSS|抓取|fetch)',
+            question, re.IGNORECASE))
+        system = (getattr(self, 'system_answer', False) and not self.task
+                  and not research_request and not episode_citations)
         if fetch_question:
             if not self.fetch_status_checked:
                 raise ValueError('Call get_fetch_status before answering fetch/system status questions')
-            system = True
+            system = not self.task
         if system:
             value = {**value, 'message': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', value['message']),
                      'points': [{**p, 'text': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', p['text'])}

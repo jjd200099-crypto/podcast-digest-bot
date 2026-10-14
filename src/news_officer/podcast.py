@@ -644,7 +644,8 @@ class PodcastService:
                                 f'https://www.youtube.com/channel/{channel_id}/videos',
                                 playlist_end=source.scan_depth)
                             youtube_episodes = [e for e in discovered_youtube if source.accepts(e)]
-                            channel_with_results += 1
+                            if discovered_youtube:
+                                channel_with_results += 1
                         except Exception as fallback_error:  # noqa: BLE001 - isolate source failures
                             errors.append(f"yt-dlp {fallback_error}")
                     logger.warning(
