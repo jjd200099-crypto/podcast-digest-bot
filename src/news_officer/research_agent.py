@@ -848,7 +848,7 @@ class ResearchTools:
             if self.fetch_status_checked:
                 allowed = {r['source_name'] for r in self.fetch_status_result['failed_feeds']}
                 for source in self.agent.registry.list():
-                    if (source['name'] in visible and source['name'] not in allowed
+                    if (source['name'] and source['name'] in visible and source['name'] not in allowed
                             and source.get('url') not in allowed):
                         raise ValueError('Only name failed sources returned by get_fetch_status')
             if re.search(r'可能(?:是|原因|由)|常见原因|原因包括|一般是', visible):

@@ -60,6 +60,17 @@ class OpsAnswersTests(LibraryFixture):
             self.state.render({'kind': 'answer', 'message': '', 'points': [
                 {'text': '可能是网络问题。', 'citations': []}]})
 
+    def test_empty_source_identifiers_do_not_claim_unconfirmed_failure(self):
+        self.state.execute('get_fetch_status', {})
+        self.assertEqual(self.state.fetch_status_result['failed_feeds'], [])
+        answer = {'kind': 'conversation', 'message': '尚无抓取记录，无法确认失败原因。',
+                  'points': []}
+        for name, url in (('', 'https://example.test/channel'), ('Actual Channel', ''),
+                          ('', '')):
+            with self.subTest(name=name, url=url), patch.object(
+                    self.registry, 'list', return_value=[{'name': name, 'url': url}]):
+                self.assertEqual(self.state.render(answer), answer['message'])
+
     def test_named_failed_source_can_match_name_or_url(self):
         source = {'name': 'Actual Channel', 'url': 'https://example.test/channel',
                   'type': 'web'}
