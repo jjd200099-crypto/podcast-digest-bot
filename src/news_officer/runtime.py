@@ -771,8 +771,9 @@ class NewsOfficerRuntime:
                 record_warning(self.store, job.key,
                     'daily_message_degraded' if len(probe) == 1 else 'daily_message_capacity_exceeded',
                     when.date().isoformat())
-                if len(probe) != 1:
+                if len(probe) != 1 and not v4:
                     raise ValueError('Daily edition exceeds single-message capacity')
+                # Interactive editions retain the exceptional overflow fallback.
             elif probe[0][0] == 'text':
                 record_warning(self.store, job.key, 'daily_message_plaintext_fallback',
                                when.date().isoformat())
@@ -782,7 +783,7 @@ class NewsOfficerRuntime:
             key = f"{job.key}:{group}:{target_type}:{target_id}"
             parts = (reader_delivery(markdown, key, title=f'🎧 播客精选 · {when:%Y-%m-%d}')
                      if reader_mode else combined_delivery_parts(markdown, key))
-            if reader_mode and len(parts) != 1:
+            if reader_mode and len(parts) != 1 and not v4:
                 raise ValueError('Daily edition exceeds single-message capacity')
             deliveries.append({"key": key, "target_type": target_type, "target_id": target_id,
                                "parts": parts})

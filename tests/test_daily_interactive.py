@@ -34,14 +34,10 @@ class InteractiveCardTests(unittest.TestCase):
         text = elements[1]['content']
         self.assertIn('【Show｜Mike｜AI 成本取决于任务】', text)
         self.assertIn('- 要点总结：\n    1.', text)
-        self.assertIn('模型。\n\n    2.', text)
+        self.assertIn('模型。\n    2.', text)
         self.assertIn('- [精读和完整中文对谈](https://example.com/doc)', text)
         self.assertIn('- [收听节目](', text)
         self.assertNotIn('重做版', content)
-
-    def test_capacity_never_splits_or_changes_message_type(self):
-        with self.assertRaisesRegex(ValueError, 'capacity'):
-            daily_card_delivery_parts('文' * 30000, 'daily:test', title='x')
 
     def test_opaque_readback_cannot_authorize_overwriting_human_edits(self):
         with self.assertRaises(LibraryError):

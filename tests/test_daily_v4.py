@@ -43,12 +43,12 @@ class DailyV4Tests(unittest.TestCase):
     def test_new_structure_and_short_links(self):
         item = DailyItem(EPISODE, 'summarized', V4)
         text = reader_episode_v4(item, 1, 'https://example.com/doc')
-        self.assertIn('**1. 【Show｜AI 成本取决于任务】**', text)
+        self.assertIn('**1. 【Show｜嘉宾未注明｜AI 成本取决于任务】**', text)
         self.assertNotIn('Very long original', text)
         self.assertIn('- 简介：Mike', text)
         self.assertIn('- 优先级/阅读建议：值得看全文，', text)
         self.assertIn('    1. 成本取决于任务。Mike 认为', text)
-        self.assertIn('模型。\n\n    2. ', text)
+        self.assertIn('模型。\n    2. ', text)
         self.assertIn('[精读和完整中文对谈](https://example.com/doc)', text)
         self.assertIn(f'[收听节目]({EPISODE.url})', text)
         self.assertEqual(item.message, V4)
@@ -69,7 +69,7 @@ class DailyV4Tests(unittest.TestCase):
         for title in ('Show｜AI 成本取决于任务', 'Show｜Show｜AI 成本取决于任务'):
             text = reader_episode_v4(DailyItem(episode, 'summarized',
                 V4.replace('Show｜AI 成本取决于任务', title)), 1)
-            self.assertEqual(text.splitlines()[0], '**1. 【Show｜AI 成本取决于任务】**')
+            self.assertEqual(text.splitlines()[0], '**1. 【Show｜嘉宾未注明｜AI 成本取决于任务】**')
 
     def test_legacy_paragraphs_and_bullets_do_not_manufacture_v4_fields(self):
         for old in (VALID_SUMMARY, LEGACY_SUMMARY):
@@ -171,6 +171,25 @@ class DailyV4RuntimeTests(unittest.IsolatedAsyncioTestCase):
     setUp = fixtures.CombinedDailyTests.setUp
     tearDown = fixtures.CombinedDailyTests.tearDown
     item = fixtures.CombinedDailyTests.item
+
+    async def test_indivisible_oversized_v4_day_still_delivers_safe_parts(self):
+        from news_officer.feishu import encoded_message_payload
+        item = self.item('huge', 4)
+        instance, job, podcast = fixtures.CombinedDailyTests.setup_job(self, [item])
+        podcast.build_pending = Mock(return_value=[])
+        instance.settings.daily_reader_mode = True
+        instance.settings.daily_layout = 'v4'
+        section = ('**1. 【Show｜Guest｜Topic】**\n\n' + '核心判断' * 20000
+                   + '\n- [收听节目](https://example.test/huge)')
+        with patch('news_officer.daily_report.reader_episode_v4', return_value=section):
+            await instance._handle_daily_job(job)
+        self.assertGreater(len(self.messenger.attempts), 1)
+        self.assertTrue(all(part.msg_type == 'text' for part in self.messenger.attempts))
+        for part in self.messenger.attempts:
+            self.assertLessEqual(len(encoded_message_payload({
+                'receive_id': 'x' * 128, 'msg_type': part.msg_type,
+                'content': part.content, 'uuid': part.uuid})), 145_000)
+        self.assertIn('https://example.test/huge', self.messenger.attempts[-1].content)
 
     async def test_production_freeze_enrichment_and_retry(self):
         items = [self.item('one', 4), self.item('two', 3)]

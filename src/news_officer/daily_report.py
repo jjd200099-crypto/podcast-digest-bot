@@ -473,7 +473,7 @@ def compact_reader_episode(content: str, level: int, listening_url: str) -> str:
             if sentence:
                 summary = sentence.group(0)
         result = '\n\n'.join([*heading, summary, *dict.fromkeys(links)])
-    if listening_url not in result:
+    if listening_url and listening_url not in result:
         result += f'\n\n[收听节目]({listening_url})'
     return result
 
@@ -497,13 +497,26 @@ def reader_episode_v4(item, number, document_url='', *, source_text=''):
                   if line.startswith('## ') and line != '## 内容解读'), '')
     if not title and lines and lines[0].strip('*').startswith('【'):
         title = lines[0].strip('*【】')
-    # Prefer the short model prefix to the verbose RSS brand string.
-    parts = re.split(r'[｜|]', title, maxsplit=1)
-    show = parts[0].strip() if len(parts) == 2 else re.split(r'[｜|:：–—]', item.episode.show, maxsplit=1)[0].strip()
-    title = parts[1].strip() if len(parts) == 2 else title
-    while title.startswith((show + '｜', show + '|')):
-        title = title[len(show) + 1:].strip()
-    title = title or '本期讨论'
+    # Accept only three nonempty title parts. Archived two-part titles may
+    # identify either the show or the guest; do not guess a person's name.
+    parts = [part.strip() for part in re.split(r'[｜|]', title)]
+    show = item.episode.show.strip() or '未知节目'
+    if len(parts) == 3 and all(parts):
+        show, guest, topic = parts
+        if guest == show:
+            guest = '嘉宾未注明'
+    elif len(parts) == 2 and all(parts):
+        if parts[0] == show or parts[0] == re.split(r'[｜|:：–—]', show)[0].strip():
+            show, topic = parts
+            guest = '嘉宾未注明'
+        else:
+            guest, topic = parts
+    else:
+        guest = '嘉宾未注明'
+        topic = ' / '.join(part for part in parts if part) or item.episode.title or '本期讨论'
+    show = re.sub(r'[｜|]', ' / ', show)
+    topic = re.sub(r'[｜|]', ' / ', topic)
+    title = f'{guest}｜{topic}'
     heading = f'**{number}. 【{show}｜{title}】**'
     from .summarizer import _valid_v4_summary
     if not _valid_v4_summary(item.message):
@@ -538,7 +551,7 @@ def reader_episode_v4(item, number, document_url='', *, source_text=''):
         points = [intro]
     fields = [f'**{number}. 【{show}｜{title}】**', '', f'- 简介：{intro}',
               '- 优先级/阅读建议：' + '，'.join(v for v in (advice, reason) if v),
-              '- 要点总结：', '\n\n'.join(f'    {i}. {point}' for i, point in enumerate(points, 1))]
+              '- 要点总结：', '\n'.join(f'    {i}. {point}' for i, point in enumerate(points, 1))]
     if document_url:
         fields.append(f'[精读和完整中文对谈]({document_url})')
     fields.append(f'[收听节目]({item.episode.url})')
