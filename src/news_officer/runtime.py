@@ -614,7 +614,9 @@ class NewsOfficerRuntime:
         from .daily_report import (
             episode_summary,
             reader_episode,
+            reader_episode_v4,
             render_daily_summary,
+            v4_layout_enabled,
         )
 
         items = self._persisted_daily_items(job)
@@ -696,19 +698,21 @@ class NewsOfficerRuntime:
                 strict_selection_enabled,
             )
             sections, eligible = [], []
-            for item in summaries:
+            v4 = v4_layout_enabled(getattr(settings, 'daily_layout', 'compact'))
+            for number, item in enumerate(summaries, 1):
                 compact = getattr(settings, 'daily_compact_paragraphs', False)
                 rewriter = getattr(self.podcast_service, 'summarizer', None) if compact else None
                 if not callable(getattr(rewriter, 'rewrite_paragraphs', None)):
                     rewriter = None
-                content = reader_episode(episode_summary(item, compact=compact), rewriter=rewriter, compact=compact)
+                content = (reader_episode_v4(item, number) if v4 else
+                           reader_episode(episode_summary(item, compact=compact), rewriter=rewriter, compact=compact))
                 strict = strict_selection_enabled()
                 allowed = (stars(item.message) >= getattr(getattr(self, 'document_compiler', None), 'min_stars', 4)
                            and (not strict or strict_document_allowed(item.message)))
-                if strict:
+                if strict or v4:
                     template = content
                     if allowed:
-                        label = '精读和完整中文对谈' if getattr(settings, 'daily_document_fulltext', False) else '精读'
+                        label = '精读和完整中文对谈' if v4 or getattr(settings, 'daily_document_fulltext', False) else '精读'
                         lines = content.splitlines()
                         index = next((i for i, line in enumerate(lines) if line.startswith('[收听节目](')), len(lines))
                         prose = '\n'.join(lines[:index]).rstrip()
@@ -731,6 +735,10 @@ class NewsOfficerRuntime:
                 sections.append(section)
                 if allowed:
                     eligible.append(item.episode.id)
+                if v4 and number > 1:
+                    content = '━━━━━━━━━━━━━━━━━━━━\n\n' + content
+                    template = '━━━━━━━━━━━━━━━━━━━━\n\n' + template
+                    section.update(body=content, template=template)
                 blocks.append(content)
             if not summaries:
                 blocks.append('今天暂无可推送的播客摘要。')

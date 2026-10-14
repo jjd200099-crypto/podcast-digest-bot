@@ -13,7 +13,7 @@ from .daily_report import render_reader_daily
 from .models import DailyItem
 
 
-def render_preview(db_path, day, *, compact=False):
+def render_preview(db_path, day, *, compact=False, layout="compact"):
     requested = date.fromisoformat(day)
     items, documents = {}, {}
     uri = Path(db_path).resolve().as_uri() + '?mode=ro'
@@ -41,7 +41,7 @@ def render_preview(db_path, day, *, compact=False):
                     items[item.episode.id] = item
             for document in result.get('documents', []):
                 documents[document.get('episode_id') or document['title']] = document
-    return render_reader_daily(list(items.values()), list(documents.values()), compact=compact) or f'{day} 暂无已归档摘要。'
+    return render_reader_daily(list(items.values()), list(documents.values()), compact=compact, layout=layout) or f'{day} 暂无已归档摘要。'
 
 
 def main(argv=None):
@@ -51,7 +51,8 @@ def main(argv=None):
     parser.add_argument('--db', default=os.environ.get('NEWS_OFFICER_DB_PATH', '/data/news-officer.sqlite3'))
     args = parser.parse_args(argv)
     compact = os.environ.get('NEWS_OFFICER_DAILY_COMPACT_PARAGRAPHS', '').lower() in {'1', 'true', 'yes', 'on'}
-    print(render_preview(args.db, args.date, compact=compact))
+    print(render_preview(args.db, args.date, compact=compact,
+                         layout=os.environ.get("NEWS_OFFICER_DAILY_LAYOUT", "v4")))
 
 
 if __name__ == '__main__':
