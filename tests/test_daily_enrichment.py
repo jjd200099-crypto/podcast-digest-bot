@@ -9,12 +9,14 @@ import test_reader_daily as fixtures
 
 from news_officer.daily_enrichment import (
     _content,
+    _update_target,
     document_recovery_jobs,
     enqueue_enrichment,
     enrichment_bundle,
     normalized_content,
     update_daily_message,
 )
+from news_officer.feishu import daily_card_delivery_parts
 from news_officer.library import LibraryError
 
 
@@ -77,6 +79,56 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
                                 'title': episode}], 'targets': targets, 'notify': True}
         self.store.save_job_result(base, 'daily:document:' + episode, 'daily_document_ready', value)
         return value
+
+    async def interactive_bundle(self, body='Summary.'):
+        _, base = await self.prepare()
+        bundle = enrichment_bundle(self.store, base.key)
+        bundle['enrichment'].update({
+            'format': 'interactive', 'prefix': [], 'title': 'Daily',
+            'sections': [{'episode_id': 'one', 'body': body,
+                          'template': body + '\n\n[精读](' +
+                          'https://document.invalid/DAILY_DOCUMENT_LINK' + ')',
+                          'strict_document_allowed': True}]})
+        delivery = bundle['deliveries'][0]
+        delivery['parts'] = daily_card_delivery_parts(body, delivery['key'], title='Daily',
+                                                      allow_compaction=False)
+        self.original = delivery['parts'][0][1]
+        with self.store._connect() as db:
+            db.execute("UPDATE outbox SET msg_type='interactive',content=? WHERE job_key=?",
+                       (self.original, base.key))
+            rows = db.execute('SELECT * FROM outbox WHERE job_key=?', (base.key,)).fetchall()
+        self.api = MessageAPI(rows)
+        return base, bundle, delivery
+
+    async def test_oversize_interactive_enrichment_raises_logs_and_never_edits(self):
+        body = 'Summary.\n\n推荐理由：' + '可选内容' * 2200
+        base, bundle, delivery = await self.interactive_bundle(body)
+        for mode in ('compressed', 'degraded'):
+            with self.subTest(mode=mode):
+                url = 'https://www.feishu.cn/docx/' + 'x' * (30_000 if mode == 'degraded' else 3000)
+                template = bundle['enrichment']['sections'][0]['template']
+                rendered = daily_card_delivery_parts(
+                    template.replace('https://document.invalid/DAILY_DOCUMENT_LINK', url),
+                    delivery['key'], title='Daily')
+                self.assertEqual(rendered[0][0], 'interactive' if mode == 'compressed' else 'text')
+                ready = [{'documents': [{'episode_id': 'one', 'url': url}],
+                          'targets': [[delivery['target_type'], delivery['target_id']]]}]
+                with (self.assertLogs('news_officer.daily_enrichment', level='ERROR') as logs,
+                      self.assertRaises(LibraryError)):
+                    _update_target(self.store, self.api, base.key, bundle, ready, delivery, None)
+                self.assertIn('29000 bytes', logs.output[0])
+                self.assertEqual(self.api.puts, [])
+                self.assertEqual(self.api.messages['om_original']['body']['content'], self.original)
+                self.assertEqual(self.store.list_job_results(base.key, 'daily_edit_intent'), [])
+
+    async def test_normal_interactive_enrichment_edits_full_card(self):
+        base, bundle, delivery = await self.interactive_bundle()
+        ready = [self.ready(base.key, 'one')]
+        _update_target(self.store, self.api, base.key, bundle, ready, delivery, None)
+        self.assertEqual(len(self.api.puts), 1)
+        self.assertIn('Summary.', self.api.puts[0]['content'])
+        self.assertIn('https://www.feishu.cn/docx/one', self.api.puts[0]['content'])
+        self.assertEqual(len(self.store.list_job_results(base.key, 'daily_edit_receipt')), 1)
 
     async def test_enrichment_only_edits_original_with_ready_documents(self):
         _, base = await self.prepare()
