@@ -1038,7 +1038,7 @@ class NewsOfficerRuntime:
         work = asyncio.create_task(asyncio.to_thread(plugin.handle, text, incoming))
         try:
             done, _ = await asyncio.wait({work}, timeout=getattr(getattr(self, 'settings', None), 'progress_delay_seconds', 8))
-            if not done and plugin.acknowledgement(text) is None:
+            if not done and not work.done() and plugin.acknowledgement(text) is None:
                 try:
                     await asyncio.to_thread(self._ensure_reply, job, 'message:progress',
                         '这条请求仍在处理中，完成后会在这里回复；不需要重复发送。',
@@ -1046,7 +1046,17 @@ class NewsOfficerRuntime:
                     await self._drain_outbox(job)
                 except Exception as error:  # noqa: BLE001 - preserve running analysis and retry delivery
                     logger.warning('Progress notice deferred: %s', type(error).__name__)
-            return await work
+            result = await work
+            receipts = await asyncio.to_thread(self.store.retire_progress, job.key)
+            recall = getattr(self.messenger, 'delete_message', None)
+            if callable(recall):
+                for receipt in receipts:
+                    try:
+                        await asyncio.to_thread(recall, receipt)
+                        await asyncio.to_thread(self.store.mark_progress_recalled, job.key, receipt)
+                    except Exception as error:  # noqa: BLE001 - final answer must still arrive
+                        logger.warning('Progress recall failed: %s', type(error).__name__)
+            return result
         finally:
             # Do not start a second tool loop after a progress-send failure.
             # Shutdown is handled by the process supervisor and durable jobs.

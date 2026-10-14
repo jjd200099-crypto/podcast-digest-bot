@@ -173,6 +173,7 @@ class YouTubeFeedSource:
     name: str = ""
     rss_url: str = ""
     priority: str = "B"
+    source_type: str = "youtube"
 
     def accepts(self, episode: Episode) -> bool:
         if youtube_skip_reason(episode):
@@ -222,6 +223,7 @@ def load_youtube_sources(path: Path) -> list[YouTubeFeedSource]:
                     name=str(source.get("name") or ""),
                     rss_url=str(source.get("rss_url") or ""),
                     priority=priority,
+                    source_type=source["type"],
                 )
             )
     return sources
@@ -583,11 +585,13 @@ class PodcastService:
         cutoff = now.astimezone(UTC) - timedelta(hours=self.lookback_hours)
         groups_by_priority: dict[str, list[list[Episode]]] = {"A": [], "B": []}
         failed_sources: list[str] = []
+        fetch_statuses = []
         sources = load_youtube_sources(self.feeds_path)
         if self.source_registry is not None:
             sources.extend(YouTubeFeedSource(
                 url=s.get("url", ""), name=s["name"], rss_url=s.get("rss_url", ""),
                 scan_depth=s.get("scan_depth", 30), priority=s.get("priority", "B"),
+                source_type=s.get("type", "rss"),
             ) for s in self.source_registry.list() if s.get("origin") == "conversation")
         if self.daily_rss_only:
             sources = [source for source in sources if source.rss_url]
@@ -595,6 +599,8 @@ class PodcastService:
             youtube_episodes: list[Episode] = []
             rss_episodes: list[Episode] = []
             channel_with_results = 0
+            errors = []
+            youtube_feed = bool(re.match(r"https?://(?:www\.)?youtube\.com/feeds/videos\.xml\?channel_id=", source.rss_url))
             if source.url and not self.daily_rss_only:
                 try:
                     discovered_youtube = latest_videos(
@@ -608,6 +614,7 @@ class PodcastService:
                         if source.accepts(episode)
                     ]
                 except Exception as error:  # noqa: BLE001 - isolate source failures
+                    errors.append(f"yt-dlp {error}")
                     logger.warning(
                         "Optional YouTube discovery failed for %s: %s",
                         source.name or source.url,
@@ -627,13 +634,23 @@ class PodcastService:
                         if source.accepts(episode)
                     ]
                 except Exception as error:  # noqa: BLE001 - isolate source failures
+                    response = getattr(error, 'response', None)
+                    reason = f"HTTP {response.status_code}" if response is not None else str(error)
+                    errors.append(f"YouTube channel RSS {reason}" if youtube_feed else reason)
+                    if self.daily_rss_only and youtube_feed:
+                        try:
+                            discovered_youtube = latest_videos(source.url, playlist_end=source.scan_depth)
+                            youtube_episodes = [e for e in discovered_youtube if source.accepts(e)]
+                            channel_with_results += 1
+                        except Exception as fallback_error:  # noqa: BLE001 - isolate source failures
+                            errors.append(f"yt-dlp {fallback_error}")
                     logger.warning(
                         "RSS discovery failed for %s: %s",
                         source.name or source.rss_url,
                         error,
                     )
             if self.daily_rss_only:
-                source_episodes = rss_episodes
+                source_episodes = rss_episodes or youtube_episodes
             elif rss_episodes:
                 source_episodes = _rss_with_unmatched_youtube(
                     rss_episodes, youtube_episodes
@@ -655,6 +672,11 @@ class PodcastService:
                         for episode in source_episodes
                     ]
                 )
+            fetch_statuses.append({'source_name': source.name or source.url,
+                                   'url': source.rss_url or source.url,
+                                   'source_type': source.source_type,
+                                   'status': 'ok' if channel_with_results else 'failed',
+                                   'reason': '; '.join(errors) or ('' if channel_with_results else 'No usable feed returned')})
             if channel_with_results == 0:
                 failed_sources.append(
                     source.name or source.rss_url or source.url
@@ -668,6 +690,7 @@ class PodcastService:
         if text_sources_enabled():
             for source in load_text_sources(self.feeds_path):
                 text_source_count += 1
+                text_error = ""
                 try:
                     articles = discover_articles(source, raise_on_error=True)
                     eligible_articles = []
@@ -682,9 +705,15 @@ class PodcastService:
                     groups_by_priority[priority if priority in {'A', 'B'} else 'B'].append(
                         eligible_articles)
                 except Exception as error:  # noqa: BLE001 - isolate text source failures
+                    text_error = str(error)
                     failed_sources.append(source['name'])
                     logger.warning('Text discovery failed for %s: %s', source['name'], error)
 
+                fetch_statuses.append({'source_name': source['name'], 'url': source.get('url', ''),
+                                       'source_type': source.get('type', 'text'),
+                                       'status': 'failed' if text_error else 'ok', 'reason': text_error})
+
+        self.store.save_fetch_status(datetime.now(UTC).isoformat(), fetch_statuses)
         new_groups: dict[str, list[list[Episode]]] = {"A": [], "B": []}
         self._discovery_notice = ''
         self._discovery_failed = False

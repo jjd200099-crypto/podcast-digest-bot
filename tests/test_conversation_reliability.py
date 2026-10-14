@@ -127,6 +127,58 @@ class ConcurrentSessionsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(progress), 1)
             self.assertIn('仍在处理中', json.dumps(json.loads(progress[0][0]), ensure_ascii=False))
 
+    async def test_fast_answer_has_no_progress_message(self):
+        class Plugin(FakePlugin):
+            def acknowledgement(self, text):
+                return None
+
+        messenger = FakeMessenger()
+        instance = runtime(self.store, messenger, SequencePodcast([]), Plugin())
+        instance.settings = SimpleNamespace(progress_delay_seconds=0.1)
+        self.enqueue('quick')
+        await instance._handle_message_job(self.store.claim_next('message'))
+        with self.store._connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox WHERE group_key='message:progress'").fetchone()[0], 0)
+
+    async def test_slow_progress_recalled_and_not_duplicated_on_retry(self):
+        release = threading.Event()
+
+        class Plugin(FakePlugin):
+            def acknowledgement(self, text):
+                return None
+
+            def handle(self, text, message):
+                release.wait(2)
+                return super().handle(text, message)
+
+        messenger = FakeMessenger()
+        recalled = []
+        messenger.delete_message = recalled.append
+        original = messenger.deliver
+
+        def deliver(item):
+            original(item)
+            return 'progress-id' if item.group_key == 'message:progress' else 'answer-id'
+
+        messenger.deliver = deliver
+        plugin = Plugin()
+        instance = runtime(self.store, messenger, SequencePodcast([]), plugin)
+        instance.settings = SimpleNamespace(progress_delay_seconds=0.01)
+        self.enqueue('slow-retry')
+        job = self.store.claim_next('message')
+        incoming = IncomingMessage('slow-retry', 'team', 'hello', 'group', 'alice')
+        for _ in range(2):
+            release.clear()
+            work = asyncio.create_task(instance._invoke_with_progress(job, plugin, 'hello', incoming))
+            try:
+                await asyncio.sleep(0.06)
+            finally:
+                release.set()
+                await work
+        with self.store._connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox WHERE group_key='message:progress'").fetchone()[0], 1)
+        self.assertIn('progress-id', recalled)
+
     def test_restart_preserves_session_order(self):
         self.enqueue('a1')
         self.enqueue('a2')

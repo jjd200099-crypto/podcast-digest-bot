@@ -52,12 +52,48 @@ class Store:
         finally:
             connection.close()
 
+    def save_fetch_status(self, run_at: str, statuses: list[dict]) -> None:
+        with self._connect() as db:
+            db.execute('INSERT INTO feed_fetch_runs VALUES (?)', (run_at,))
+            db.executemany('INSERT INTO feed_fetch_status VALUES (?, ?, ?, ?, ?, ?)',
+                           [(run_at, r['source_name'], r['url'], r['source_type'],
+                             r['status'], r['reason']) for r in statuses])
+
+    def retire_progress(self, job_key: str) -> list[str]:
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET status='cancelled' WHERE job_key=? "
+                       "AND group_key='message:progress' AND status='pending'", (job_key,))
+            return [r[0] for r in db.execute("SELECT remote_message_id FROM outbox WHERE job_key=? "
+                                            "AND group_key='message:progress' AND status='sent' "
+                                            "AND remote_message_id != ''", (job_key,))]
+
+    def mark_progress_recalled(self, job_key: str, message_id: str) -> None:
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET remote_message_id='' WHERE job_key=? "
+                       "AND group_key='message:progress' AND remote_message_id=?", (job_key, message_id))
+
+    def latest_fetch_status(self) -> dict:
+        with self._connect() as db:
+            run = db.execute('SELECT run_at FROM feed_fetch_runs ORDER BY run_at DESC LIMIT 1').fetchone()
+            rows = db.execute('SELECT * FROM feed_fetch_status WHERE run_at=?',
+                              (run['run_at'],)).fetchall() if run else []
+            return {'run_at': run['run_at'] if run else None,
+                    'failed_feeds': [dict(r) for r in rows if r['status'] == 'failed'],
+                    'recovered_feeds': [dict(r) for r in rows if r['status'] == 'ok' and r['reason']],
+                    'archived_transcripts': db.execute('SELECT COUNT(*) FROM episode_transcripts').fetchone()[0],
+                    'archived_episodes': db.execute('SELECT COUNT(*) FROM episodes').fetchone()[0]}
+
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS feed_fetch_runs (run_at TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS feed_fetch_status (
+                    run_at TEXT NOT NULL, source_name TEXT NOT NULL, url TEXT NOT NULL,
+                    source_type TEXT NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS feed_fetch_status_run_idx ON feed_fetch_status(run_at);
                 CREATE TABLE IF NOT EXISTS episode_document_attempts (
                     episode_id TEXT NOT NULL, revision TEXT NOT NULL, day TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',

@@ -46,11 +46,12 @@ def function(name, description, **properties):
 STRING = {"type": "string"}
 INTEGER = {"type": "integer"}
 TOOLS = [
+    function("get_fetch_status", "读取最近抓取的真实失败来源、类型、原因及历史节目和全文数量。RSS、抓取、历史数据库问题必须先查此工具。"),
     function("get_delivery_health", "读取早报实际发送状态、全文积压和失败任务数量。用户问日报为什么没到、只收到几期时先查；不是连接正常就代表日报成功，不含他人的聊天内容。"),
     function("record_editorial_feedback", "保存用户明确提出的内容或表达偏好，供维护者审阅。scope=personal 为个人建议，scope=group 为群级变更提议；两者均先登记，不自动修改全群规则或模型。", feedback=STRING,
              scope={"type": "string", "enum": ["personal", "group"]}),
     function("get_request_status", "读取当前用户当前会话的真实处理记录、交付状态和未完成回答检测。用户要求检查错误、不回复或截断时必须先查，不能只道歉或猜系统故障。"),
-    function("record_feature_request", "记录用户明确提出的新功能需求，返回持久化需求编号。仅登记待开发，不代表实现或上线，也不改变权限。", summary=STRING),
+    function("record_feature_request", "把用户建议留给维护者评估。不返回内部编号，不承诺开发。", summary=STRING),
     function(
         "set_research_task",
         "确定本轮研究交付：把补充的人名/指代与上一轮要求合并成完整 goal；document_ids 用目录/引用上下文的真实编号。详细版选 detailed，必须逐页读完所选全文。只记录当前研究任务，不修改订阅。",
@@ -137,8 +138,9 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
 用户要求某期播客‘重点总结’‘详细版’‘做纪要’或生成文档时，先自主定位并取得完整文字稿，再调用 create_episode_document(reference=真实档案编号)。用户接着补充人名或‘这篇’时，要结合 previous_task 和 quoted_message 延续这一交付目标。没有全文就先 analyze_podcast；没有唯一匹配就先调查。工具成功后用空 conversation 结束，后端会显示受理状态并在文档真正完成后回复链接；不要把排队或开始编译说成已经生成文档，也不要同时在聊天里发一整篇长纪要。只问某个观点的一般追问仍直接回答，不必每轮建文档。若用户明确说不要文档、只在聊天里回答，服从当前请求。美元金额统一用 $ 前缀。默认不附完整文字稿。
 你也可以回答一般知识、解释概念、帮用户改写和规划；这些普通对话不要求播客引用，用 conversation.message 写完整答案（允许多段和列表）。只有归因于具体播客的观点才必须读取原文并使用 answer 引用，不能把“必须有播客全文”错误套到所有请求上。涉及最新事实而工具无法核实的部分明确区分，不猜测。
 每轮结束前检查当前用户真正要求的交付是否完成。不要只说“我会检查/下面有几点：”就停止；冒号或标题后必须有实质内容。不要用道歉代替答案，不要声称已修复代码或保证永不出错。解释功能应结合真实工具，不许虚构操作能力。
-用户反馈“为什么截断/没回复/检查错误”时，先 get_request_status，再根据真实记录说明已确认的事实、无法确认的原因以及下一步。如果工具不支持某项新功能，帮助整理可执行需求并在用户明确提出需求时 record_feature_request，清楚区分“已记录待开发”和“已完成上线”。权限限制只解释受限部分，继续完成能完成的部分。
+用户反馈“为什么截断/没回复/检查错误”时，先 get_request_status，再根据真实记录说明已确认的事实、无法确认的原因以及下一步。如果工具不支持某项新功能，帮助整理可执行需求并在用户明确提出需求时 record_feature_request，只说“我把这个建议记下来了，会由维护者评估”，不得声称已登记待开发，不给编号。权限限制只解释受限部分，继续完成能完成的部分。
 用户明确提出内容筛选或表达偏好时，可以 record_editorial_feedback 保存建议；分清个人建议与群级变更提议，明确仍待审阅，不能声称已训练或已改全群规则。单次对当前答案的“短一点”应先直接改写，不必把每次临时指令永久记录。用户问整份日报未送达或全文积压时先 get_delivery_health，不把系统在线等同于任务成功。
+系统问题（RSS/抓取、发送状态、请求状态、功能建议、历史档案）用简短平实中文，总计约150字以内。RSS/抓取/档案问题必须先 get_fetch_status；只能说工具确认的原因，只能点名该工具返回的失败来源，不从对话中的名字推断，不罗列可能原因。系统 answer 的 citations 可为空或引用系统工具证据，不引用播客，也不写来源链接。功能建议只留给维护者评估，不承诺已登记开发，不输出内部编号。
 重要边界：
 0. 用户说“今天的日报”“重发日报”“发一下日报”时，必须先 get_daily_digest(date=当天北京时间日期)。后端原样附上已归档的每期摘要、推荐理由和星级；不要用 recent_updates(days=1) 的发布目录代替日报，不要重写或压缩成总共十条。工具成功后用空 conversation 结束。只有用户另行问更新目录才 recent_updates。日报尚未生成时如实说明，不把它说成没有更新或没有全文。
 1. 查询“监听哪些播客”必须 list_sources；查询“过去一周更新什么”必须 recent_updates(days=7)，不能拿资料库替代全网/订阅源更新；失败来源必须披露。
@@ -151,7 +153,7 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
    用户要求研究新节目时，先查 recent_updates，再自行选取返回的单期链接 analyze_podcast，不要让用户重复复制已查到的链接。可以连续调用多个工具，但未取得全文不能把标题当内容。
 7. 最终只输出 JSON：{"kind":"answer"或"conversation","message":"简短说明/澄清/寒暄","points":[{"text":"中文正文段落，可含 Markdown 主题标题和子话题","citations":[{"id":"工具实际返回的 evidence_id"}]}]}。
 默认只提供摘要、推荐理由、星级和收听链接，不主动调用 get_transcript 或附送全文。只有用户明确索取文字稿附件时才调用 get_transcript。
-answer 时 message 必须为空，所有可见正文（包括“已添加成功”等操作结果）放进 points，每段必须有至少一个有效引用。只用本轮实际看到的 evidence_id；不能引用未读段落。引用是已核验原文的段落编号，不需要抄写原句。正文用自己的话归纳，避免长篇复述或大段引用。引用对应的正文必须真正支持本段观点，不能只靠标题或人名。
+answer 时 message 必须为空，所有可见正文（包括“已添加成功”等操作结果）放进 points，播客内容每段必须有至少一个有效引用；系统问题允许空 citations。只用本轮实际看到的 evidence_id；不能引用未读段落。引用是已核验原文的段落编号，不需要抄写原句。正文用自己的话归纳，避免长篇复述或大段引用。引用对应的正文必须真正支持本段观点，不能只靠标题或人名。
 points.text 不要手写来源链接；每段仍填写 citations 供内部核验，后端会将所有来源去重后统一放在回复末尾。同一期的链接不要反复展示。
 conversation 用于一般问题、改写、寒暄、诊断、真正缺少信息时的澄清、请求确认和解释限制；完整回答都放 message，points 为空，不可夹带没有证据的节目内容。来源清单用 answer，由工具元数据支持。
 输出深度服从当前研究任务，不把日报模板套进交互问答。brief 最多12段，每段400字以内。detailed 为结构化详细纪要：先逐页读取目标文档直至覆盖全部 chunks，再按主题写6–24个正文段落，每段可到1000字，通常总计1800–3500中文字；保留重要论据、数字、推理链、反共识判断和嘉宾观点的条件，不凑字数。不要逐字翻译，不遗漏主要主题；去掉广告、寒暄、重复与个人敏感信息。公开嘉宾可使用姓名，不能猜测说话人。每个主题使用 Markdown 标题，引用自动汇总到文末。不要再问“要不要详细版”，应直接交付详细内容。
@@ -346,6 +348,8 @@ class PodcastResearchAgent:
 class ResearchTools:
     def __init__(self, agent, key, message):
         self.agent, self.key, self.message = agent, key, message
+        self.system_evidence = set()
+        self.fetch_status_checked = False
         self.documents = None
         self.warnings = []
         self.tool_warnings = []
@@ -394,6 +398,11 @@ class ResearchTools:
         self.evidence[identity] = {"text": text, "url": url, "title": title}
         return {"evidence_id": identity, "text": text, "url": url, "title": title}
 
+    def system_result(self, result):
+        evidence = self.evidence_item(json.dumps(result, ensure_ascii=False))
+        self.system_evidence.add(evidence['evidence_id'])
+        return {**result, 'evidence_id': evidence['evidence_id']}
+
     def corpus(self):
         if self.documents is None:
             docs, self.warnings = self.agent.library.snapshot()
@@ -418,11 +427,19 @@ class ResearchTools:
             if schema["type"] == "integer" and type(args[key]) is not int:
                 raise ValueError("Invalid integer")
         registry = self.agent.registry
+        if name in {'get_fetch_status', 'get_delivery_health', 'get_request_status', 'record_feature_request'}:
+            self.system_answer = True
+        if name == 'get_fetch_status':
+            self.fetch_status_checked = True
+            result = self.agent.store.latest_fetch_status()
+            self.fetch_status_result = result
+            return self.system_result(result)
+
         if name == "get_delivery_health":
             from .operations import business_snapshot
-            return business_snapshot(self.agent.store.path,
+            return self.system_result(business_snapshot(self.agent.store.path,
                 daily_time=getattr(self.agent, 'daily_time', None),  # None: follow NEWS_OFFICER_DAILY_TIME
-                timezone=getattr(self.agent, 'timezone', 'Asia/Shanghai'))
+                timezone=getattr(self.agent, 'timezone', 'Asia/Shanghai')))
         if name == "record_editorial_feedback":
             feedback, scope = args['feedback'].strip(), args['scope']
             if not feedback or scope not in {'personal', 'group'}:
@@ -438,7 +455,7 @@ class ResearchTools:
             return {**dict(row), 'meaning': '偏好建议已记录，待审阅；尚未自动调整推荐、全群设置或训练模型。'}
         if name == "get_request_status":
             self.diagnosed = True
-            return request_status(self.agent.store, self.key)
+            return self.system_result(request_status(self.agent.store, self.key))
         if name == "record_feature_request":
             summary = args['summary'].strip()
             if not summary:
@@ -447,8 +464,8 @@ class ResearchTools:
             with self.agent.store._connect() as db:
                 db.execute("INSERT OR IGNORE INTO feature_requests(id,session,message_id,summary,created_at) VALUES (?,?,?,?,?)",
                            (identity, self.key, self.message.message_id, summary, datetime.now(ZoneInfo('UTC')).isoformat()))
-                row = db.execute("SELECT id,summary,status FROM feature_requests WHERE id=?", (identity,)).fetchone()
-            return {**dict(row), 'meaning': '已登记待开发；尚未实现、修改代码或上线'}
+                row = db.execute("SELECT summary FROM feature_requests WHERE id=?", (identity,)).fetchone()
+            return {**dict(row), 'meaning': '我把这个建议记下来了，会由维护者评估'}
         if name == "set_research_task":
             tokens = args["document_ids"]
             if (not isinstance(tokens, list) or not 1 <= len(tokens) <= 6
@@ -800,6 +817,29 @@ class ResearchTools:
             or not isinstance(value["points"], list)
         ):
             raise ValueError("Invalid message")
+        value = {**value, 'message': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', value['message']),
+                 'points': [{**p, 'text': re.sub(r'(?i)(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])', '', p['text'])}
+                            if isinstance(p, dict) and isinstance(p.get('text'), str) else p
+                            for p in value['points']]}
+        system = getattr(self, 'system_answer', False) and not self.task
+        if self.message and re.search(r'RSS|抓取|获取失败|历史.*(?:数据库|档案|检索)', self.message.text, re.IGNORECASE):
+            if not self.fetch_status_checked:
+                raise ValueError('Call get_fetch_status before answering fetch/archive questions')
+            system = True
+        if system:
+            visible = value.get('message', '') + ''.join(p.get('text', '') for p in value.get('points', []) if isinstance(p, dict) and isinstance(p.get('text'), str))
+            if len(visible) > 180:
+                raise ValueError('System answers must be short plain Chinese (about 150 characters)')
+            if self.fetch_status_checked:
+                allowed = {r['source_name'] for r in self.fetch_status_result['failed_feeds']}
+                for source in self.agent.registry.list():
+                    if source['name'] in visible and source['name'] not in allowed:
+                        raise ValueError('Only name failed sources returned by get_fetch_status')
+            if re.search(r'可能(?:是|原因|由)|常见原因|原因包括|一般是', visible):
+                raise ValueError('State only causes confirmed by system tools, not possible causes')
+            if re.search(r'已登记|待开发|需求编号|请求编号', visible):
+                raise ValueError('Feature suggestions are only for maintainer review; no development registration claims')
+
         goal = self.message.text + (' ' + self.task['goal'] if self.task else '')
         wants_document = bool(re.search(r'重点总结|详细版|详细总结|做.{0,4}纪要|(?:生成|整理成).{0,8}文档', goal))
         chat_only = bool(re.search(r'(?:不要|不用|不需要).{0,4}文档|只.{0,6}(?:聊天|回复)', self.message.text))
@@ -807,7 +847,7 @@ class ResearchTools:
                 and not chat_only and not self.document_requests and value.get('kind') == 'answer'):
             raise ValueError('Requested document missing: use create_episode_document for the selected podcast before ending this turn')
         if value["kind"] == "conversation" and not value["points"]:
-            directory = self.recent_directory()
+            directory = "" if system else self.recent_directory()
             text = "\n\n".join(filter(None, (directory, value["message"].strip())))
             text = text or "请告诉我想查哪个播客或主题。"
             require_complete(text)
@@ -832,7 +872,7 @@ class ResearchTools:
                     and not getattr(self, 'diagnosed', False)):
                 raise ValueError('Use get_request_status before diagnosing this conversation; do not invent the cause')
             warnings = self.warnings + self.tool_warnings
-            if warnings:
+            if warnings and not system:
                 text += "\n\n检索范围说明：" + "；".join(warnings[:10])
             if self.outcome == "pending":
                 self.outcome = "needs_input" if self.task else "conversation"
@@ -842,10 +882,10 @@ class ResearchTools:
             raise ValueError("Invalid answer")
         if value['message'].strip():
             raise ValueError('Do not lose answer text: move ALL message content, including action confirmation, into cited points; answer.message must be empty')
-        if missing := self.incomplete_documents():
+        if not system and (missing := self.incomplete_documents()):
             raise ValueError("Full reading incomplete; read_document from: " + json.dumps(missing))
         lines, sources = [], {}
-        directory = self.recent_directory()
+        directory = "" if system else self.recent_directory()
         if directory:
             lines.append(directory)
         for point in value["points"]:
@@ -856,15 +896,15 @@ class ResearchTools:
             ):
                 raise ValueError("Invalid point")
             require_complete(point['text'])
-            if not isinstance(point["citations"], list) or not point["citations"]:
+            if not isinstance(point["citations"], list) or (not system and not point["citations"]):
                 raise ValueError("Missing citations")
-            if self.task and not any(
+            if not system and self.task and not any(
                 isinstance(c, dict) and c.get("id") in self.body_evidence
                 and c["id"].split(":", 1)[0] in self.task["document_ids"]
                 for c in point["citations"]
             ):
                 raise ValueError("Research point must cite selected transcript text read this turn, not metadata")
-            if all(
+            if point["citations"] and not system and all(
                 isinstance(c, dict) and c.get("id") in self.catalog_evidence
                 for c in point["citations"]
             ):
@@ -874,6 +914,8 @@ class ResearchTools:
             for citation in point["citations"]:
                 if set(citation) not in ({"id"}, {"id", "quote"}):
                     raise ValueError("Invalid citation")
+                if system and citation['id'] not in self.system_evidence:
+                    raise ValueError('System answers use system tool evidence or empty citations, not episode citations')
                 if citation["id"] not in self.evidence:
                     raise ValueError("Unknown evidence id; use IDs returned by this turn's tools")
                 evidence = self.evidence[citation["id"]]
@@ -887,7 +929,7 @@ class ResearchTools:
                         raise ValueError("Quote not found")
                     if _quote_units(quote_text) > 25:
                         raise ValueError("Citation anchor too long; choose at most 25 words")
-                if evidence["url"]:
+                if evidence["url"] and not system:
                     label = (
                         evidence["title"]
                         .replace("[", "［")
@@ -898,7 +940,7 @@ class ResearchTools:
             lines.append(point["text"])
         if sources:
             lines.append("来源：" + "；".join(f"[{label}]({url})" for url, label in sources.items()))
-        if self.warnings or self.tool_warnings:
+        if not system and (self.warnings or self.tool_warnings):
             lines.append(
                 "检索范围说明：" + "；".join((self.warnings + self.tool_warnings)[:10])
             )
