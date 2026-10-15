@@ -48,10 +48,37 @@ class WatchdogTests(unittest.TestCase):
                 {'data': {'items': [self.message], 'has_more': False}}]) as api:
             self.assertEqual(check_receipt(Mock(), 'cli_bot', 'chat', self.day, self.now), 'delivered')
             self.assertEqual(api.call_count, 2)
+            for call in api.call_args_list:
+                self.assertEqual(call.kwargs['params']['card_msg_content_type'], 'raw_card_content')
         with patch('news_officer.delivery_watchdog.api') as api:
             self.assertEqual(check_receipt(Mock(), 'cli_bot', 'chat', self.day,
                                           datetime(2026, 10, 8, 0, 45, tzinfo=UTC)), 'not_due')
             api.assert_not_called()
+
+    def test_raw_card_receipt_and_placeholder(self):
+        day = date(2026, 10, 15)
+        now = datetime(2026, 10, 15, 2, tzinfo=UTC)
+        card = {'schema': '2.0', 'header': {'title': {
+            'tag': 'plain_text', 'content': '🎧 播客精选 · 2026-10-15'}},
+            'body': {'elements': []}}
+        placeholder = {'text': '请升级至最新版本客户端，以查看内容'}
+        for body, expected in (
+                (card, 'delivered'),
+                ({'json_card': json.dumps(card)}, 'delivered'),
+                ({'json_card': json.dumps({'card': json.dumps(card)})}, 'delivered'),
+                (placeholder, 'missing')):
+            with self.subTest(body=body):
+                message = {**self.message, 'msg_type': 'interactive',
+                    'create_time': str(int(datetime(2026, 10, 15, 0, 33, tzinfo=UTC).timestamp() * 1000)),
+                    'body': {'content': json.dumps(body)}}
+                with patch('news_officer.delivery_watchdog.api',
+                           return_value={'data': {'items': [message], 'has_more': False}}):
+                    self.assertEqual(check_receipt(Mock(), 'cli_bot', 'chat', day, now), expected)
+
+    def test_post_receipt_still_delivered(self):
+        with patch('news_officer.delivery_watchdog.api',
+                   return_value={'data': {'items': [self.message], 'has_more': False}}):
+            self.assertEqual(check_receipt(Mock(), 'cli_bot', 'chat', self.day, self.now), 'delivered')
 
     def test_configured_early_window_counts_receipt_and_moves_grace_period(self):
         message = {**self.message, 'create_time': str(int(
