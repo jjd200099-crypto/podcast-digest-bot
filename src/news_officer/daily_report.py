@@ -2,6 +2,7 @@
 
 import json
 import math
+import logging
 import os
 import re
 from collections import Counter
@@ -370,6 +371,55 @@ def ranked_daily_items(items: list[DailyItem]) -> list[DailyItem]:
         rating = re.search(r'(?m)^推荐星级：([★☆]{5})', item.message)
         return (item.status != 'summarized', -rating.group(1).count('★') if rating else 0)
     return sorted(items, key=key)
+
+
+def daily_reading_level(item: DailyItem) -> int:
+    """Explicit advice wins; legacy summaries fall back to their stars."""
+    advice = re.search(r'阅读建议：[ \t]*([^\n]+)', item.message)
+    if advice:
+        return 2 if '值得编译' in advice[1] else 1 if '值得看全文' in advice[1] else 0
+    rating = re.search(r'推荐星级：([★☆]{5})', item.message)
+    stars = rating[1].count('★') if rating else 0
+    return 2 if stars == 5 else 1 if stars == 4 else 0
+
+
+def daily_sixth_episode_allowed(item: DailyItem) -> bool:
+    """Sole exception: source priority A AND highest reading level 值得编译."""
+    return item.episode.metadata.get('source_priority') == 'A' and daily_reading_level(item) == 2
+
+
+def select_daily_episodes(items: list[DailyItem]) -> list[DailyItem]:
+    """Pure selection: priority, advice, then stable existing star ranking.
+
+    The env override lowers the regular cap; values above five cannot bypass
+    the strict sixth-episode bar. Short editions are never padded.
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        cap = max(1, min(5, int(os.getenv('NEWS_OFFICER_DAILY_MAX_EPISODES', '5'))))
+    except ValueError:
+        cap = 5
+    ranked = sorted(ranked_daily_items([i for i in items if i.status == 'summarized']),
+        key=lambda i: ({'A': 0, 'B': 1, 'C': 2}.get(
+            i.episode.metadata.get('source_priority', 'B'), 2), -daily_reading_level(i)))
+    unique, sources = [], set()
+    for item in ranked:
+        source = item.episode.show.strip().casefold()
+        if source in sources:
+            logger.info('Daily per-source cap dropped %s (%s): %s', item.episode.id,
+                        item.episode.show, item.episode.title)
+            continue
+        sources.add(source)
+        unique.append(item)
+    selected = unique[:cap]
+    for item in unique[cap:]:
+        if cap == 5 and len(selected) == 5 and daily_sixth_episode_allowed(item):
+            selected.append(item)
+            logger.info('Daily sixth episode admitted %s: source priority A and reading level 值得编译', item.episode.id)
+        else:
+            logger.info('Daily total cap dropped %s (%s): %s', item.episode.id,
+                        item.episode.show, item.episode.title)
+    return selected
 
 
 def coverage_report(items: list[DailyItem]) -> str | None:

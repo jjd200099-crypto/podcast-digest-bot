@@ -99,7 +99,8 @@ class CombinedDailyTests(unittest.IsolatedAsyncioTestCase):
         self.temp.cleanup()
 
     def item(self, name, stars=3):
-        episode = Episode(name, name, "https://example.test/" + name, "Show",
+        # Independent fixture episodes represent distinct source shows.
+        episode = Episode(name, name, "https://example.test/" + name, name,
                           published_at=datetime.now(UTC))
         record = self.store.save_verified_transcript(
             episode, Transcript("Complete source " + name, "official", episode.url, True))
