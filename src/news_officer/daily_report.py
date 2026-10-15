@@ -1,8 +1,8 @@
 """Explain an incomplete digest without pretending there were no releases."""
 
 import json
-import math
 import logging
+import math
 import os
 import re
 from collections import Counter

@@ -41,7 +41,7 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         self.store.track_daily_candidates([i.episode for i in candidates])
         before = {i.episode.id: self.store.get_verified_transcript(i.episode.id)
                   for i in candidates}
-        instance, job, podcast = self.setup_job(candidates)
+        instance, job, _podcast = self.setup_job(candidates)
         await instance._handle_daily_job(job)
         bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
         self.assertEqual(len(bundle['episode_ids']), 5)
