@@ -155,6 +155,7 @@ class TextSourcesTests(unittest.TestCase):
         with patch('news_officer.text_sources._fetch', side_effect=[RSS, ARTICLE]):
             [item] = service.build_daily(datetime(2026, 10, 13, 1, tzinfo=UTC))
         self.assertEqual(item.status, 'summarized')
+        self.assertEqual(item.episode.metadata['source_name'], self.source['name'])
         self.assertEqual(store.get_verified_transcript(item.episode.id).episode.metadata['source_type'], 'text')
         self.assertEqual(_post_elements(item.message.splitlines()[0])[0]['text'], '【Lilian Weng｜AI systems】')
         with patch.dict(os.environ, {'NEWS_OFFICER_TEXT_SOURCES': 'false'}):

@@ -53,6 +53,21 @@ class DailySelectionTests(unittest.TestCase):
                 self.assertEqual(len(select_daily_episodes([item(i) for i in range(count)])), count)
 
     def test_env_override(self):
-        for value, expected in [('3', 3), ('2', 2), ('99', 5), ('bad', 5)]:
+        for value, expected in [('3', 3), ('2', 3), ('1', 3), ('0', 3), ('-3', 3), ('99', 5), ('bad', 5)]:
             with self.subTest(value=value), patch.dict(os.environ, NEWS_OFFICER_DAILY_MAX_EPISODES=value):
                 self.assertEqual(len(select_daily_episodes([item(i) for i in range(8)])), expected)
+
+    def test_configured_identity_overrides_channel_title(self):
+        candidates = [item(0, show='Channel one'), item(1, show='Other title'),
+                      item(2, show='Channel one')]
+        for candidate, source in zip(candidates, ['Configured', 'Configured', 'Separate']):
+            candidate.episode.metadata['source_name'] = source
+        self.assertEqual(select_daily_episodes(candidates), [candidates[0], candidates[2]])
+
+    def test_negated_and_embedded_advice_never_admit_sixth(self):
+        from news_officer.daily_report import daily_reading_level
+        for label in ['不值得编译', '不值得看全文', '可能值得编译', '值得编译但需核实']:
+            candidate = item(9, 'A', label, stars=5)
+            self.assertEqual(daily_reading_level(candidate), 0)
+            self.assertEqual(len(select_daily_episodes([item(i, 'A') for i in range(5)]
+                                                     + [candidate])), 5)

@@ -259,6 +259,7 @@ def latest_rss_episodes(
                         html.unescape(description), "html.parser"
                     ).get_text(" ", strip=True),
                     "rss_feed_url": feed_url,
+                    "source_name": show_name,
                     "rss_transcripts": transcript_urls,
                 },
             )
@@ -296,7 +297,8 @@ def _youtube_atom_episodes(
             url=link, show=show_name,
             published_at=_parse_date(entry.findtext("atom:published", "", ns)),
             duration_seconds=duration,
-            metadata={"rss_feed_url": feed_url, "source_type": "youtube",
+            metadata={"rss_feed_url": feed_url,
+                    "source_name": show_name, "source_type": "youtube",
                       "youtube_title": title,
                       "description": entry.findtext("media:group/media:description", "", ns)},
         )

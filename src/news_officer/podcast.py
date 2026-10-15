@@ -453,7 +453,10 @@ class PodcastService:
                 if rss_discovered and discovered.published_at is not None
                 else enriched.published_at or discovered.published_at
             ),
-            metadata={**discovered.metadata, **enriched.metadata},
+            metadata={**discovered.metadata, **enriched.metadata,
+                      **{key: discovered.metadata[key]
+                         for key in ('source_name', 'source_priority')
+                         if key in discovered.metadata}},
         )
 
     @staticmethod
@@ -671,6 +674,7 @@ class PodcastService:
                             metadata={
                                 **episode.metadata,
                                 "source_priority": source.priority,
+                                "source_name": source.name or source.rss_url or source.url,
                             },
                         )
                         for episode in source_episodes
@@ -724,7 +728,20 @@ class PodcastService:
         if self.discovery is not None:
             try:
                 discovered = self.discovery.discover(now, self.lookback_hours)
-                groups_by_priority['B'].append(discovered.episodes)
+                for episode in discovered.episodes:
+                    # Discovery has no configured entry of its own. Resolve known
+                    # catalogs to the subscription identity before daily selection.
+                    source_key = episode.metadata.get('source_name') or episode.show
+                    configured = next((s for s in sources if
+                        (s.name and s.name.casefold() == source_key.strip().casefold())
+                        or (s.rss_url and episode.metadata.get('rss_feed_url') == s.rss_url)), None)
+                    if configured:
+                        episode.metadata.update(source_name=configured.name or configured.rss_url or configured.url,
+                                                source_priority=configured.priority)
+                for priority in ('A', 'B'):
+                    groups_by_priority[priority].append([
+                        e for e in discovered.episodes
+                        if e.metadata.get('source_priority', 'B') == priority])
                 self._discovery_notice = discovered.notice
                 self._discovery_failed = bool(discovered.failed_requests)
             except Exception:  # noqa: BLE001 - a discovery outage must not stop healthy RSS
