@@ -23,7 +23,7 @@ AUDIO_RSS_SNAPSHOT = {
 
 YOUTUBE_ONLY_CHANNELS = {
     'Anthropic', 'AI Engineer', 'Andrej Karpathy', 'Stripe',
-    'Founders You Should Know', 'Generalist', 'Index Ventures',
+    'Founders You Should Know', 'Index Ventures',
 }
 
 

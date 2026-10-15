@@ -145,13 +145,6 @@
       "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC7tPLStIIpO7a9x9ERMXrdg"
     },
     {
-      "name": "Generalist",
-      "type": "youtube",
-      "priority": "B",
-      "url": "https://www.youtube.com/channel/UCwV9z8IGmbUQUb5D8KSv3mQ/videos",
-      "rss_url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCwV9z8IGmbUQUb5D8KSv3mQ"
-    },
-    {
       "name": "Index Ventures",
       "type": "youtube",
       "priority": "B",

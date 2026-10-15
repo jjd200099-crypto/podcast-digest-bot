@@ -15,7 +15,7 @@ from news_officer.store import Store
 
 QUESTION = '@情报官 RSS获取失败是什么情况。你有存历史检索过播客的数据库吗？如果没有，之后能不能加一个'
 INVENTED = ['Anthropic', 'AI Engineer', 'Andrej Karpathy', 'Stripe',
-            'Founders You Should Know', 'Generalist', 'Index Ventures']
+            'Founders You Should Know', 'Index Ventures']
 
 
 class OpsAnswersTests(LibraryFixture):
