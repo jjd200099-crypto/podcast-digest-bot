@@ -74,7 +74,9 @@ class PodwiseDiscovery:
                        duration_seconds=duration, published_at=when,
                        metadata={'discovery_origin': 'podwise', 'podwise_seq': row['seq'],
                                  'podwise_podcast_seq': row.get('podcastSeq'),
-                                 'source_priority': 'B'}), None
+                                 'source_priority': 'B',
+                                 'rss_feed_url': row.get('rssUrl') or row.get('rssFeedUrl')
+                                 or row.get('feedUrl') or row.get('rss') or ''}), None
 
     def discover(self, now: datetime, lookback_hours: int) -> DiscoveryResult:
         now = now.astimezone(UTC)

@@ -6,9 +6,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from news_officer.models import Episode, Transcript
+from news_officer.daily_report import select_daily_episodes
+from news_officer.models import DailyItem, Episode, Transcript
 from news_officer.podcast import FeedDiscoveryError, PodcastService, TranscriptResolver
 from news_officer.podwise import PodwiseTranscriptProvider
+from news_officer.podwise_discovery import PodwiseDiscovery
+from news_officer.source_registry import SourceRegistry
 from news_officer.store import Store
 from news_officer.youtube import YouTubeTranscriptProvider
 
@@ -104,18 +107,73 @@ class RSSDailyTests(unittest.TestCase):
             [episode] = service.discover_daily_candidates()
         self.assertEqual(episode.metadata['source_name'], 'Show')
 
-    def test_podwise_resolves_configured_identity_and_priority(self):
-        self.feeds.write_text(self.feeds.read_text().replace('"type": "youtube"',
-                                                           '"priority": "A", "type": "youtube"'))
-        episode = replace(self.episode, id='podwise:123', show='Podwise own title',
-                          metadata={'source_priority': 'B', 'source_name': 'Show'})
+    def discover_podwise(self, show, feed='', extra_sources=()):
+        self.feeds.write_text(json.dumps({'sources': [{
+            'name': 'Show', 'type': 'rss', 'rss_url': 'https://example.org/feed',
+            'url': 'https://example.org/alternate', 'priority': 'A',
+            'aliases': ['Show on Podwise'],
+        }, *extra_sources]}))
+        now = datetime.now(UTC)
+        row = {'seq': 123, 'title': 'A different full interview', 'podcastName': show,
+               'link': 'https://example.org/podwise-copy', 'publishTime': now.timestamp(),
+               'duration': 1200, 'rssUrl': feed}
         service = self.service()
-        service.discovery = Mock(discover=Mock(return_value=Mock(
-            episodes=[episode], notice='', failed_requests=0)))
-        with patch('news_officer.podcast.latest_rss_episodes', return_value=[]):
-            [candidate] = service.discover_daily_candidates()
-        self.assertEqual(candidate.metadata['source_name'], 'Show')
-        self.assertEqual(candidate.metadata['source_priority'], 'A')
+        service.discovery = PodwiseDiscovery('test-token', topics=['AI'], podcast_topics=[])
+        rss = (f'<rss><channel><title>Publisher title</title><item><guid>rss-one</guid>'
+               f'<title>RSS interview</title><link>https://example.org/rss-episode</link>'
+               f'<pubDate>{now.strftime("%a, %d %b %Y %H:%M:%S +0000")}</pubDate>'
+               '<enclosure url="https://example.org/audio.mp3" type="audio/mpeg"/>'
+               '</item></channel></rss>')
+        def api(path, params=None):
+            return {'result': [row] if path == '/episodes/search' else []}
+        with patch('news_officer.podwise.PodwiseTranscriptProvider._get', side_effect=api), \
+                patch('news_officer.rss._response', return_value=Mock(content=rss.encode())):
+            candidates = service.discover_daily_candidates(now)
+        self.assertEqual(len(candidates), 2)
+        return candidates
+
+    def test_podwise_rss_url_identity_and_daily_source_cap(self):
+        for feed in ['HTTPS://EXAMPLE.ORG/feed/?utm_source=podwise',
+                     'https://example.org/alternate/']:
+            with self.subTest(feed=feed):
+                candidates = self.discover_podwise('Unrelated provider title', feed)
+                podwise = next(e for e in candidates if e.id == 'podwise:123')
+                self.assertEqual(podwise.metadata['source_name'], 'Show')
+                self.assertEqual(podwise.metadata['source_priority'], 'A')
+                items = [DailyItem(e, 'summarized', '推荐星级：★★★★☆') for e in candidates]
+                self.assertEqual(len(select_daily_episodes(items)), 1)
+
+    def test_podwise_url_takes_precedence_over_alias_and_name(self):
+        candidates = self.discover_podwise('Conflicting name', 'https://example.org/feed', [
+            {'name': 'Conflicting name', 'aliases': ['Conflicting name'],
+             'type': 'rss', 'url': 'https://example.org/other', 'priority': 'B'}])
+        episode = next(e for e in candidates if e.id == 'podwise:123')
+        self.assertEqual(episode.metadata['source_name'], 'Show')
+        self.assertEqual(episode.metadata['source_priority'], 'A')
+
+    def test_podwise_alias_identity(self):
+        candidates = self.discover_podwise('  SHOW on Podwise  ')
+        episode = next(e for e in candidates if e.id == 'podwise:123')
+        self.assertEqual(episode.metadata['source_name'], 'Show')
+        self.assertEqual(episode.metadata['source_priority'], 'A')
+        registry = SourceRegistry(self.store, self.feeds)
+        registry.initialize()
+        self.assertEqual(registry.list()[0]['aliases'], ['Show on Podwise'])
+
+    def test_podwise_exact_normalized_name(self):
+        candidates = self.discover_podwise('  SHOW  ')
+        episode = next(e for e in candidates if e.id == 'podwise:123')
+        self.assertEqual(episode.metadata['source_name'], 'Show')
+        self.assertEqual(episode.metadata['source_priority'], 'A')
+
+    def test_podwise_unmatched_fallback_preserves_query_identity(self):
+        candidates = self.discover_podwise('Unknown show', 'https://example.org/feed?channel=other')
+        episode = next(e for e in candidates if e.id == 'podwise:123')
+        self.assertNotIn('source_name', episode.metadata)
+        self.assertEqual(episode.show, 'Unknown show')
+        self.assertEqual(episode.metadata['source_priority'], 'B')
+        self.assertEqual(len(select_daily_episodes([
+            DailyItem(e, 'summarized', '推荐星级：★★★★☆') for e in candidates])), 2)
 
     def test_official_metadata_merge_preserves_configured_source(self):
         configured = replace(self.episode, metadata={

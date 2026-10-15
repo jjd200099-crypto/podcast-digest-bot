@@ -225,3 +225,5 @@ Preview locally without sending messages:
 ```bash
 NEWS_OFFICER_DAILY_LAYOUT=v4 PYTHONPATH=src python -m news_officer.daily_preview --dry-run --db /path/to/archive.sqlite3 --date 2026-10-14
 ```
+
+`feeds.json` podcast sources may include an optional `aliases` list of verified alternate show names. Podwise discovery resolves source identity by RSS URL against configured `rss_url` and `url` first, then aliases, then the configured name (Unicode, case and whitespace normalized). Matched episodes inherit the configured name and priority so RSS and Podwise share the daily source cap. URL matching normalizes scheme/host case, trailing slashes and tracking queries while retaining feed-selecting query parameters. Unknown shows retain their provider identity.

@@ -6,11 +6,13 @@ import logging
 import re
 import subprocess
 import time
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -174,6 +176,7 @@ class YouTubeFeedSource:
     rss_url: str = ""
     priority: str = "B"
     source_type: str = "youtube"
+    aliases: tuple[str, ...] = ()
 
     def accepts(self, episode: Episode) -> bool:
         if youtube_skip_reason(episode):
@@ -224,9 +227,46 @@ def load_youtube_sources(path: Path) -> list[YouTubeFeedSource]:
                     rss_url=str(source.get("rss_url") or ""),
                     priority=priority,
                     source_type=source["type"],
+                    aliases=tuple(a.strip() for a in source.get("aliases", [])
+                                  if isinstance(a, str) and a.strip()),
                 )
             )
     return sources
+
+
+def _source_name_key(value: str) -> str:
+    return ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
+
+
+def _source_url_key(value: str) -> str:
+    """Normalize syntax while preserving feed-selecting query parameters."""
+    try:
+        parts = urlsplit(value.strip())
+        if parts.scheme.lower() not in {'http', 'https'} or not parts.hostname:
+            return ''
+        query = urlencode([(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                           if not k.casefold().startswith('utm_')])
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
+                           parts.path.rstrip('/'), query, ''))
+    except ValueError:
+        return ''
+
+
+def _configured_podwise_source(episode: Episode, sources: list[YouTubeFeedSource]):
+    feed = _source_url_key(str(episode.metadata.get('rss_feed_url') or ''))
+    if feed:
+        for source in sources:
+            if any(feed == _source_url_key(url) for url in (source.rss_url, source.url)):
+                return source
+    name = _source_name_key(episode.show)
+    if name:
+        for source in sources:
+            if any(name == _source_name_key(alias) for alias in source.aliases):
+                return source
+        for source in sources:
+            if name == _source_name_key(source.name):
+                return source
+    return None
 
 
 def load_youtube_feeds(path: Path) -> list[str]:
@@ -594,8 +634,9 @@ class PodcastService:
             sources.extend(YouTubeFeedSource(
                 url=s.get("url", ""), name=s["name"], rss_url=s.get("rss_url", ""),
                 scan_depth=s.get("scan_depth", 30), priority=s.get("priority", "B"),
-                source_type=s.get("type", "rss"),
+                source_type=s.get("type", "rss"), aliases=tuple(s.get("aliases", [])),
             ) for s in self.source_registry.list() if s.get("origin") == "conversation")
+        configured_sources = sources[:]
         if self.daily_rss_only:
             sources = [source for source in sources if source.rss_url]
         for source in sources:
@@ -731,10 +772,7 @@ class PodcastService:
                 for episode in discovered.episodes:
                     # Discovery has no configured entry of its own. Resolve known
                     # catalogs to the subscription identity before daily selection.
-                    source_key = episode.metadata.get('source_name') or episode.show
-                    configured = next((s for s in sources if
-                        (s.name and s.name.casefold() == source_key.strip().casefold())
-                        or (s.rss_url and episode.metadata.get('rss_feed_url') == s.rss_url)), None)
+                    configured = _configured_podwise_source(episode, configured_sources)
                     if configured:
                         episode.metadata.update(source_name=configured.name or configured.rss_url or configured.url,
                                                 source_priority=configured.priority)
