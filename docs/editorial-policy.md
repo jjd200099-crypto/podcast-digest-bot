@@ -100,3 +100,23 @@ No broader sharing permissions or chat attachments are added.
 `NEWS_OFFICER_STRICT_SELECTION=true` 启用严格规则（默认 false）。相关度不足 4 的 priority 直接取消，不重试；低证据、未经核验猜测或个人观点主导内容不适用四星保底且低于收录线。仅松散相关于 AI/投资的内容也低于收录线。模型输出 `evidence_quality` 和 `reading_recommendation`；阅读建议受实际判断约束，字段缺失时安全降为不收录。严格模式使用独立缓存，关闭后继续使用原规则及原格式。
 
 摘要上限为正数时，所有候选先完成评分再按星级排序取前 N，平分保持发现顺序，不预留来源配额。默认上限 0 不限制。只读历史回测脚本及数据重建限制见 README。
+
+### Reader daily episode cap
+
+Before reader rendering or enrichment bundling, `select_daily_episodes` selects
+at most one episode per show name (trimmed, case insensitive), ordered by source
+priority A > B > C, reading advice 值得编译 > 值得看全文 > lower, then existing
+stable star ranking and input order. Missing source priority defaults to B.
+The target is 3–5, without padding. `NEWS_OFFICER_DAILY_MAX_EPISODES` defaults to
+5 and may lower the regular cap (minimum 1); values above 5 are clamped to 5,
+invalid values use 5. Only priority A plus 值得编译 can admit a sixth, and never
+a seventh. Explicit reading advice takes precedence over legacy star advice.
+Selection IDs are frozen in the daily job for retry consistency. Source priority
+is preserved alongside immutable daily-item snapshots so restart selection agrees.
+
+Dropped episodes retain their stored transcripts, summaries and metadata. Their
+processing result becomes `daily_selection_skipped` and any transcript backlog
+entry becomes `final_skipped`, so ordinary discovery and backlog scans do not
+re-pick them as new on the following day. They are not marked delivered and do
+not enter the card, bundle episode IDs, or enrichment work. Zero-item delivery
+continues through the existing empty-edition path.

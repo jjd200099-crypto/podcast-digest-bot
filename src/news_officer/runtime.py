@@ -575,7 +575,10 @@ class NewsOfficerRuntime:
     def _persisted_daily_items(self, job: Job) -> list[DailyItem]:
         from .daily_report import ranked_daily_items
         values = self.store.list_job_results(job.key, "daily_item")
-        return ranked_daily_items([DailyItem.from_persisted_dict(value) for value in values])
+        items = [DailyItem.from_persisted_dict(value) for value in values]
+        for item, value in zip(items, values):
+            item.episode.metadata['source_priority'] = value.get('source_priority', 'B')
+        return ranked_daily_items(items)
 
     def _persist_daily_items(self, job: Job, results: list[DailyItem]) -> None:
         for item in results:
@@ -599,7 +602,8 @@ class NewsOfficerRuntime:
                 job.key,
                 f"episode:{item.episode.id}",
                 "daily_item",
-                item.to_persisted_dict(),
+                {**item.to_persisted_dict(),
+                 "source_priority": item.episode.metadata.get("source_priority", "B")},
             )
             # Parse the first immutable value so a concurrent writer can never
             # cause a different payload to be delivered under the same UUID.
@@ -663,6 +667,20 @@ class NewsOfficerRuntime:
                                  "summary_format_error", "unverified_date"}:
                 self.store.record_episode(item.episode, item.status)
                 report_items.append(item)
+        if reader_mode:
+            from .daily_report import select_daily_episodes
+            selection = self.store.get_job_result(job.key, 'daily:selection')
+            if selection is None:
+                selected = select_daily_episodes(summaries)
+                selection = self.store.save_job_result(job.key, 'daily:selection',
+                    'daily_selection', {'episode_ids': [i.episode.id for i in selected]})
+            selected_ids = set(selection['episode_ids'])
+            for item in summaries:
+                if item.episode.id not in selected_ids:
+                    self.store.skip_daily_selection(item.episode)
+            by_id = {i.episode.id: i for i in summaries}
+            summaries = [by_id[episode_id] for episode_id in selection['episode_ids']
+                         if episode_id in by_id]
         catchup = bool(job.payload.get("transcript_catchup"))
         # A catch-up with nothing ready stays quiet. On retry, previously sent
         # episodes are represented by their frozen bundle, never re-rendered.

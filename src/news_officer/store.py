@@ -1591,6 +1591,13 @@ class Store:
             result.append(replace(Episode.from_persisted_dict(value), metadata=value.get('metadata', {})))
         return result
 
+    def skip_daily_selection(self, episode: Episode) -> None:
+        """Retire a capped candidate without touching transcript or digest data."""
+        self.record_episode(episode, 'daily_selection_skipped')
+        with self._connect() as connection:
+            connection.execute("UPDATE daily_transcript_backlog SET state='final_skipped' WHERE episode_id=?",
+                               (episode.id,))
+
     def complete_daily_transcript(self, episode_id: str) -> None:
         with self._connect() as connection:
             connection.execute("UPDATE daily_transcript_backlog SET state='delivered' WHERE episode_id=?",

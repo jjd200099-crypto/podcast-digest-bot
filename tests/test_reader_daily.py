@@ -23,6 +23,40 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         podcast.build_pending = Mock(return_value=[])
         return instance, job, podcast
 
+    async def test_priority_survives_persistence_and_admits_sixth(self):
+        candidates = [self.item(f'priority-{i}', stars=5) for i in range(7)]
+        for item in candidates:
+            item.episode.metadata['source_priority'] = 'A'
+        instance, job, _ = self.setup_job(candidates)
+        instance._persist_daily_items(job, candidates)
+        restored = instance._persisted_daily_items(job)
+        self.assertTrue(all(i.episode.metadata['source_priority'] == 'A' for i in restored))
+        await instance._handle_daily_job(job)
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        self.assertEqual(len(bundle['episode_ids']), 6)
+        self.assertEqual(len(bundle['enrichment']['sections']), 6)
+
+    async def test_selection_excludes_bundle_and_retires_backlog_without_data_loss(self):
+        candidates = [self.item(f'cap-{i}') for i in range(7)]
+        self.store.track_daily_candidates([i.episode for i in candidates])
+        before = {i.episode.id: self.store.get_verified_transcript(i.episode.id)
+                  for i in candidates}
+        instance, job, _podcast = self.setup_job(candidates)
+        await instance._handle_daily_job(job)
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        self.assertEqual(len(bundle['episode_ids']), 5)
+        self.assertEqual(len(bundle['enrichment']['sections']), 5)
+        for item in candidates[5:]:
+            self.assertNotIn(item.episode.id, bundle['episode_ids'])
+            self.assertEqual(self.store.get_verified_transcript(item.episode.id),
+                             before[item.episode.id])
+            self.assertIsNone(self.store.episode_review_state(item.episode.id))
+        self.assertEqual(self.store.due_daily_transcripts(), [])
+        frozen = self.store.get_job_result(job.key, 'daily:selection')
+        with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_MAX_EPISODES': '1'}):
+            instance._prepare_combined_daily(job, finalize=True)
+        self.assertEqual(self.store.get_job_result(job.key, 'daily:selection'), frozen)
+
     async def test_compact_flag_reuses_one_rewrite_in_enrichment_template(self):
         episode = Episode('flag', 'Show', 'https://example.test/flag', 'Show',
                           published_at=datetime.now(UTC))
