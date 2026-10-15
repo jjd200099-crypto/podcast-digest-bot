@@ -290,6 +290,23 @@ class DailyV4RuntimeTests(unittest.IsolatedAsyncioTestCase):
     tearDown = fixtures.CombinedDailyTests.tearDown
     item = fixtures.CombinedDailyTests.item
 
+    async def test_runtime_reserves_realistic_urls_for_every_eligible_section(self):
+        items = [self.item('one', 4), self.item('two', 5), self.item('low', 3)]
+        instance, job, podcast = fixtures.CombinedDailyTests.setup_job(self, items,
+            payload={'scheduled_for': '2026-10-15T08:30:00+08:00'})
+        instance.settings.daily_reader_mode = True
+        instance.settings.daily_layout = 'v4'
+        podcast.build_pending = Mock(return_value=[])
+        with patch('news_officer.runtime.daily_card_delivery_parts',
+                   wraps=daily_card_delivery_parts) as build:
+            await instance._handle_daily_job(job)
+        for call in build.call_args_list:
+            reserved = call.kwargs['reserve_markdown']
+            self.assertEqual(reserved.count('https://xxxx.feishu.cn/docx/' + 'x' * 27), 2)
+            self.assertNotIn(DOCUMENT_PLACEHOLDER, reserved)
+        bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
+        self.assertNotIn('https://xxxx.feishu.cn/docx/', bundle['deliveries'][0]['parts'][0][1])
+
     async def test_indivisible_oversized_v4_day_still_delivers_safe_parts(self):
         from news_officer.feishu import encoded_message_payload
         item = self.item('huge', 4)

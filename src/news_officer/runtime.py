@@ -767,6 +767,13 @@ class NewsOfficerRuntime:
             from .operations import record_warning
             edition_title = f'🎧 播客精选 · {when:%Y-%m-%d}'
             reader_delivery = daily_card_delivery_parts if v4 else combined_delivery_parts
+            if v4:
+                reserved = '\n\n'.join([
+                    *(blocks[:-len(sections)] if sections else blocks),
+                    *(s['template'].replace(DOCUMENT_PLACEHOLDER,
+                        'https://xxxx.feishu.cn/docx/' + 'x' * 27) for s in sections)])
+                from functools import partial
+                reader_delivery = partial(daily_card_delivery_parts, reserve_markdown=reserved)
             probe = reader_delivery(markdown, job.key, title=edition_title)
             if len(probe) != 1:
                 prefix = blocks[:-len(sections)] if sections else blocks
@@ -1264,6 +1271,16 @@ class NewsOfficerRuntime:
             await asyncio.sleep(30)
 
     async def _handle_document_job(self, job):
+        if job.payload.get('mode') == 'daily_edit_retry':
+            from .daily_enrichment import update_daily_message
+            base, key = job.payload['base_job'], job.payload['retry_key']
+            if self.store.get_job_result(base, job.key):
+                return
+            self.store.save_job_result(base, job.key, 'daily_edit_retry_state',
+                                       {'retry_key': key})
+            await asyncio.to_thread(update_daily_message, self.store, self.document_compiler.api,
+                                    base, audience_filter=self._document_audience)
+            return
         if job.payload.get('mode') == 'daily_episode':
             from .daily_enrichment import publish_enrichment
             try:

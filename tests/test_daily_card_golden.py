@@ -74,3 +74,44 @@ class DailyCardGoldenTests(unittest.TestCase):
                 self.assertTrue(all(part[0] == 'text' for part in parts))
                 self.assertEqual(sum(json.loads(part[1])['text'].count('文') for part in parts), length)
                 self.assertEqual(len({part[2] for part in parts}), len(parts))
+
+
+class CardHeadroomTests(unittest.TestCase):
+    def test_reserved_links_choose_compaction_before_initial_send(self):
+        from news_officer.feishu import DailyCardTooLargeError
+        url = 'https://xxxx.feishu.cn/docx/' + 'x' * 27
+        # Find a full card fitting without links but exceeding the guard with them.
+        for size in range(9000, 10000):
+            body = '**1. 【Show｜Guest｜Topic】**\n- 简介：完整简介。\n- 要点总结：\n    1. 内容。\n推荐理由：' + '文' * size + '\n[收听节目](https://example.com/episode)'
+            template = body + '\n[精读和完整中文对谈](' + url + ')'
+            try:
+                daily_card_delivery_parts(body, 'key', title='Daily', allow_compaction=False)
+            except DailyCardTooLargeError:
+                continue
+            try:
+                daily_card_delivery_parts(template, 'key', title='Daily', allow_compaction=False)
+            except DailyCardTooLargeError:
+                break
+        else:
+            self.fail('No boundary fixture found')
+        initial = daily_card_delivery_parts(body, 'key', title='Daily', reserve_markdown=template)
+        self.assertNotIn(url, initial[0][1])
+        self.assertNotIn('推荐理由', initial[0][1])
+        enriched = daily_card_delivery_parts(template, 'key', title='Daily', require_interactive=True)
+        self.assertIn(url, enriched[0][1])
+        DailyCardGoldenTests().assert_payloads_fit(initial)
+        DailyCardGoldenTests().assert_payloads_fit(enriched)
+
+    def test_v4_compaction_preserves_layout_metadata_intro_and_all_links(self):
+        from news_officer.daily_report import compact_reader_episode
+        section = ('**1. 【Show｜Guest｜Topic】**\n- 节目：Show\n- 时长：60分钟\n'
+                   '- 简介：第一句。第二句。\n- 要点总结：\n'
+                   '    1. 要点一。\n    2. 要点二。\n    3. 要点三。\n'
+                   '[精读和完整中文对谈](https://xxxx.feishu.cn/docx/abc)\n'
+                   '[收听节目](https://example.com/listen)')
+        for level in (1, 2, 3):
+            compact = compact_reader_episode(section, level, '')
+            for required in ('【Show｜Guest｜Topic】', '- 节目：Show', '- 时长：60分钟',
+                             '- 简介：第一句。第二句。', '- 要点总结：',
+                             'https://xxxx.feishu.cn/docx/abc', 'https://example.com/listen'):
+                self.assertIn(required, compact)

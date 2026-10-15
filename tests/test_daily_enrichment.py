@@ -59,10 +59,10 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
     item = fixtures.ReaderDailyTests.item
     setup_job = fixtures.ReaderDailyTests.setup_job
 
-    async def prepare(self):
+    async def prepare(self, day="2026-10-11"):
         items = [self.item('one', 5), self.item('two', 5), self.item('low', 3)]
-        instance, job, _ = self.setup_job(items, key='daily:2026-10-11',
-            payload={'scheduled_for': '2026-10-11T08:30:00+08:00'})
+        instance, job, _ = self.setup_job(items, key='daily:' + day,
+            payload={'scheduled_for': day + 'T08:30:00+08:00'})
         await instance._handle_daily_job(job)
         self.store.complete(job.key)
         with self.store._connect() as db:
@@ -100,26 +100,57 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.api = MessageAPI(rows)
         return base, bundle, delivery
 
-    async def test_oversize_interactive_enrichment_raises_logs_and_never_edits(self):
+    async def test_oversize_interactive_enrichment_compacts_without_dropping_links(self):
         body = 'Summary.\n\n推荐理由：' + '可选内容' * 2200
         base, bundle, delivery = await self.interactive_bundle(body)
-        for mode in ('compressed', 'degraded'):
-            with self.subTest(mode=mode):
-                url = 'https://www.feishu.cn/docx/' + 'x' * (30_000 if mode == 'degraded' else 3000)
-                template = bundle['enrichment']['sections'][0]['template']
-                rendered = daily_card_delivery_parts(
-                    template.replace('https://document.invalid/DAILY_DOCUMENT_LINK', url),
-                    delivery['key'], title='Daily')
-                self.assertEqual(rendered[0][0], 'interactive' if mode == 'compressed' else 'text')
-                ready = [{'documents': [{'episode_id': 'one', 'url': url}],
-                          'targets': [[delivery['target_type'], delivery['target_id']]]}]
-                with (self.assertLogs('news_officer.daily_enrichment', level='ERROR') as logs,
-                      self.assertRaises(LibraryError)):
-                    _update_target(self.store, self.api, base.key, bundle, ready, delivery, None)
-                self.assertIn('29000 bytes', logs.output[0])
-                self.assertEqual(self.api.puts, [])
-                self.assertEqual(self.api.messages['om_original']['body']['content'], self.original)
-                self.assertEqual(self.store.list_job_results(base.key, 'daily_edit_intent'), [])
+        url = 'https://www.feishu.cn/docx/' + 'x' * 3000
+        ready = [{'documents': [{'episode_id': 'one', 'url': url}],
+                  'targets': [[delivery['target_type'], delivery['target_id']]]}]
+        _update_target(self.store, self.api, base.key, bundle, ready, delivery, None)
+        self.assertEqual(len(self.api.puts), 1)
+        self.assertIn(url, self.api.puts[0]['content'])
+        self.assertIn('Summary.', self.api.puts[0]['content'])
+        self.assertNotIn('可选内容', self.api.puts[0]['content'])
+        self.assertEqual(self.api.messages['om_original']['msg_type'], 'interactive')
+
+    async def test_max_compaction_failure_never_changes_message(self):
+        base, bundle, delivery = await self.interactive_bundle()
+        ready = [{'documents': [{'episode_id': 'one', 'url': 'https://x/' + 'x' * 30000}],
+                  'targets': [[delivery['target_type'], delivery['target_id']]]}]
+        with self.assertRaises(LibraryError):
+            _update_target(self.store, self.api, base.key, bundle, ready, delivery, None)
+        self.assertEqual(self.api.puts, [])
+        self.assertEqual(self.store.list_job_results(base.key, 'daily_edit_intent'), [])
+
+    async def test_periodic_edit_retry_is_bounded_and_updates_existing_message(self):
+        instance, base = await self.prepare('2026-10-15')
+        self.ready(base.key, 'one')
+        # Existing document jobs have already finished; no document rebuild.
+        enqueue_enrichment(self.store, '2026-10-15')
+        with self.store._connect() as db:
+            db.execute("UPDATE jobs SET status='completed' WHERE kind='document' "
+                       "AND json_extract(payload_json,'$.mode')='daily_episode'")
+        instance.document_compiler = SimpleNamespace(api=self.api)
+        for attempt in range(3):
+            job = self.store.claim_next('document')
+            self.assertEqual(job.payload['mode'], 'daily_edit_retry')
+            with patch('news_officer.daily_enrichment.update_daily_message') as update:
+                await instance._handle_document_job(job)
+                update.assert_called_once()
+            self.store.complete(job.key)
+            enqueue_enrichment(self.store, '2026-10-15')
+        self.assertIsNone(self.store.claim_next('document'))
+        # A new ready-document set receives its own bounded recovery budget.
+        self.ready(base.key, 'two')
+        enqueue_enrichment(self.store, '2026-10-15')
+        job = self.store.claim_next('document')
+        await instance._handle_document_job(job)
+        self.store.complete(job.key)
+        self.assertEqual(len(self.api.puts), 1)
+        self.assertIn('docx/one', self.api.puts[0]['content'])
+        self.assertIn('docx/two', self.api.puts[0]['content'])
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-15'), 0)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-16'), 0)
 
     async def test_normal_interactive_enrichment_edits_full_card(self):
         base, bundle, delivery = await self.interactive_bundle()
@@ -134,7 +165,7 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         _, base = await self.prepare()
         self.ready(base.key, 'one')
         self.ready(base.key, 'two')
-        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 2)
+        self.assertEqual(enqueue_enrichment(self.store, '2026-10-11'), 3)
         with self.store._connect() as db:
             self.assertEqual(db.execute(
                 "SELECT count(*) FROM jobs WHERE job_key LIKE 'daily-document-followup:%' OR job_key LIKE '%inline-document-retry%'"

@@ -182,12 +182,29 @@ class DailyCardTooLargeError(ValueError):
 
 
 def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str,
-                              allow_compaction: bool = True) -> list[tuple[str, str, str]]:
-    """Prefer a schema-2.0 card, compact oversized days, then degrade safely.
-
-    With allow_compaction=False, reject an oversized full card before changing
-    its contents or message type, so in-place enrichment preserves the original.
-    """
+                              allow_compaction: bool = True, reserve_markdown: str | None = None,
+                              require_interactive: bool = False) -> list[tuple[str, str, str]]:
+    """Measure a conservative serialized envelope, reserving future links."""
+    if reserve_markdown is not None:
+        try:
+            reserved = daily_card_delivery_parts(reserve_markdown, idempotency_key,
+                title=title, allow_compaction=allow_compaction, require_interactive=True)
+        except DailyCardTooLargeError:
+            if require_interactive:
+                raise
+            # Retain the established exceptional send fallback for indivisible
+            # content that cannot fit even with maximum compaction.
+            return daily_card_delivery_parts(markdown, idempotency_key, title=title,
+                                             allow_compaction=allow_compaction)
+        card = json.loads(reserved[0][1])
+        visible_urls = {m[2] for m in MARKDOWN_LINK_RE.finditer(markdown)}
+        for element in card['body']['elements']:
+            if element['tag'] == 'markdown':
+                element['content'] = re.sub(
+                    r'(?m)^- \[(?:精读[^\]]*)\]\((https?://[^\s)]+)\)\n?',
+                    lambda m: m[0] if m[1] in visible_urls else '', element['content']).strip()
+        return [('interactive', json.dumps(card, ensure_ascii=False, separators=(',', ':')),
+                 reserved[0][2])]
     body = re.sub(r'(?m)^重做版[^\n]*\n*', '', markdown).strip()
     elements = [{'tag': 'markdown', 'content': f'**{title}**'}]
     sections = re.split(r'\n*━━━━━━━━━━━━━━━━━━━━\n*', body)
@@ -222,7 +239,7 @@ def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str
                 compact.append(element)
                 continue
             section = element['content']
-            section = re.sub(r'(?m)^- 优先级/阅读建议：[^\n]*\n?', '', section)
+            section = re.sub(r'(?m)^- 优先级/阅读建议：(?![^\n]*https?://)[^\n]*\n?', '', section)
             links = list(MARKDOWN_LINK_RE.finditer(section))
             listening_url = next((m[2] for m in links if m[1] == '收听节目'), '')
             compact.append({'tag': 'markdown', 'content': compact_reader_episode(
@@ -232,6 +249,8 @@ def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str
             return result
     # Preserve all original prose if even the compact card cannot fit. The
     # established post/text/overflow path measures every serialized envelope.
+    if require_interactive:
+        raise DailyCardTooLargeError('Compacted daily card exceeds 29000 bytes')
     return combined_delivery_parts(body, idempotency_key, title=title)
 
 

@@ -822,3 +822,33 @@ class NewStyleMigrationTests(unittest.TestCase):
                     self.assertNotIn("归档原文", content)
                     self.assertNotIn("核心论点", content)
                     self.assertEqual(compiler.publish(f.job), result)
+
+
+class EvidenceNormalizationTests(unittest.TestCase):
+    def test_quoted_ids_split_and_deduplicate_across_nested_fields(self):
+        from news_officer.deepread import normalize_evidence_ids
+        value = {'evidence_ids': ["C0062','C0063','C0070", 'C0063; C0071'],
+                 'nested': [{'evidence_ids': ['C0001 / C0002', 'C0001']}]}
+        normalized = normalize_evidence_ids(value)
+        self.assertEqual(normalized['evidence_ids'], ['C0062', 'C0063', 'C0070', 'C0071'])
+        self.assertEqual(normalized['nested'][0]['evidence_ids'], ['C0001', 'C0002'])
+
+    def test_nonexistent_extracted_ids_still_rejected(self):
+        value = sample()
+        value['core'][0]['evidence_ids'] = ["C0001','C9999"]
+        with self.assertRaisesRegex(ValueError, 'Unknown deepread evidence: C9999'):
+            validate_deepread(value, source_evidence(record().transcript.text))
+
+    def test_quoted_existing_ids_validate(self):
+        value = sample()
+        value['core'][0]['evidence_ids'] = ["C0001','C0002", 'C0001']
+        result = validate_deepread(value, source_evidence(record().transcript.text))
+        self.assertEqual(result['core'][0]['evidence_ids'], ['C0001', 'C0002'])
+
+
+    def test_model_parsing_normalizes_before_core_reference_length_validation(self):
+        value = sample()
+        value['core'][0]['evidence_ids'] = ["C0062','C0063','C0070; C0071 C0072"]
+        parsed = DeepRead.model_validate(value)
+        self.assertEqual(parsed.core[0].evidence_ids,
+                         ['C0062', 'C0063', 'C0070', 'C0071', 'C0072'])
