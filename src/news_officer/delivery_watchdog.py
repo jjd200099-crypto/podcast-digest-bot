@@ -59,6 +59,13 @@ def api(session, method, path, **kwargs):
 def text_values(value):
     if isinstance(value, str):
         yield value
+        # Raw cards may be JSON-encoded again inside fields such as json_card.
+        if value.lstrip().startswith(('{', '[')):
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                return
+            yield from text_values(decoded)
     elif isinstance(value, dict):
         for item in value.values():
             yield from text_values(item)
@@ -92,7 +99,8 @@ def check_receipt(session, app_id, chat_id, day, now):
         return 'not_due'
     params = {'container_id_type': 'chat', 'container_id': chat_id,
               'start_time': str(int(start.timestamp())), 'end_time': str(int(end.timestamp())),
-              'sort_type': 'ByCreateTimeDesc', 'page_size': 50}
+              'sort_type': 'ByCreateTimeDesc', 'page_size': 50,
+              'card_msg_content_type': 'raw_card_content'}
     for _ in range(20):
         data = api(session, 'GET', '/im/v1/messages', params=params).get('data')
         if not isinstance(data, dict) or not isinstance(data.get('items'), list):
