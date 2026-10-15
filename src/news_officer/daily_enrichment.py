@@ -72,6 +72,28 @@ def enqueue_enrichment(store, today, *, audience_filter=None, compiler=None):
         targets = _audience(store, [(d['target_type'], d['target_id']) for d in bundle['deliveries']], audience_filter)
         if not targets:
             continue
+        if bundle['enrichment']['day'] == today:
+            ready = store.list_job_results(base, 'daily_document_ready')
+            signature = hashlib.sha256(json.dumps(ready, sort_keys=True).encode()).hexdigest()[:20]
+            receipts = store.list_job_results(base, 'daily_edit_receipt')
+            with store._connect() as db:
+                sent = db.execute("SELECT remote_message_id,target_type,target_id FROM outbox "
+                                  "WHERE job_key=? AND status='sent'", (base,)).fetchall()
+            missing = any(
+                not any(r['message_id'] == row['remote_message_id']
+                        and set(r['episode_ids']) >= ids for r in receipts)
+                for row in sent
+                if (row['target_type'], row['target_id']) in targets
+                for ids in [{d['episode_id'] for result in ready
+                    if [row['target_type'], row['target_id']] in [list(t) for t in result['targets']]
+                    for d in result['documents']}] if ids)
+            retry_key = 'daily-edit-retry:' + hashlib.sha256(f'{base}:{signature}'.encode()).hexdigest()[:28]
+            attempts = sum(v['retry_key'] == retry_key for v in
+                           store.list_job_results(base, 'daily_edit_retry_state'))
+            if missing and attempts < 3:
+                count += store.enqueue(retry_key + ':' + str(attempts), 'document',
+                    {'mode': 'daily_edit_retry', 'base_job': base, 'day': today,
+                     'retry_key': retry_key})
         items = {i.episode.id: i for i in (DailyItem.from_persisted_dict(v)
                  for v in store.list_job_results(base, 'daily_item'))}
         for episode_id in bundle['enrichment']['eligible']:
@@ -140,10 +162,10 @@ def _content(bundle, documents, delivery):
     if edition.get('format') == 'interactive':
         try:
             parts = daily_card_delivery_parts(markdown, delivery['key'], title=edition['title'],
-                                              allow_compaction=False)
+                                              require_interactive=True)
         except DailyCardTooLargeError as error:
             logger.error('Daily enrichment card exceeds 29000 bytes; preserving original message')
-            raise LibraryError('补充链接后超过原消息容量，保留原日报，不压缩或降级') from error
+            raise LibraryError('补充链接后超过原消息容量，保留原日报，最大压缩后仍超限') from error
     else:
         parts = combined_delivery_parts(markdown, delivery['key'], title=edition['title'])
     if len(parts) != 1 or parts[0][0] != delivery['parts'][0][0]:

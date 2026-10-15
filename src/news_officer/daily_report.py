@@ -444,8 +444,24 @@ def _coverage_report(items: list[DailyItem]) -> str | None:
 
 def compact_reader_episode(content: str, level: int, listening_url: str) -> str:
     """Drop whole optional lines/paragraphs; retain a complete summary and links."""
+    if '- 简介：' in content:
+        # v4/draft-v5: keep layout and the complete introduction. Compact only
+        # optional advice and whole takeaway lines; never remove a URL line.
+        result, points = [], 0
+        for line in content.splitlines():
+            if 'http://' in line or 'https://' in line:
+                result.append(line)
+            elif line.strip().startswith(('- 优先级/阅读建议：', '阅读建议：', '推荐理由：')):
+                continue
+            elif re.match(r'^\s+\d+[.、] ', line):
+                points += 1
+                if level == 1 or points <= (2 if level == 2 else 1):
+                    result.append(line)
+            else:
+                result.append(line)
+        return '\n'.join(result).strip()
     lines = [line for line in content.splitlines()
-             if not line.strip().startswith(('阅读建议：', '推荐理由：'))]
+             if re.search(r'https?://', line) or not line.strip().startswith(('阅读建议：', '推荐理由：'))]
     if level == 1:
         result = '\n'.join(lines).strip()
     else:

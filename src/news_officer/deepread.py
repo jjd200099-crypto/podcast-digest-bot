@@ -7,7 +7,7 @@ import unicodedata
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .glossary import GLOSSARY_INSTRUCTIONS, preserve_glossary_values
 from .shownotes import Correction, NotePoint, text_node, transcript_evidence
@@ -67,9 +67,20 @@ class Exclusion(BaseModel):
     reason: Literal["advertisement", "montage", "filler", "outro", "duplicate"]
 
 
-class DeepRead(BaseModel):
+class DeepReadPoint(NotePoint):
+    evidence_ids: list[str] = Field(min_length=1)
+
+
+class EvidenceModel(BaseModel):
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_ids(cls, value):
+        return normalize_evidence_ids(value)
+
+
+class DeepRead(EvidenceModel):
     speakers: list[Speaker] = Field(min_length=1)
-    core: list[NotePoint] = Field(min_length=1)
+    core: list[DeepReadPoint] = Field(min_length=1)
     chapters: list[Chapter] = Field(min_length=1)
     proper_nouns: list[ProperNoun]
     exclusions: list[Exclusion]
@@ -81,8 +92,8 @@ class ChapterBoundary(BaseModel):
     start_turn: int = Field(ge=0)
 
 
-class Consolidation(BaseModel):
-    core: list[NotePoint] = Field(min_length=4, max_length=18)
+class Consolidation(EvidenceModel):
+    core: list[DeepReadPoint] = Field(min_length=4, max_length=18)
     chapters: list[ChapterBoundary] = Field(min_length=2, max_length=10)
 
 
@@ -202,7 +213,30 @@ def normalize_proper_noun(text):
     )
 
 
+def normalize_evidence_ids(value):
+    """Recover quoted/comma-separated IDs without hiding unknown references."""
+    if isinstance(value, list):
+        return [normalize_evidence_ids(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    normalized = {}
+    for key, item in value.items():
+        if key == 'evidence_ids' and isinstance(item, list):
+            ids = []
+            for element in item:
+                tokens = (re.findall(r'(?<![A-Za-z0-9_])C\d{4}(?!\d)', element)
+                          if isinstance(element, str) else [])
+                for token in tokens or [element]:
+                    if token not in ids:
+                        ids.append(token)
+            normalized[key] = ids
+        else:
+            normalized[key] = normalize_evidence_ids(item)
+    return normalized
+
+
 def validate_deepread(value, evidence):
+    value = normalize_evidence_ids(value)
     source = "\n".join(body["text"] for body in evidence.values())
     notes = DeepRead.model_validate(preserve_glossary_values(value, source))
     check_output(json.dumps(notes.model_dump(), ensure_ascii=False))
