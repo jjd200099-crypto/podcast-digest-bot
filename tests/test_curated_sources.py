@@ -32,6 +32,20 @@ class CuratedSourcesTests(unittest.TestCase):
         self.assertEqual(loaded[0].url, "")
         self.assertEqual(loaded[0].rss_url, "https://cheekypint.substack.com/feed")
 
+    def test_only_podcast_generalist_source_is_configured(self):
+        feeds_text = (ROOT / "feeds.json").read_text(encoding="utf-8")
+        sources = json.loads(feeds_text)["sources"]
+        generalist_sources = [source for source in sources
+                              if "generalist" in source["name"].casefold()]
+        self.assertEqual(generalist_sources, [{
+            "name": "The Generalist",
+            "type": "youtube",
+            "priority": "B",
+            "url": "https://www.youtube.com/channel/UC5xRQOIT8cfumDr2HaKNd4g/videos",
+            "rss_url": "https://api.substack.com/feed/podcast/15764.rss",
+        }])
+        self.assertNotIn("UCwV9z8IGmbUQUb5D8KSv3mQ", feeds_text)
+
     def test_curated_youtube_sources_load(self):
         expected = {
             "Anthropic": "UCrDwWp7EBBv4NwvScIpBDOA",
@@ -39,7 +53,6 @@ class CuratedSourcesTests(unittest.TestCase):
             "Andrej Karpathy": "UCXUPKJO5MZQN11PqgIvyuvQ",
             "Stripe": "UCM1guA1E-RHLO2OyfQPOkEQ",
             "Founders You Should Know": "UC7tPLStIIpO7a9x9ERMXrdg",
-            "Generalist": "UCwV9z8IGmbUQUb5D8KSv3mQ",
             "Index Ventures": "UCFMxDWNYefVV3XmCdCBCFjQ",
         }
         feeds_path = ROOT / "feeds.json"
