@@ -87,3 +87,42 @@ class RSSDailyTests(unittest.TestCase):
         self.assertLess(providers.index(PodwiseTranscriptProvider), providers.index(YouTubeTranscriptProvider))
         self.assertTrue(any(isinstance(p, YouTubeTranscriptProvider)
                              for p in service.daily_transcript_resolver.providers))
+
+    def test_configured_identity_for_rss_youtube_and_official_titles(self):
+        for title in ['RSS renamed show', 'YouTube channel title', 'Sequoia Capital']:
+            with self.subTest(title=title), patch('news_officer.podcast.latest_rss_episodes',
+                                                return_value=[replace(self.episode, show=title)]):
+                [episode] = self.service().discover_daily_candidates()
+                self.assertEqual(episode.metadata['source_name'], 'Show')
+                self.assertEqual(episode.metadata['source_priority'], 'B')
+
+    def test_youtube_fallback_retains_configured_identity(self):
+        with patch('news_officer.podcast.latest_rss_episodes', return_value=[]), \
+                patch('news_officer.podcast.latest_videos', return_value=[self.episode]):
+            service = self.service()
+            service.daily_rss_only = False
+            [episode] = service.discover_daily_candidates()
+        self.assertEqual(episode.metadata['source_name'], 'Show')
+
+    def test_podwise_resolves_configured_identity_and_priority(self):
+        self.feeds.write_text(self.feeds.read_text().replace('"type": "youtube"',
+                                                           '"priority": "A", "type": "youtube"'))
+        episode = replace(self.episode, id='podwise:123', show='Podwise own title',
+                          metadata={'source_priority': 'B', 'source_name': 'Show'})
+        service = self.service()
+        service.discovery = Mock(discover=Mock(return_value=Mock(
+            episodes=[episode], notice='', failed_requests=0)))
+        with patch('news_officer.podcast.latest_rss_episodes', return_value=[]):
+            [candidate] = service.discover_daily_candidates()
+        self.assertEqual(candidate.metadata['source_name'], 'Show')
+        self.assertEqual(candidate.metadata['source_priority'], 'A')
+
+    def test_official_metadata_merge_preserves_configured_source(self):
+        configured = replace(self.episode, metadata={
+            **self.episode.metadata, 'source_name': 'Sequoia Capital — Training Data',
+            'source_priority': 'A'})
+        official = replace(self.episode, show='Sequoia Capital', metadata={
+            'source_name': 'Provider title', 'source_priority': 'B'})
+        merged = PodcastService._merge_episode(configured, official)
+        self.assertEqual(merged.metadata['source_name'], 'Sequoia Capital — Training Data')
+        self.assertEqual(merged.metadata['source_priority'], 'A')

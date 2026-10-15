@@ -173,7 +173,7 @@ def _discover_articles(source: dict) -> list[tuple[Episode, Transcript]]:
             identity = 'text:' + hashlib.sha256(url.encode()).hexdigest()[:32]
             episode = Episode(identity, ' '.join((feed_title or title).split()), url, source['name'],
                               published_at=feed_date or date,
-                              metadata={'source_type': 'text', 'source_priority': source.get('priority', 'B')})
+                              metadata={'source_name': source['name'], 'source_type': 'text', 'source_priority': source.get('priority', 'B')})
             results.append((episode, Transcript(text, 'publisher article', url, True)))
             if len(results) >= limit:
                 break

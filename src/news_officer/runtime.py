@@ -578,6 +578,8 @@ class NewsOfficerRuntime:
         items = [DailyItem.from_persisted_dict(value) for value in values]
         for item, value in zip(items, values):
             item.episode.metadata['source_priority'] = value.get('source_priority', 'B')
+            if value.get('source_name'):
+                item.episode.metadata['source_name'] = value['source_name']
         return ranked_daily_items(items)
 
     def _persist_daily_items(self, job: Job, results: list[DailyItem]) -> None:
@@ -603,7 +605,8 @@ class NewsOfficerRuntime:
                 f"episode:{item.episode.id}",
                 "daily_item",
                 {**item.to_persisted_dict(),
-                 "source_priority": item.episode.metadata.get("source_priority", "B")},
+                 "source_priority": item.episode.metadata.get("source_priority", "B"),
+                 "source_name": item.episode.metadata.get("source_name")},
             )
             # Parse the first immutable value so a concurrent writer can never
             # cause a different payload to be delivered under the same UUID.

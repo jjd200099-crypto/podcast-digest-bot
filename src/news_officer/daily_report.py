@@ -377,7 +377,7 @@ def daily_reading_level(item: DailyItem) -> int:
     """Explicit advice wins; legacy summaries fall back to their stars."""
     advice = re.search(r'阅读建议：[ \t]*([^\n]+)', item.message)
     if advice:
-        return 2 if '值得编译' in advice[1] else 1 if '值得看全文' in advice[1] else 0
+        return {'值得编译': 2, '值得看全文': 1}.get(advice[1].strip(), 0)
     rating = re.search(r'推荐星级：([★☆]{5})', item.message)
     stars = rating[1].count('★') if rating else 0
     return 2 if stars == 5 else 1 if stars == 4 else 0
@@ -396,7 +396,7 @@ def select_daily_episodes(items: list[DailyItem]) -> list[DailyItem]:
     """
     logger = logging.getLogger(__name__)
     try:
-        cap = max(1, min(5, int(os.getenv('NEWS_OFFICER_DAILY_MAX_EPISODES', '5'))))
+        cap = max(3, min(5, int(os.getenv('NEWS_OFFICER_DAILY_MAX_EPISODES', '5'))))
     except ValueError:
         cap = 5
     ranked = sorted(ranked_daily_items([i for i in items if i.status == 'summarized']),
@@ -404,7 +404,7 @@ def select_daily_episodes(items: list[DailyItem]) -> list[DailyItem]:
             i.episode.metadata.get('source_priority', 'B'), 2), -daily_reading_level(i)))
     unique, sources = [], set()
     for item in ranked:
-        source = item.episode.show.strip().casefold()
+        source = ' '.join((item.episode.metadata.get('source_name') or item.episode.show).split()).casefold()
         if source in sources:
             logger.info('Daily per-source cap dropped %s (%s): %s', item.episode.id,
                         item.episode.show, item.episode.title)

@@ -27,10 +27,13 @@ class ReaderDailyTests(unittest.IsolatedAsyncioTestCase):
         candidates = [self.item(f'priority-{i}', stars=5) for i in range(7)]
         for item in candidates:
             item.episode.metadata['source_priority'] = 'A'
+            item.episode.metadata['source_name'] = f'Configured {item.episode.id}'
         instance, job, _ = self.setup_job(candidates)
         instance._persist_daily_items(job, candidates)
         restored = instance._persisted_daily_items(job)
         self.assertTrue(all(i.episode.metadata['source_priority'] == 'A' for i in restored))
+        self.assertEqual([i.episode.metadata['source_name'] for i in restored],
+                         [i.episode.metadata['source_name'] for i in candidates])
         await instance._handle_daily_job(job)
         bundle = self.store.list_job_results(job.key, 'daily_bundle')[0]
         self.assertEqual(len(bundle['episode_ids']), 6)

@@ -20,7 +20,7 @@ from news_officer.daily_report import (
     v4_layout_enabled,
 )
 from news_officer.feishu import combined_delivery_parts, daily_card_delivery_parts
-from news_officer.models import DailyItem
+from news_officer.models import DailyItem, Episode
 from news_officer.summarizer import (
     _valid_editorial_summary,
     _valid_v4_summary,
@@ -355,3 +355,33 @@ class DailyV4RuntimeTests(unittest.IsolatedAsyncioTestCase):
         instance.settings.daily_layout = 'compact'
         instance._prepare_combined_daily(job, finalize=True)
         self.assertEqual(bundle, self.store.list_job_results(job.key, 'daily_bundle')[0])
+
+
+class FullSixEpisodeCardTests(unittest.TestCase):
+    def test_realistic_full_six_episode_card_fits_without_compaction(self):
+        # Real Chinese model output: long introduction and six substantive bullets.
+        # The 3.2KB source is in the requested production-sized 2.5–3.5KB range.
+        raw = normalize_v4_summary((Path(__file__).parent / 'fixtures' /
+                                   'v4-summary-model-output-2026-10-14.md').read_text())
+        self.assertTrue(2500 <= len(raw.encode()) <= 3500)
+        sections = []
+        points = [line for line in raw.splitlines() if line[:1].isdigit()]
+        self.assertEqual(len(points), 6)
+        for index in range(6):
+            episode = Episode(f'full-{index}', f'AI 安全与工程实践 {index}',
+                              f'https://example.org/episodes/production-2026-10-15-{index}',
+                              f'Configured Show {index}')
+            sections.append(reader_episode_v4(DailyItem(episode, 'summarized', raw), index + 1,
+                document_url=f'https://example.feishu.cn/docx/ProductionReadingDocument20261015{index}'))
+        markdown = '\n━━━━━━━━━━━━━━━━━━━━\n'.join(sections)
+        [part] = daily_card_delivery_parts(markdown, 'full-six', title='播客精选 2026-10-15',
+                                           allow_compaction=False, require_interactive=True)
+        from news_officer.feishu import encoded_message_payload
+        envelope = {'receive_id': 'x' * 128, 'msg_type': 'interactive', 'content': part[1],
+                    'uuid': 'x' * 36, 'reply_in_thread': False}
+        self.assertLessEqual(len(encoded_message_payload(envelope)), 29000)
+        content = '\n'.join(e.get('content', '') for e in json.loads(part[1])['body']['elements'])
+        for point in points:
+            self.assertEqual(content.count(point), 6)
+        self.assertEqual(content.count('[精读和完整中文对谈]('), 6)
+        self.assertEqual(content.count('[收听节目]('), 6)
