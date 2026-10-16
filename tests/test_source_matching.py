@@ -12,6 +12,7 @@ from news_officer.podcast import (
     YouTubeFeedSource,
     _configured_podwise_source,
     _source_name_key,
+    _warn_source_name_collisions,
     load_youtube_sources,
 )
 from news_officer.podwise_discovery import PodwiseDiscovery
@@ -20,6 +21,63 @@ from news_officer.store import Store
 
 
 class SourceMatchingTests(unittest.TestCase):
+    def test_real_config_has_no_name_or_alias_collisions(self):
+        with self.assertNoLogs('news_officer.podcast', level='WARNING'):
+            sources = load_youtube_sources(Path(__file__).resolve().parents[1] / 'feeds.json')
+            _warn_source_name_collisions(sources)
+        owners = {}
+        for index, source in enumerate(sources):
+            for name in (source.name, *source.aliases):
+                key = _source_name_key(name)
+                if key:
+                    owners.setdefault(key, set()).add(index)
+        self.assertTrue(sources)
+        self.assertTrue(all(len(indices) == 1 for indices in owners.values()))
+
+    def test_collision_warnings_are_scoped_to_each_run(self):
+        sources = [YouTubeFeedSource('', name='Shared'),
+                   YouTubeFeedSource('', name='Other', aliases=('Shared',))]
+        episode = Episode('podwise:1', 'Title', 'https://example.org/1', 'Shared')
+        for _ in range(2):
+            warned = set()
+            with self.assertLogs('news_officer.podcast', level='WARNING') as logs:
+                _warn_source_name_collisions(sources, warned)
+                _warn_source_name_collisions(sources, warned)
+                for _ in range(3):
+                    self.assertIsNone(_configured_podwise_source(episode, sources))
+            self.assertEqual(len(logs.output), 1)
+
+    def test_feed_precedes_colliding_or_unique_names_and_requires_unique_source(self):
+        sources = [YouTubeFeedSource('', name='Shared', rss_url='https://example.org/one'),
+                   YouTubeFeedSource('', name='Other', aliases=('Shared',),
+                                     rss_url='https://example.org/two')]
+        episode = Episode('podwise:1', 'Title', 'https://example.org/audio', 'Shared',
+                          metadata={'rss_feed_url': 'http://EXAMPLE.org/two/?utm_source=test'})
+        self.assertIs(_configured_podwise_source(episode, sources), sources[1])
+        self.assertIs(_configured_podwise_source(replace(episode, show='Other', metadata={
+            'rss_feed_url': 'https://example.org/one'}), sources), sources[0])
+        self.assertIsNone(_configured_podwise_source(episode, [*sources, replace(
+            sources[0], rss_url=sources[1].rss_url)]))
+        pinned = replace(sources[0], podwise_podcast_ids=('123',))
+        self.assertIs(_configured_podwise_source(replace(episode, metadata={
+            **episode.metadata, 'podwise_podcast_seq': 123}), [pinned, sources[1]]), pinned)
+
+    def test_real_fixture_substack_enclosure_resolves_colliding_names(self):
+        fixture = Path(__file__).parent / 'fixtures/podwise/episodes_search.json'
+        row = json.loads(fixture.read_text())['result'][0]
+        now = datetime(2026, 10, 16, tzinfo=UTC)
+        episode, reason = PodwiseDiscovery._episode(row, now, now - timedelta(days=365))
+        self.assertIsNone(reason)
+        sources = [YouTubeFeedSource('', name=row['podcastName'],
+                                     rss_url='https://api.substack.com/feed/podcast/200432443.rss'),
+                   YouTubeFeedSource('', name='Other', aliases=(row['podcastName'],),
+                                     rss_url='https://api.substack.com/feed/podcast/20043244.rss')]
+        self.assertIs(_configured_podwise_source(episode, sources), sources[0])
+        self.assertIsNone(_configured_podwise_source(episode, [*sources, replace(
+            sources[1], rss_url=sources[0].rss_url)]))
+        self.assertIsNone(_configured_podwise_source(replace(episode,
+            url=episode.url.replace('api.substack.com', 'other.example')), sources))
+
     def test_feed_normalization(self):
         tracking = ('utm_source', 'UTM_campaign', 'fbclid', 'gclid', 'mc_cid', 'mc_eid',
                     'igshid', 'ref', 'ref_src', 'si', '_hsenc', '_hsmi')
@@ -155,7 +213,8 @@ class SourceMatchingTests(unittest.TestCase):
     def test_catalog_parent_ids_resolve_seq_only_episode_rows(self):
         now = datetime(2026, 10, 16, tzinfo=UTC)
         discovery = PodwiseDiscovery('fake', topics=(), podcast_topics=('fixture',))
-        catalogs = [{'seq': 653, 'podcastId': 'a' * 64, 'name': 'Catalog One'},
+        catalogs = [{'seq': 653, 'podcastId': 'a' * 64, 'name': 'Catalog One',
+                     'feedUrl': 'http://EXAMPLE.org/one/?utm_source=catalog'},
                     {'seq': 11659, 'podcastId': 'b' * 64, 'name': 'Catalog Two'}]
         responses = {
             '/episodes/popular': {'result': []},
@@ -174,6 +233,9 @@ class SourceMatchingTests(unittest.TestCase):
             catalog = next(c for c in catalogs if c['name'] == episode.show)
             self.assertEqual(episode.metadata['podwise_podcast_id'], catalog['podcastId'])
             self.assertEqual(episode.metadata['podwise_podcast_seq'], catalog['seq'])
+            if catalog.get('feedUrl'):
+                source = YouTubeFeedSource('', name='Different', rss_url='https://example.org/one')
+                self.assertIs(_configured_podwise_source(episode, [source]), source)
             for identifier in (catalog['podcastId'], catalog['seq'], str(catalog['seq'])):
                 source = YouTubeFeedSource('', name='Different name',
                                            podwise_podcast_ids=(identifier,))
