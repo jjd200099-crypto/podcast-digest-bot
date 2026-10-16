@@ -170,6 +170,14 @@
     {
       "name": "Latent Space",
       "aliases": ["Latent Space: The AI Engineer Podcast"],
+      "podwise_podcast_ids": [
+        "1b3ace9adecb0ff97356200435969899a05b4817526b475a735353a0a091a4fd",
+        653,
+        "8ecaf5e266e9b730317ae6b5981dcbad143d7f55c1957b6721e3a3f999329c4b",
+        14594,
+        "713cd864ff366ad071b127b518e3f5be5ec0bb4acbe78edba59ab5f7022b48df",
+        11659
+      ],
       "type": "rss",
       "priority": "B",
       "url": "",

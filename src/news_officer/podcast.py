@@ -229,9 +229,10 @@ def load_youtube_sources(path: Path) -> list[YouTubeFeedSource]:
                     priority=priority,
                     source_type=source["type"],
                     aliases=_string_list(source.get("aliases")),
-                    podwise_podcast_ids=_string_list(source.get("podwise_podcast_ids")),
+                    podwise_podcast_ids=_podwise_ids(source.get("podwise_podcast_ids")),
                 )
             )
+    _warn_source_name_collisions(sources)
     return sources
 
 
@@ -239,6 +240,23 @@ def _string_list(value) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
+
+
+def _podwise_ids(value) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(v).strip() for v in value
+                 if type(v) in (str, int) and str(v).strip())
+
+
+def _warn_source_name_collisions(sources):
+    keys = {}
+    for index, source in enumerate(sources):
+        for key in {_source_name_key(n) for n in (source.name, *source.aliases)} - {''}:
+            keys.setdefault(key, {})[index] = source.name
+    for key, names in keys.items():
+        if len(names) > 1:
+            logger.warning("Colliding normalized source name %r: %s", key, ', '.join(names.values()))
 
 
 def _source_name_key(value: str) -> str:
@@ -251,25 +269,25 @@ _source_url_key = normalize_rss_url
 
 
 def _configured_podwise_source(episode: Episode, sources: list[YouTubeFeedSource]):
-    feed = _source_url_key(str(episode.metadata.get('rss_feed_url') or ''))
-    if feed:
-        for source in sources:
-            if any(feed == _source_url_key(url) for url in (source.rss_url, source.url)):
-                return source
-    podcast_id = episode.metadata.get('podwise_podcast_id')
-    if podcast_id:
-        for source in sources:
-            if podcast_id in source.podwise_podcast_ids:
-                return source
+    identifiers = {str(episode.metadata.get(key) or '').strip()
+                   for key in ('podwise_podcast_id', 'podwise_podcast_seq')} - {''}
+    id_matches = [source for source in sources
+                  if identifiers.intersection(_podwise_ids(source.podwise_podcast_ids))]
+    if id_matches:
+        return id_matches[0] if len(id_matches) == 1 else None
     names = {_source_name_key(episode.show),
              _source_name_key(str(episode.metadata.get('podwise_podcast_name') or ''))} - {''}
-    for source in sources:
-        if names.intersection(_source_name_key(alias) for alias in source.aliases):
-            return source
-    for source in sources:
-        if _source_name_key(source.name) in names:
-            return source
-    return None
+    name_matches = [source for source in sources if names.intersection(
+        _source_name_key(name) for name in (source.name, *source.aliases))]
+    if len(name_matches) > 1:
+        return None
+    feed = _source_url_key(str(episode.metadata.get('rss_feed_url') or ''))
+    if feed:
+        feed_matches = [source for source in sources if any(
+            feed == _source_url_key(url) for url in (source.rss_url, source.url))]
+        if feed_matches:
+            return feed_matches[0] if len(feed_matches) == 1 else None
+    return name_matches[0] if name_matches else None
 
 
 def load_youtube_feeds(path: Path) -> list[str]:
@@ -639,8 +657,9 @@ class PodcastService:
                 url=s.get("url", ""), name=s["name"], rss_url=s.get("rss_url", ""),
                 scan_depth=s.get("scan_depth", 30), priority=s.get("priority", "B"),
                 source_type=s.get("type", "rss"), aliases=_string_list(s.get("aliases")),
-                podwise_podcast_ids=_string_list(s.get("podwise_podcast_ids")),
+                podwise_podcast_ids=_podwise_ids(s.get("podwise_podcast_ids")),
             ) for s in self.source_registry.list() if s.get("origin") == "conversation")
+            _warn_source_name_collisions(sources)
         configured_sources = sources[:]
         if self.daily_rss_only:
             sources = [source for source in sources if source.rss_url]
