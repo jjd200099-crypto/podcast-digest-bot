@@ -1,0 +1,53 @@
+{
+ "success": true,
+ "result": [
+  {
+   "episodeId": "f32c1787249527409bdc7dd292f618a9b051b8bd08b1fb030855c67195f87ded",
+   "seq": 8133612,
+   "title": "⚡️Satya Nadella: No Priors x Latent Space Crossover Special at Microsoft Build",
+   "podcastName": "Latent Space: The AI Engineer Podcast",
+   "podcastId": "8ecaf5e266e9b730317ae6b5981dcbad143d7f55c1957b6721e3a3f999329c4b",
+   "content": "<p>We’ve informally heard that Satya is a listener to LS for a couple years now, but it was still absolutely surreal to meet him and do a live pod at Build, together with our friends at <strong>No Priors</strong>, the leading VC AI Podcast that we also greatly admire!</p><p>We covered <a target=\"_bl",
+   "cover": "https://substackcdn.com/feed/podcast/1084089/post/200432443/1cf5a66a6ee1300ce0cc0121e7c664d8.jpg",
+   "publishTime": 1780506837,
+   "link": "https://api.substack.com/feed/podcast/200432443/dff0614ab10e21be66d39c4847157a18.mp3",
+   "linkType": "mp3",
+   "duration": 2338,
+   "transcribed": true,
+   "language": "English"
+  },
+  {
+   "episodeId": "fa0cb5b22b5917b3bb7ba6dc17474edc6dab44eae01d7fcfb161cd4d26e24520",
+   "seq": 8133701,
+   "title": "⚡️Satya Nadella: No Priors x Latent Space Crossover Special at Microsoft Build",
+   "podcastName": "Latent Space: The AI Engineer Podcast",
+   "podcastId": "1b3ace9adecb0ff97356200435969899a05b4817526b475a735353a0a091a4fd",
+   "content": "<p>We’ve informally heard that Satya is a listener to LS for a couple years now, but it was still absolutely surreal to meet him and do a live pod at Build, together with our friends at <strong>No Priors</strong>, the leading VC AI Podcast that we also greatly admire!</p><p>We covered <a target=\"_bl",
+   "cover": "https://substackcdn.com/feed/podcast/1084089/post/200432443/1cf5a66a6ee1300ce0cc0121e7c664d8.jpg",
+   "publishTime": 1780506837,
+   "link": "https://api.substack.com/feed/podcast/200432443/dff0614ab10e21be66d39c4847157a18.mp3",
+   "linkType": "mp3",
+   "duration": 2338,
+   "transcribed": true,
+   "language": "English"
+  },
+  {
+   "episodeId": "f7e16b17d7219f078e5fb042d5f9436b63f54d86dd0b2189249667285770548b",
+   "seq": 8210988,
+   "title": "Satya Nadella on AI: @NoPriorsPodcast  x Latent Space Crossover Special at Microsoft Build 2026",
+   "podcastName": "Latent Space",
+   "podcastId": "713cd864ff366ad071b127b518e3f5be5ec0bb4acbe78edba59ab5f7022b48df",
+   "content": "https://x.com/TheTuringPost/status/2061901518522188251?s=20\n\nSatya Nadella joins swyx, Sarah Guo, and Elad Gil to discuss Microsoft’s AI announcements and argues the key shift is an ecosystem approach where any company can build “frontier intelligence” using models, tools, data, and a harness, not j",
+   "cover": "https://i.ytimg.com/vi/cFNI2FORAc0/hqdefault.jpg",
+   "publishTime": 1780486852,
+   "link": "https://www.youtube.com/watch?v=cFNI2FORAc0",
+   "linkType": "youtube",
+   "duration": 2487,
+   "transcribed": true,
+   "language": "English"
+  }
+ ],
+ "estimatedTotalHits": 100,
+ "page": 0,
+ "hitsPerPage": 3
+}
