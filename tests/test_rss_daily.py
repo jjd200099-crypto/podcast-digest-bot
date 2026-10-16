@@ -166,6 +166,17 @@ class RSSDailyTests(unittest.TestCase):
         self.assertEqual(episode.metadata['source_name'], 'Show')
         self.assertEqual(episode.metadata['source_priority'], 'A')
 
+    def test_podwise_colliding_alias_keeps_legacy_fallback(self):
+        with self.assertLogs('news_officer.podcast', level='WARNING') as logs:
+            candidates = self.discover_podwise('Show on Podwise', extra_sources=[
+                {'name': 'Other Show', 'aliases': ['THE Show—on Podwise!'],
+                 'type': 'rss', 'url': 'https://example.org/other'}])
+        self.assertIn('show on podwise', '\n'.join(logs.output))
+        episode = next(e for e in candidates if e.id == 'podwise:123')
+        self.assertNotIn('source_name', episode.metadata)
+        self.assertEqual(episode.show, 'Show on Podwise')
+        self.assertEqual(episode.metadata['source_priority'], 'B')
+
     def test_podwise_unmatched_fallback_preserves_query_identity(self):
         candidates = self.discover_podwise('Unknown show', 'https://example.org/feed?channel=other')
         episode = next(e for e in candidates if e.id == 'podwise:123')

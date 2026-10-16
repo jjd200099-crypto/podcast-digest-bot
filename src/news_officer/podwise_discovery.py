@@ -78,6 +78,9 @@ class PodwiseDiscovery:
                                  'podwise_podcast_name': row.get('catalogName'),
                                  'source_priority': 'B',
                                  # Optional legacy fields; real API samples have no RSS URL.
+                                 'rss_feed_urls': tuple(row.get('catalogFeedUrls', ())) + tuple(
+                                     row[k] for k in ('rssUrl', 'rssFeedUrl', 'feedUrl', 'rss')
+                                     if isinstance(row.get(k), str)),
                                  'rss_feed_url': row.get('rssUrl') or row.get('rssFeedUrl')
                                  or row.get('feedUrl') or row.get('rss') or ''}), None
 
@@ -160,6 +163,9 @@ class PodwiseDiscovery:
                     value = [dict(r, podcastSeq=r.get('podcastSeq') or seq,
                                   podcastId=r.get('podcastId') or show.get('podcastId'),
                                   catalogName=show.get('name'),
+                                  catalogFeedUrls=tuple(show[k] for k in (
+                                      'rssUrl', 'rssFeedUrl', 'feedUrl', 'rss')
+                                      if isinstance(show.get(k), str)),
                                   podcastName=r.get('podcastName') or show.get('name'))
                              if isinstance(r, dict) else r
                              for r in value]

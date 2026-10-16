@@ -85,8 +85,15 @@ catalog rows, plus `name` from podcast search. Comparison casefolds names, remov
 punctuation/emoji, collapses whitespace, and ignores a leading “The”. Configure
 `aliases` as a list of alternate show names (for example, Latent Space includes
 “Latent Space: The AI Engineer Podcast”), or `podwise_podcast_ids` as a list of
-exact `podcastId` strings. Invalid alias containers are ignored; lists retain only
-non-empty strings.
+exact 64-hex `podcastId` strings or catalog `seq` values (integers or strings).
+Explicit IDs take precedence over names and aliases. Episode search provides
+`podcastId`; dated catalog episode rows inherit the parent catalog's `seq` and,
+when available from podcast search, `podcastId`.
+
+Source loading logs a warning for each normalized name/alias shared by different
+sources. Ambiguous names remain unmatched unless an explicit ID identifies one
+source; matching never uses partial names. Invalid alias containers are ignored;
+alias lists retain only non-empty strings.
 
 The production response samples in `tests/fixtures/podwise/` contain no RSS URL
 field. Legacy RSS fields remain optional fallbacks only. Episode `link` is an
