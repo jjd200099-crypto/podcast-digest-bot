@@ -79,3 +79,18 @@ Official API references: [popular episodes](https://docs.podwise.ai/open-api-v1/
 [episode search](https://docs.podwise.ai/open-api-v1/discovery/search-episodes),
 [dated podcast catalog](https://docs.podwise.ai/open-api-v1/discovery/list-podcast-episodes),
 [episode metadata](https://docs.podwise.ai/open-api-v1/episodes/get-episode-info).
+
+Configured source matching uses normalized `podcastName` from episode search and
+catalog rows, plus `name` from podcast search. Comparison casefolds names, removes
+punctuation/emoji, collapses whitespace, and ignores a leading “The”. Configure
+`aliases` as a list of alternate show names (for example, Latent Space includes
+“Latent Space: The AI Engineer Podcast”), or `podwise_podcast_ids` as a list of
+exact `podcastId` strings. Invalid alias containers are ignored; lists retain only
+non-empty strings.
+
+The production response samples in `tests/fixtures/podwise/` contain no RSS URL
+field. Legacy RSS fields remain optional fallbacks only. Episode `link` is an
+MP3 enclosure or YouTube watch URL; it is never treated as a feed or used to guess
+a YouTube channel. Feed identity comparison ignores HTTP versus HTTPS, host case,
+default ports, trailing path slashes, query order, and tracking parameters, while
+preserving other query parameters.

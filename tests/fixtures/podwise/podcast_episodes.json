@@ -1,0 +1,37 @@
+{
+ "success": true,
+ "result": [
+  {
+   "episodeId": "c327afb8a8e64779e93b230972c0bca51e1c1d9bda50cf7674d8403e7aa42b9d",
+   "seq": 9121941,
+   "title": "Robots That Predict the Future: Dyna-2 & Physical AI — Jason Ma, Dyna Robotics",
+   "podcastName": "Latent Space",
+   "cover": "https://yt3.ggpht.com/pSTHcffCXEverYEPdjM0iIRPH-IUT4d2biIMZ_Z7bhyf6sME-laFer9vEfpFbM5tqFYJV-UsLQ=s800-c-k-c0x00ffffff-no-rj",
+   "epCover": "https://i.ytimg.com/vi/BHiYomkfoGQ/default.jpg",
+   "description": "From training a world-action model on over one million hours of human video to deploying robots that fold thousands of napkins daily at Din Tai Fung, Dyna Robotics is pushing physical AI beyond impres",
+   "publishTime": 1791913353,
+   "link": "https://www.youtube.com/watch?v=BHiYomkfoGQ",
+   "linkType": "youtube",
+   "duration": null,
+   "transcribed": false,
+   "language": null,
+   "isRead": false
+  },
+  {
+   "episodeId": "d9d2257d82908b6be7e123fe343ff7772fb872734644a42f64015f7b05fd0237",
+   "seq": 9092380,
+   "title": "Why AlphaFold Didn't Solve Protein Folding — Pushmeet Kohli, Google DeepMind & Sal Candido, Biohub",
+   "podcastName": "Latent Space",
+   "cover": "https://yt3.ggpht.com/pSTHcffCXEverYEPdjM0iIRPH-IUT4d2biIMZ_Z7bhyf6sME-laFer9vEfpFbM5tqFYJV-UsLQ=s800-c-k-c0x00ffffff-no-rj",
+   "epCover": "https://i.ytimg.com/vi/NufiHZfMwaw/default.jpg",
+   "description": "From the Bitter Lesson of AI scaling to the unsolved mysteries of protein folding, Google DeepMind’s Pushmeet Kohli and Biohub’s Sal Candido are rethinking what it takes to build AI that truly underst",
+   "publishTime": 1791592241,
+   "link": "https://www.youtube.com/watch?v=NufiHZfMwaw",
+   "linkType": "youtube",
+   "duration": null,
+   "transcribed": true,
+   "language": "English",
+   "isRead": false
+  }
+ ]
+}

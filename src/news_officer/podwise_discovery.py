@@ -74,7 +74,10 @@ class PodwiseDiscovery:
                        duration_seconds=duration, published_at=when,
                        metadata={'discovery_origin': 'podwise', 'podwise_seq': row['seq'],
                                  'podwise_podcast_seq': row.get('podcastSeq'),
+                                 'podwise_podcast_id': row.get('podcastId'),
+                                 'podwise_podcast_name': row.get('catalogName'),
                                  'source_priority': 'B',
+                                 # Optional legacy fields; real API samples have no RSS URL.
                                  'rss_feed_url': row.get('rssUrl') or row.get('rssFeedUrl')
                                  or row.get('feedUrl') or row.get('rss') or ''}), None
 
@@ -82,6 +85,7 @@ class PodwiseDiscovery:
         now = now.astimezone(UTC)
         cutoff = now - timedelta(hours=lookback_hours)
         rows, catalogs, details, errors, capped = [], set(), set(), [], []
+        catalog_metadata = {}
         watch = self.store.discovery_watch_catalogs(now) if self.store else []
         catalogs.update(watch)
         request_count = 1
@@ -125,6 +129,8 @@ class PodwiseDiscovery:
             if error or not isinstance(entries, list):
                 errors.append('频道搜索')
                 continue
+            catalog_metadata.update({r['seq']: r for r in entries if isinstance(r, dict)
+                                     and type(r.get('seq')) is int and r['seq'] > 0})
             catalogs.update(r['seq'] for r in entries if isinstance(r, dict)
                             and type(r.get('seq')) is int and r['seq'] > 0)
         # Stable daily rotation prevents the same tail of catalog candidates from
@@ -150,7 +156,12 @@ class PodwiseDiscovery:
                     continue
                 if request[0].startswith('/podcasts/'):
                     seq = int(request[0].split('/')[2])
-                    value = [dict(r, podcastSeq=r.get('podcastSeq') or seq) if isinstance(r, dict) else r
+                    show = catalog_metadata.get(seq, {})
+                    value = [dict(r, podcastSeq=r.get('podcastSeq') or seq,
+                                  podcastId=r.get('podcastId') or show.get('podcastId'),
+                                  catalogName=show.get('name'),
+                                  podcastName=r.get('podcastName') or show.get('name'))
+                             if isinstance(r, dict) else r
                              for r in value]
                 rows.extend(value if isinstance(value, list) else [value])
         episodes, invalid = {}, 0

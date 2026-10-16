@@ -12,7 +12,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -38,6 +37,7 @@ from .rss import (
     latest_rss_episodes,
 )
 from .sequoia import SequoiaOfficialTranscriptProvider
+from .source_matching import normalize_rss_url
 from .store import Store
 from .summarizer import SummaryFormatError
 from .text_sources import discover_articles, load_text_sources, text_sources_enabled
@@ -177,6 +177,7 @@ class YouTubeFeedSource:
     priority: str = "B"
     source_type: str = "youtube"
     aliases: tuple[str, ...] = ()
+    podwise_podcast_ids: tuple[str, ...] = ()
 
     def accepts(self, episode: Episode) -> bool:
         if youtube_skip_reason(episode):
@@ -227,29 +228,26 @@ def load_youtube_sources(path: Path) -> list[YouTubeFeedSource]:
                     rss_url=str(source.get("rss_url") or ""),
                     priority=priority,
                     source_type=source["type"],
-                    aliases=tuple(a.strip() for a in source.get("aliases", [])
-                                  if isinstance(a, str) and a.strip()),
+                    aliases=_string_list(source.get("aliases")),
+                    podwise_podcast_ids=_string_list(source.get("podwise_podcast_ids")),
                 )
             )
     return sources
 
 
+def _string_list(value) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(v.strip() for v in value if isinstance(v, str) and v.strip())
+
+
 def _source_name_key(value: str) -> str:
-    return ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
+    value = unicodedata.normalize('NFKC', value).casefold()
+    value = ''.join(c if c.isalnum() or c.isspace() else ' ' for c in value)
+    return ' '.join(value.split()).removeprefix('the ')
 
 
-def _source_url_key(value: str) -> str:
-    """Normalize syntax while preserving feed-selecting query parameters."""
-    try:
-        parts = urlsplit(value.strip())
-        if parts.scheme.lower() not in {'http', 'https'} or not parts.hostname:
-            return ''
-        query = urlencode([(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
-                           if not k.casefold().startswith('utm_')])
-        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
-                           parts.path.rstrip('/'), query, ''))
-    except ValueError:
-        return ''
+_source_url_key = normalize_rss_url
 
 
 def _configured_podwise_source(episode: Episode, sources: list[YouTubeFeedSource]):
@@ -258,14 +256,19 @@ def _configured_podwise_source(episode: Episode, sources: list[YouTubeFeedSource
         for source in sources:
             if any(feed == _source_url_key(url) for url in (source.rss_url, source.url)):
                 return source
-    name = _source_name_key(episode.show)
-    if name:
+    podcast_id = episode.metadata.get('podwise_podcast_id')
+    if podcast_id:
         for source in sources:
-            if any(name == _source_name_key(alias) for alias in source.aliases):
+            if podcast_id in source.podwise_podcast_ids:
                 return source
-        for source in sources:
-            if name == _source_name_key(source.name):
-                return source
+    names = {_source_name_key(episode.show),
+             _source_name_key(str(episode.metadata.get('podwise_podcast_name') or ''))} - {''}
+    for source in sources:
+        if names.intersection(_source_name_key(alias) for alias in source.aliases):
+            return source
+    for source in sources:
+        if _source_name_key(source.name) in names:
+            return source
     return None
 
 
@@ -342,14 +345,14 @@ def _episode_dedupe_keys(episode: Episode) -> set[str]:
     """Build conservative cross-source identities for syndicated episodes."""
 
     keys = {f"id:{episode.id}"}
-    feed_url = str(episode.metadata.get("rss_feed_url") or "").strip().rstrip("/")
+    feed_url = normalize_rss_url(str(episode.metadata.get("rss_feed_url") or ""))
     for value in (
         episode.metadata.get("audio_url"),
         episode.metadata.get("youtube_url"),
         episode.url,
     ):
         normalized_url = str(value or "").strip()
-        if normalized_url and normalized_url.rstrip("/") != feed_url:
+        if normalized_url and (not feed_url or normalize_rss_url(normalized_url) != feed_url):
             keys.add(f"url:{normalized_url}")
     normalized_title = " ".join(
         re.findall(r"[a-z0-9]+", episode.title.casefold())
@@ -547,7 +550,8 @@ class PodcastService:
         """Analyze trusted RSS metadata through the same providers as daily jobs."""
         if not episode.metadata.get("youtube_url"):
             for source in load_youtube_sources(self.feeds_path):
-                if source.url and source.rss_url == episode.metadata.get("rss_feed_url"):
+                feed = normalize_rss_url(str(episode.metadata.get("rss_feed_url") or ""))
+                if source.url and feed and normalize_rss_url(source.rss_url) == feed:
                     try:
                         videos = latest_videos(source.url, playlist_end=source.scan_depth)
                         episode = attach_youtube_fallbacks([episode], videos)[0]
@@ -634,7 +638,8 @@ class PodcastService:
             sources.extend(YouTubeFeedSource(
                 url=s.get("url", ""), name=s["name"], rss_url=s.get("rss_url", ""),
                 scan_depth=s.get("scan_depth", 30), priority=s.get("priority", "B"),
-                source_type=s.get("type", "rss"), aliases=tuple(s.get("aliases", [])),
+                source_type=s.get("type", "rss"), aliases=_string_list(s.get("aliases")),
+                podwise_podcast_ids=_string_list(s.get("podwise_podcast_ids")),
             ) for s in self.source_registry.list() if s.get("origin") == "conversation")
         configured_sources = sources[:]
         if self.daily_rss_only:

@@ -169,6 +169,7 @@
     },
     {
       "name": "Latent Space",
+      "aliases": ["Latent Space: The AI Engineer Podcast"],
       "type": "rss",
       "priority": "B",
       "url": "",

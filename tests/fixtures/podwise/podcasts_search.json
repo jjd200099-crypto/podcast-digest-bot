@@ -1,0 +1,28 @@
+{
+ "success": true,
+ "result": [
+  {
+   "podcastId": "713cd864ff366ad071b127b518e3f5be5ec0bb4acbe78edba59ab5f7022b48df",
+   "seq": 11659,
+   "name": "Latent Space",
+   "owner": "Latent Space",
+   "cover": "https://yt3.ggpht.com/pSTHcffCXEverYEPdjM0iIRPH-IUT4d2biIMZ_Z7bhyf6sME-laFer9vEfpFbM5tqFYJV-UsLQ=s800-c-k-c0x00ffffff-no-rj",
+   "description": "The podcast & newsletter where 170,000+ AI Engineers gather to talk models, tools and ideas. Breaking news today you will use at work tomorrow! Full show notes and newsletter at https://latent.space",
+   "genre": "Technology",
+   "lastPublishTime": 1787341824
+  },
+  {
+   "podcastId": "1b3ace9adecb0ff97356200435969899a05b4817526b475a735353a0a091a4fd",
+   "seq": 653,
+   "name": "Latent Space: The AI Engineer Podcast",
+   "owner": "swyx + Alessio",
+   "cover": "https://substackcdn.com/feed/podcast/1084089/ca7468da5614a246d2906ee8926f6de7.jpg",
+   "description": "The podcast by and for AI Engineers! In 2025, over 10 million readers and listeners came to Latent Space to hear about news, papers and interviews in Software 3.0.\n\nWe cover Foundation Models changing",
+   "genre": "Technology",
+   "lastPublishTime": 1792010109
+  }
+ ],
+ "estimatedTotalHits": 6,
+ "page": 0,
+ "hitsPerPage": 2
+}

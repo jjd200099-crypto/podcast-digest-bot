@@ -15,6 +15,7 @@ from xml.etree import ElementTree
 import requests
 
 from .rss import MAX_FEED_BYTES, _response, latest_rss_episodes
+from .source_matching import normalize_rss_url
 
 
 class SourceRegistry:
@@ -98,7 +99,7 @@ class SourceRegistry:
         # Only accept the canonical source object returned by validation, not arbitrary config.
         source = self.validate(url)
         for existing in self.list():
-            if existing.get("rss_url", "").rstrip("/") == url.rstrip("/"):
+            if normalize_rss_url(existing.get("rss_url", "")) == normalize_rss_url(url):
                 return {"status": "already_tracked", "source": existing}
         identity = hashlib.sha256(url.encode()).hexdigest()
         with self.store._connect() as db:
