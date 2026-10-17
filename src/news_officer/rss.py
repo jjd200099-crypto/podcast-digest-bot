@@ -255,6 +255,7 @@ def latest_rss_episodes(
                 published_at=published_at,
                 metadata={
                     "audio_url": audio_url,
+                    "rss_guid": guid,
                     "description": BeautifulSoup(
                         html.unescape(description), "html.parser"
                     ).get_text(" ", strip=True),

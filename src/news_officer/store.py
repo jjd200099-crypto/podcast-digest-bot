@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import Iterator
@@ -17,6 +18,7 @@ from .models import (
     StoredTranscript,
     Transcript,
 )
+from .source_matching import normalize_rss_url
 
 RETRY_DELAYS_SECONDS = (60, 300, 900, 1800)
 MESSAGE_RETRY_DELAYS_SECONDS = (3, 10, 30, 60)
@@ -359,6 +361,12 @@ class Store:
                 )
 
             connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)")
+            connection.execute("""CREATE TABLE IF NOT EXISTS rss_item_first_seen (
+                feed_key TEXT NOT NULL, item_key TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL, seeded INTEGER NOT NULL,
+                PRIMARY KEY(feed_key, item_key))""")
+            connection.execute("INSERT OR IGNORE INTO schema_migrations VALUES (?)",
+                               ('rss_item_first_seen',))
             migration = 'review68_reset_legacy_transcript_attempts'
             if not connection.execute('SELECT 1 FROM schema_migrations WHERE name=?', (migration,)).fetchone():
                 connection.execute("UPDATE daily_transcript_backlog SET attempts=0 "
@@ -1462,6 +1470,63 @@ class Store:
         if row is None:
             return None
         return str(row["group_key"])[len("episode:") :]
+
+    def record_rss_first_seen(
+        self, feed_url: str, episodes: list[Episode], now: datetime, *,
+        cutoff: datetime | None = None, burst_limit: int = 3,
+    ) -> list[tuple[datetime, bool] | None]:
+        """Observe a successful feed atomically, joining guid/enclosure identities.
+
+        Missing identities cannot be promoted. Burst suppression is persisted so
+        a later scan cannot promote the suppressed catalogue.
+        """
+        feed_key = normalize_rss_url(feed_url)
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            initial = not db.execute(
+                'SELECT 1 FROM rss_item_first_seen WHERE feed_key=? LIMIT 1',
+                (feed_key,)).fetchone()
+            observations = []
+            new_old_keys = set()
+            for episode in episodes:
+                guid = str(episode.metadata.get('rss_guid') or '').strip()
+                enclosure = normalize_rss_url(str(episode.metadata.get('audio_url') or ''))
+                keys = ([f'guid:{guid}'] if guid else []) + (
+                    [f'enclosure:{enclosure}'] if enclosure else [])
+                rows = [row for key in keys if (row := db.execute(
+                    'SELECT first_seen_at, seeded FROM rss_item_first_seen '
+                    'WHERE feed_key=? AND item_key=?', (feed_key, key)).fetchone())]
+                first = min([datetime.fromisoformat(r['first_seen_at']) for r in rows], default=now)
+                seeded = initial or any(r['seeded'] for r in rows)
+                newly_seen = bool(keys) and not rows
+                if (not initial and newly_seen and cutoff is not None
+                        and episode.published_at is not None
+                        and episode.published_at < cutoff):
+                    new_old_keys.add(tuple(keys))
+                observations.append((keys, first, seeded, newly_seen))
+                for key in keys:
+                    db.execute('INSERT INTO rss_item_first_seen VALUES (?, ?, ?, ?) '
+                               'ON CONFLICT(feed_key,item_key) DO UPDATE SET '
+                               'first_seen_at=excluded.first_seen_at, seeded=excluded.seeded',
+                               (feed_key, key, first.isoformat(), int(seeded)))
+            if len(new_old_keys) > burst_limit:
+                logging.getLogger(__name__).warning(
+                    'RSS first-seen burst suppressed for %s (%d old new items)',
+                    feed_url, len(new_old_keys))
+                for keys, _, _, newly_seen in observations:
+                    if newly_seen and tuple(keys) in new_old_keys:
+                        for key in keys:
+                            db.execute('UPDATE rss_item_first_seen SET seeded=1 '
+                                       'WHERE feed_key=? AND item_key=?', (feed_key, key))
+            # Read back after all aliases and burst decisions have been recorded.
+            result = []
+            for keys, _, _, _ in observations:
+                rows = [db.execute('SELECT first_seen_at, seeded FROM rss_item_first_seen '
+                                   'WHERE feed_key=? AND item_key=?', (feed_key, key)).fetchone()
+                        for key in keys]
+                result.append((min(datetime.fromisoformat(r['first_seen_at']) for r in rows),
+                               any(r['seeded'] for r in rows)) if rows else None)
+            return result
 
     def article_first_seen(self, url: str, now: datetime) -> datetime:
         """Persist the first successful discovery of an undated article URL."""

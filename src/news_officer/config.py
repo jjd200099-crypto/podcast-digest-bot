@@ -85,6 +85,9 @@ class Settings:
     daily_document_max_attempts: int = 3
     daily_document_fulltext: bool = False
     deepread_new_style: bool = False
+    rss_first_seen: bool = True
+    first_seen_max_age_days: int = 45
+    first_seen_burst_limit: int = 3
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -203,6 +206,12 @@ class Settings:
             lookback_hours=max(
                 1, int(os.environ.get("NEWS_OFFICER_LOOKBACK_HOURS", "72"))
             ),
+            rss_first_seen=os.environ.get("NEWS_OFFICER_RSS_FIRST_SEEN", "1").strip().lower()
+            in {"1", "true", "yes", "on"},
+            first_seen_max_age_days=max(1, min(365, int(os.environ.get(
+                "NEWS_OFFICER_FIRST_SEEN_MAX_AGE_DAYS", "45")))),
+            first_seen_burst_limit=max(1, min(100, int(os.environ.get(
+                "NEWS_OFFICER_FIRST_SEEN_BURST_LIMIT", "3")))),
             manual_digest_id=manual_digest_id,
             research_agent_enabled=os.environ.get(
                 "NEWS_OFFICER_RESEARCH_AGENT", ""

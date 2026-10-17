@@ -12,6 +12,23 @@ from news_officer.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_rss_first_seen_defaults_and_bounds(self):
+        with patch.dict(os.environ, self.base_environment(), clear=True):
+            settings = Settings.from_env()
+            self.assertTrue(settings.rss_first_seen)
+            self.assertEqual(settings.first_seen_max_age_days, 45)
+            self.assertEqual(settings.first_seen_burst_limit, 3)
+            with patch.dict(os.environ, {
+                'NEWS_OFFICER_RSS_FIRST_SEEN': '0',
+                'NEWS_OFFICER_FIRST_SEEN_MAX_AGE_DAYS': '0',
+                'NEWS_OFFICER_FIRST_SEEN_BURST_LIMIT': '999',
+            }):
+                settings = Settings.from_env()
+                self.assertFalse(settings.rss_first_seen)
+                self.assertEqual(settings.first_seen_max_age_days, 1)
+                self.assertEqual(settings.first_seen_burst_limit, 100)
+
+
     def test_legacy_document_followup_environment_is_ignored(self):
         with patch.dict(os.environ, self.base_environment(), clear=True):
             baseline = Settings.from_env()
