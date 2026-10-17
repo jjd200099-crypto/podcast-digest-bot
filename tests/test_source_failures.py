@@ -338,7 +338,8 @@ class SourceFailureTests(unittest.TestCase):
         ):
             candidates = service.discover_daily_candidates(datetime(2026, 9, 6, tzinfo=UTC))
         self.assertEqual([item.id for item in candidates], ["rss:full"])
-        self.assertEqual(scan.call_args.kwargs["limit"], 30)
+        # First-seen seeding observes the complete feed; candidate caps still apply.
+        self.assertEqual(scan.call_args.kwargs["limit"], 0)
 
         # A fresh unknown-date video must not starve a due full-episode retry.
         unknown_clip = Episode("unknown", "Unknown age", "https://youtu.be/unknown", "Show")

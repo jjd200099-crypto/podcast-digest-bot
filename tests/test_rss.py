@@ -61,6 +61,9 @@ class RSSTests(unittest.TestCase):
         response.return_value = FakeResponse(f"<rss><channel>{items}</channel></rss>", url)
         self.assertEqual(len(latest_rss_episodes("Show", url, limit=0)), 40)
         self.assertEqual(len(latest_rss_episodes("Show", url, limit=4)), 4)
+        episode = latest_rss_episodes("Show", url, limit=4)[0]
+        self.assertEqual(episode.metadata['rss_guid'], 'e-0')
+        self.assertNotIn('metadata', episode.to_persisted_dict())
 
     @patch("news_officer.rss._response")
     def test_rss_discovery_preserves_date_duration_and_transcript(self, response):

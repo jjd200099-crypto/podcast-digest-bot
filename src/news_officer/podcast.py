@@ -446,6 +446,9 @@ class PodcastService:
         podwise_auto_process: bool = False,
         podwise_discovery_enabled: bool = False,
         discovery_topics: tuple[str, ...] = (),
+        rss_first_seen: bool = True,
+        first_seen_max_age_days: int = 45,
+        first_seen_burst_limit: int = 3,
     ):
         self.store = store
         self.feeds_path = feeds_path
@@ -486,6 +489,9 @@ class PodcastService:
                 if isinstance(p, PodwiseTranscriptProvider) else p
                 for p in self.daily_transcript_resolver.providers
             ], rss_only=daily_rss_only)
+        self.rss_first_seen = rss_first_seen
+        self.first_seen_max_age_days = first_seen_max_age_days
+        self.first_seen_burst_limit = first_seen_burst_limit
         self.lookback_hours = lookback_hours
         self.max_daily_candidates = max_daily_candidates
         self.max_daily_summaries = max_daily_summaries
@@ -649,6 +655,38 @@ class PodcastService:
             attachment=_readable_attachment(stored, summary),
         )
 
+    def _rss_first_seen_candidates(
+        self, feed_url: str, episodes: list[Episode], now: datetime,
+    ) -> list[Episode]:
+        if not self.rss_first_seen:
+            return episodes
+        # Atom/YouTube entries deliberately have no rss_guid metadata.
+        rss = [e for e in episodes if 'rss_guid' in e.metadata]
+        cutoff = now - timedelta(hours=self.lookback_hours)
+        observations = self.store.record_rss_first_seen(
+            feed_url, rss, now, cutoff=cutoff, burst_limit=self.first_seen_burst_limit)
+        promoted = {}
+        for episode, observation in zip(rss, observations):
+            if observation is None:
+                continue
+            first, seeded = observation
+            published = episode.published_at
+            if (not seeded and cutoff <= first <= now and published is not None
+                    and now - timedelta(days=self.first_seen_max_age_days) <= published < cutoff):
+                promoted[id(episode)] = replace(episode, metadata={**episode.metadata,
+                    'first_seen_promoted': True, 'rss_first_seen_at': first.isoformat()})
+                logger.info('RSS first-seen promoted: show=%s title=%s pubDate=%s first_seen_at=%s',
+                            episode.show, episode.title, published.isoformat(), first.isoformat())
+        return [promoted.get(id(e), e) for e in episodes]
+
+    def _first_seen_in_window(self, episode: Episode, now: datetime) -> bool:
+        if not self.rss_first_seen or not episode.metadata.get('first_seen_promoted'):
+            return False
+        first = datetime.fromisoformat(episode.metadata['rss_first_seen_at'])
+        return (now - timedelta(hours=self.lookback_hours) <= first <= now
+                and episode.published_at is not None
+                and now - timedelta(days=self.first_seen_max_age_days) <= episode.published_at <= now)
+
     def discover_daily_candidates(
         self, now: datetime | None = None
     ) -> list[Episode]:
@@ -702,8 +740,14 @@ class PodcastService:
                     discovered_rss = latest_rss_episodes(
                         source.name or source.url,
                         source.rss_url,
-                        limit=0 if not self.max_daily_candidates else max(30, source.scan_depth),
+                        limit=(0 if not self.max_daily_candidates or (self.rss_first_seen and not youtube_feed)
+                               else max(30, source.scan_depth)),
                     )
+                    discovered_rss = self._rss_first_seen_candidates(
+                        source.rss_url, discovered_rss, now)
+                    if self.rss_first_seen and self.max_daily_candidates and not youtube_feed:
+                        # Observe the whole catalogue but retain the existing candidate scan depth.
+                        discovered_rss = discovered_rss[:max(30, source.scan_depth)]
                     channel_with_results += 1
                     rss_episodes = [
                         episode
@@ -846,7 +890,8 @@ class PodcastService:
                     if (
                         published_at is not None
                         and published_at.tzinfo is not None
-                        and (published_at.astimezone(UTC) < cutoff or published_at > now)
+                        and ((published_at.astimezone(UTC) < cutoff
+                              and not self._first_seen_in_window(episode, now)) or published_at > now)
                     ):
                         continue
                     identity_keys = _episode_dedupe_keys(episode)
@@ -1003,7 +1048,8 @@ class PodcastService:
             # A crash, slow provider or summary cap must not lose already-seen
             # releases when they fall outside the next day's 24-hour window.
             self.store.track_daily_candidates([e for e in candidates if e.published_at
-                and cutoff <= e.published_at.astimezone(UTC) <= now.astimezone(UTC)])
+                and (cutoff <= e.published_at.astimezone(UTC) <= now.astimezone(UTC)
+                     or self._first_seen_in_window(e, now))])
         if preparation:
             candidates = candidates[:12]
         results: list[DailyItem] = [
@@ -1056,7 +1102,8 @@ class PodcastService:
                     self.store.defer_daily_transcript(episode, 'unverified_date', count_failure=False)
                     results.append(DailyItem(episode, "unverified_date"))
                     continue
-                if pending is None and episode.published_at.astimezone(UTC) < cutoff:
+                if (pending is None and episode.published_at.astimezone(UTC) < cutoff
+                        and not self._first_seen_in_window(episode, now)):
                     results.append(DailyItem(episode, "outside_window"))
                     continue
                 skip_reason = youtube_skip_reason(episode)
