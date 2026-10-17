@@ -746,8 +746,15 @@ class PodcastService:
                     discovered_rss = self._rss_first_seen_candidates(
                         source.rss_url, discovered_rss, now)
                     if self.rss_first_seen and self.max_daily_candidates and not youtube_feed:
-                        # Observe the whole catalogue but retain the existing candidate scan depth.
-                        discovered_rss = discovered_rss[:max(30, source.scan_depth)]
+                        # Keep the normal scan head plus first-seen promotions anywhere in the feed.
+                        scan_depth = max(30, source.scan_depth)
+                        head = discovered_rss[:scan_depth]
+                        retained_ids = {episode.id for episode in head}
+                        for episode in discovered_rss[scan_depth:]:
+                            if episode.metadata.get('first_seen_promoted') and episode.id not in retained_ids:
+                                head.append(episode)
+                                retained_ids.add(episode.id)
+                        discovered_rss = head
                     channel_with_results += 1
                     rss_episodes = [
                         episode

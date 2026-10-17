@@ -169,6 +169,17 @@ class RSSFirstSeenTests(unittest.TestCase):
         with self.store._connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM rss_item_first_seen').fetchone()[0], 80)
 
+    def test_promoted_items_beyond_30_cutoff_are_still_kept(self):
+        self.service.max_daily_candidates = 10
+        seeded = [self.episode(str(i)) for i in range(35)]
+        self.assertEqual(self.scan(seeded), [])
+        deep_item = self.episode('new-deep-item', days=20)
+
+        candidates = self.scan([*seeded, deep_item])
+
+        self.assertEqual([episode.id for episode in candidates], [deep_item.id])
+        self.assertTrue(candidates[0].metadata['first_seen_promoted'])
+
     def test_atom_entries_do_not_enter_first_seen_store(self):
         atom = replace(self.episode('atom'), metadata={'rss_feed_url': self.feed})
         self.assertEqual(self.scan([atom]), [])
