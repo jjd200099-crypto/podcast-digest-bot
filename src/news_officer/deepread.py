@@ -213,6 +213,16 @@ def normalize_proper_noun(text):
     )
 
 
+def _normalize_correction_text(text):
+    """NFKC/casefold, remove all Unicode punctuation, then collapse whitespace."""
+    text = unicodedata.normalize("NFKC", text).casefold()
+    return " ".join(
+        "".join(
+            char for char in text if not unicodedata.category(char).startswith("P")
+        ).split()
+    )
+
+
 def normalize_evidence_ids(value):
     """Recover quoted/comma-separated IDs without hiding unknown references."""
     if isinstance(value, list):
@@ -235,7 +245,7 @@ def normalize_evidence_ids(value):
     return normalized
 
 
-def validate_deepread(value, evidence):
+def validate_deepread(value, evidence, episode_id="unknown"):
     value = normalize_evidence_ids(value)
     source = "\n".join(body["text"] for body in evidence.values())
     notes = DeepRead.model_validate(preserve_glossary_values(value, source))
@@ -312,13 +322,22 @@ def validate_deepread(value, evidence):
             continue
         supported_nouns.append(noun)
     notes.proper_nouns = supported_nouns
+    supported_corrections = []
     for correction in notes.corrections:
         refs([correction.evidence_id])
-        if (
-            not correction.original.strip()
-            or correction.original not in evidence[correction.evidence_id]["text"]
+        original = _normalize_correction_text(correction.original)
+        if original and original in _normalize_correction_text(
+            evidence[correction.evidence_id]["text"]
         ):
-            raise ValueError("ASR original not found")
+            supported_corrections.append(correction)
+    dropped = len(notes.corrections) - len(supported_corrections)
+    notes.corrections = supported_corrections
+    if dropped:
+        LOGGER.warning(
+            "Dropping %d unsupported ASR correction(s) for episode %s",
+            dropped,
+            episode_id,
+        )
     return notes.model_dump()
 
 
@@ -369,7 +388,11 @@ def generate(client, model, record):
                 )
                 if response.output_parsed is None:
                     raise ValueError("Incomplete model output")
-                value = validate_deepread(response.output_parsed.model_dump(), batch)
+                value = validate_deepread(
+                    response.output_parsed.model_dump(),
+                    batch,
+                    episode_id=getattr(ep, "id", "unknown"),
+                )
                 break
             except Exception as error:
                 if attempt == 2:
@@ -398,7 +421,7 @@ def generate(client, model, record):
     merged["speakers"] = list(speakers.values())
     if len(batches) > 1:
         return consolidate(client, model, merged, evidence)
-    return validate_deepread(merged, evidence)
+    return validate_deepread(merged, evidence, episode_id=getattr(ep, "id", "unknown"))
 
 
 def render(record, value, digest=""):

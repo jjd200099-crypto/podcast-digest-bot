@@ -81,6 +81,63 @@ def record():
 
 
 class NewStyleTests(unittest.TestCase):
+    def correction(self, original, evidence_id="C0002"):
+        return {
+            "original": original, "corrected": "fixed",
+            "reason": "ASR", "evidence_id": evidence_id,
+        }
+
+    def test_bad_correction_is_dropped_with_one_episode_warning(self):
+        value = sample()
+        good = [self.correction("OpenAI"), self.correction("MVP")]
+        value["corrections"] = [good[0], self.correction("not in source"), good[1]]
+        with self.assertLogs("news_officer.deepread", level="WARNING") as logs:
+            result = validate_deepread(
+                value, source_evidence(record().transcript.text), episode_id="ep-123"
+            )
+        self.assertEqual(result["corrections"], good)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("Dropping 1 unsupported ASR correction(s)", logs.output[0])
+        self.assertIn("ep-123", logs.output[0])
+
+    def test_correction_matches_normalized_source(self):
+        value = sample()
+        value["corrections"] = [self.correction('ｉ USE　“openai”，  for\n an MVP！')]
+        evidence = source_evidence(record().transcript.text)
+        evidence["C0002"]["text"] = 'John Smith: I use "OpenAI", for an MVP!'
+        with self.assertNoLogs("news_officer.deepread", level="WARNING"):
+            result = validate_deepread(value, evidence)
+        self.assertEqual(result["corrections"], value["corrections"])
+
+    def test_all_bad_corrections_allow_generation_without_retry(self):
+        value = sample()
+        value["corrections"] = [
+            self.correction(original) for original in ["absent", "", "  ", "…！？"]
+        ]
+        client = Mock()
+        client.responses.parse.return_value.output_parsed = DeepRead.model_validate(value)
+        episode_record = record()
+        episode_record.episode.id = "ep-all-bad"
+        with self.assertLogs("news_officer.deepread", level="WARNING") as logs:
+            result = ShownotesWriter(client, "model", new_style=True).generate(
+                episode_record
+            )
+        self.assertEqual(result, sample())
+        client.responses.parse.assert_called_once()
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("Dropping 4 unsupported ASR correction(s)", logs.output[0])
+        self.assertIn("ep-all-bad", logs.output[0])
+        nodes, markdown = render_episode(episode_record, result, new_style=True)
+        self.assertTrue(nodes)
+        self.assertNotIn("订正", markdown)
+        self.assertNotIn("纠错", markdown)
+
+    def test_unknown_correction_evidence_still_raises(self):
+        value = sample()
+        value["corrections"] = [self.correction("", evidence_id="C9999")]
+        with self.assertRaisesRegex(ValueError, "^Unknown deepread evidence: C9999$"):
+            validate_deepread(value, source_evidence(record().transcript.text))
+
     def test_old_style_version_is_pinned(self):
         from news_officer.shownotes import VERSION
 
