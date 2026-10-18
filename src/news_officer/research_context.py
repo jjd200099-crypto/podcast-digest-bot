@@ -52,7 +52,8 @@ def quoted_context(store, message):
         if row['group_key'] == 'document:link':
             # A colleague may reply to another colleague's generated document.
             # Recover only episodes actually linked in this visible delivery.
-            bundle = store.get_job_result(row['job_key'], 'episodes:content') or {}
+            bundle = (store.get_job_result(row['job_key'], 'episodes:new-style-content')
+                      or store.get_job_result(row['job_key'], 'episodes:content') or {})
             episodes = []
             for document in bundle.get('documents', []):
                 key = document.get('key', '')

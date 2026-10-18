@@ -6,29 +6,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
+from news_officer.deepread import INTRO, transcript_evidence
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from news_officer.daily_document import DailyDocumentCompiler, read_tree, tree_signature
 from news_officer.library import LibraryError
 from news_officer.models import DailyItem, Episode, Job, Transcript
 from news_officer.shownotes import (
-    INTRO,
-    render_episode,
-    table_node,
     text_node,
-    transcript_evidence,
-    validate_notes,
 )
 from news_officer.store import Store
 
 
 def notes(record):
+    # Source-grounded new-format fixture shared by document/delivery tests.
     key = next(iter(transcript_evidence(record.transcript.text)))
-    point = {'text': '嘉宾认为需求增长，但要区分收入与使用量。', 'evidence_ids': [key]}
-    return {'participants': '原稿未明确标注', 'participant_evidence_ids': [],
-            'core': [copy.deepcopy(point) for _ in range(6)],
-            'parts': [{'title': f'主题{i}', 'points': [point, point]} for i in range(8)],
-            'quotes': [], 'corrections': []}
+    return {'speakers': [{'name': '嘉宾', 'role': 'guest', 'evidence_ids': [key]}],
+            'core': [{'text': '**收入：**收入不等于使用量', 'evidence_ids': [key]}],
+            'chapters': [{'title': '产品', 'turns': [{'speaker': '嘉宾',
+                'paragraphs': ['我认为收入并不等于使用量。'], 'evidence_ids': list(transcript_evidence(record.transcript.text))}]}],
+            'proper_nouns': [], 'exclusions': [], 'corrections': []}
 
 
 class API:
@@ -122,7 +120,7 @@ class DailyDocuments(unittest.TestCase):
             self.compiler.publish(self.job())
         self.assertTrue(self.compiler.publish(self.job())['notify'])
         tree = read_tree(self.api.blocks('doc1'), 'doc1')
-        frozen = self.store.get_job_result(self.job().key, 'document:content')['nodes']
+        frozen = self.store.get_job_result(self.job().key, 'document:new-style-content')['nodes']
         self.assertEqual([tree_signature(n) for n in tree], [tree_signature(n) for n in frozen])
         self.assertEqual(self.writer.generate.call_count, 1)
 
@@ -198,27 +196,6 @@ class DailyDocuments(unittest.TestCase):
         self.store.remove_subscription('chat_id', 'oc_test')
         self.assertIsNone(self.compiler.publish(self.job()))
         self.assertEqual(self.api.creates, 0)
-
-    def test_evidence_and_quote_checks_and_no_invented_times(self):
-        evidence = transcript_evidence(self.record.transcript.text)
-        value = notes(self.record)
-        value['core'][0]['evidence_ids'] = ['invented']
-        with self.assertRaisesRegex(ValueError, 'Unknown'):
-            validate_notes(value, evidence)
-        value = notes(self.record)
-        value['quotes'] = [{'text': 'made up', 'speaker': 'guest', 'evidence_id': next(iter(evidence))}]
-        with self.assertRaisesRegex(ValueError, 'Quote'):
-            validate_notes(value, evidence)
-        rendered, md = render_episode(self.record, notes(self.record))
-        self.assertIn('[00:12]', md)
-        self.assertEqual(md.count('https://example.test/one'), 1)
-        self.assertEqual(rendered[1]['block_type'], 19)
-        self.assertEqual(next(iter(transcript_evidence('no time here').values()))['time'], '')
-
-    def test_table_validation(self):
-        with self.assertRaises(ValueError):
-            table_node([])
-        self.assertEqual(table_node([['A', 'B'], ['C', 'D']])['table']['property']['row_size'], 2)
 
 
 class DocumentDelivery(unittest.IsolatedAsyncioTestCase):

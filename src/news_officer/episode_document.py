@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from .daily_document import DailyDocumentCompiler, read_tree, tree_signature
-from .document_transcript import fulltext_identity, render_fulltext
 from .library import LibraryError
 from .models import IncomingMessage
 from .shownotes import note_identity, text_node
@@ -30,30 +29,17 @@ class DocumentRetryStopped(ValueError):
 
 class SelectedEpisodeCompiler(DailyDocumentCompiler):
     def __init__(self, *args, min_stars=4, request_authorizer=None, max_attempts=3,
-                 timezone=None, today=None, include_fulltext=False, transcript_writer=None, **kwargs):
+                 timezone=None, today=None, include_fulltext=False, **kwargs):
         super().__init__(*args, **kwargs)
         if min_stars not in range(1, 6):
             raise ValueError('Document minimum stars must be 1–5')
         self.min_stars = min_stars
         self.request_authorizer = request_authorizer
         self.include_fulltext = include_fulltext
-        self.transcript_writer = transcript_writer
         self.max_attempts = max_attempts
         self.today = today or (lambda: datetime.now(timezone or ZoneInfo('Asia/Shanghai')).date().isoformat())
 
-    def _migrate_attempt(self, record):
-        # The pre-merge notes-only revision used note_identity directly. Keep
-        # its durable budget when adopting main's composite document identity.
-        if self.include_fulltext or self.new_style:
-            return
-        identity = self.document_identity(record)
-        with self.store._connect() as db:
-            db.execute('UPDATE episode_document_attempts SET revision=? WHERE episode_id=? AND revision=? '
-                       'AND NOT EXISTS (SELECT 1 FROM episode_document_attempts WHERE episode_id=? AND revision=?)',
-                       (identity, record.episode.id, note_identity(record, new_style=self.new_style), record.episode.id, identity))
-
     def _attempt_available(self, record, today):
-        self._migrate_attempt(record)
         with self.store._connect() as db:
             row = db.execute('SELECT * FROM episode_document_attempts WHERE episode_id=? AND revision=?',
                              (record.episode.id, self.document_identity(record))).fetchone()
@@ -73,8 +59,6 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         _, records, _ = self.snapshot(base)
         if payload.get('mode') == 'daily_episode':
             records = [(i, r) for i, r in records if r.episode.id == payload['episode_id']]
-        for _, record in records:
-            self._migrate_attempt(record)
         if day != today:
             with self.store._connect() as db:
                 for _, record in records:
@@ -144,9 +128,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                          data={'start_index': start, 'end_index': len(base)})
 
     def document_identity(self, record):
-        components = [note_identity(record, new_style=self.new_style)]
-        if self.include_fulltext and not self.new_style:
-            components.append(fulltext_identity(record))
+        components = [note_identity(record)]
         return hashlib.sha256(json.dumps(components).encode()).hexdigest()
 
     def request_allowed(self, payload):
@@ -290,7 +272,9 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         if not self.retry_available(job.payload, self.today()):
             raise DocumentRetryStopped('Document retry budget or deadline reached')
         deferred = False
-        bundle = self.store.get_job_result(job.key, 'episodes:content')
+        # Pre-upgrade frozen bundles may contain old-style fallback documents.
+        content_key = 'episodes:new-style-content'
+        bundle = self.store.get_job_result(job.key, content_key)
         if bundle is None:
             if not requested and not enrichment and revision != job.payload['revision']:
                 return None
@@ -302,7 +286,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                     deferred = True
                     continue
                 self._claim_attempt(record, self.today() if requested else day, claimed)
-                identity = note_identity(record, new_style=self.new_style)
+                identity = note_identity(record)
                 key = 'episode:' + record.episode.id
                 published = record.episode.published_at.isoformat()[:10] if record.episode.published_at else day
                 title = normalize_deepread_title(f'{record.episode.title}｜{record.episode.show}｜{published}')
@@ -314,43 +298,25 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 nodes = json.loads(previous['nodes_json']) if previous else []
                 replacement = {}
                 episode_nodes = None
-                if self.new_style and identity not in entries:
+                if identity not in entries:
                     try:
-                        episode_nodes, generated_new_style = self._notes(
-                            record, digest, fulltext_attached=self.include_fulltext and bool(nodes),
-                            return_style=True)
+                        episode_nodes = self._notes(
+                            record, digest)
                     except Exception:
                         if requested or enrichment:
                             raise
                         logger.warning('Episode document validation failed; deferred', exc_info=True)
                         deferred = True
                         continue
-                    if nodes and not generated_new_style:
-                        # Keep the existing notes and full-text appendix intact.
-                        documents.append({'key': key, 'title': title, 'nodes': nodes,
-                                          'entries': entries, 'revision': self.document_identity(record),
-                                          'stars': stars(digest)})
-                        continue
                     if nodes:
                         replacement = {'replacement_base': nodes, 'replacement_start': 0}
                         nodes, entries = [], []
-                if self.include_fulltext and not self.new_style and fulltext_identity(record) not in entries:
-                    legacy = [i for i, n in enumerate(nodes) if ''.join(
-                        e.get('text_run', {}).get('content', '') for e in n.get('heading2', {}).get('elements', [])
-                    ).startswith(('完整文字稿（归档原文', '完整中文文字稿', '完整对谈实录'))]
-                    if legacy:
-                        start = legacy[0]
-                        if len(legacy) != 1 or any(n['block_type'] != 2 for n in nodes[start + 1:]):
-                            raise LibraryError('旧全文不是独立的纯文本尾部，需人工核对')
-                        replacement = {'replacement_base': nodes, 'replacement_start': start}
-                        nodes = nodes[:start]
-                        entries = [e for e in entries if not e.startswith('fulltext:')]
                 if identity not in entries:
                     if nodes:
                         nodes.append(text_node('补充精读（原稿版本更新）', 'heading1'))
                     try:
                         if episode_nodes is None:
-                            episode_nodes = self._notes(record, digest, fulltext_attached=self.include_fulltext)
+                            episode_nodes = self._notes(record, digest)
                     except Exception:
                         if requested or enrichment:
                             raise
@@ -358,21 +324,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                         deferred = True
                         continue
                     nodes.extend(episode_nodes)
-                    if not self.new_style or generated_new_style:
-                        entries.append(identity)
-                if self.include_fulltext and not self.new_style:
-                    appendix_id = fulltext_identity(record)
-                    if appendix_id not in entries:
-                        if self.transcript_writer is None:
-                            raise ValueError('未配置中文全文翻译器，停止发布原文替代品')
-                        translation = self.transcript_writer.generate(record)
-                        nodes.extend(render_fulltext(record, translation))
-                        (self.root / (appendix_id.replace(':', '-') + '.zh.json')).write_text(
-                            json.dumps(translation, ensure_ascii=False), encoding='utf-8')
-                        entries.append(appendix_id)
-                    # Store a lossless local export alongside the derived notes.
-                    (self.root / (appendix_id.replace(':', '-') + '.txt')).write_text(
-                        record.transcript.text, encoding='utf-8')
+                    entries.append(identity)
                 documents.append({'key': key, 'title': title, 'nodes': nodes, 'entries': entries,
                                   'revision': self.document_identity(record), 'stars': stars(digest), **replacement})
             if enrichment:
@@ -383,7 +335,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 return None
             bundle = {'documents': documents}
             if not deferred:
-                bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents', bundle)
+                bundle = self.store.save_job_result(job.key, content_key, 'episode_documents', bundle)
         if not requested:
             targets = self._audience(targets)
         links = []

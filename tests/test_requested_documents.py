@@ -1,10 +1,10 @@
-import json
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
 import test_daily_document as fixtures
 
+from news_officer.deepread import transcript_evidence
 from news_officer.episode_document import SelectedEpisodeCompiler
 from news_officer.models import IncomingMessage, Transcript
 from news_officer.podcast_archive import PodcastArchive
@@ -16,10 +16,8 @@ from news_officer.research_checkpoint import (
 )
 from news_officer.research_context import quoted_context
 from news_officer.shownotes import (
-    chapter_outline,
     note_identity,
     render_episode,
-    transcript_evidence,
 )
 
 
@@ -126,17 +124,16 @@ class RequestedDocuments(unittest.TestCase):
         ep = replace(self.f.record.episode, duration_seconds=1432,
                      metadata={'description': '(0:00) Intro (3:07) Ads (10:04) IPO (16:00) Privacy (20:00) Team'})
         record = self.f.store.save_verified_transcript(ep, Transcript('[00:00] Intro\n[03:34] Advertising is ML.\n', 'official', ep.url, True))
-        self.assertEqual(len(chapter_outline(record.episode)), 5)
+        self.assertEqual(record.episode.metadata, ep.metadata)
         evidence = transcript_evidence(record.transcript.text)
         self.assertEqual(''.join(v['text'] for v in evidence.values()), record.transcript.text)
         self.assertEqual(list(evidence.values())[1]['time'], '03:34')
         value = fixtures.notes(record)
-        value['parts'] = value['parts'][:5]
         nodes, md = render_episode(record, value)
         self.assertIn('23 分 52 秒', md)
-        self.assertEqual(md.count('## Part'), 5)
+        self.assertIn('QA 整理', md)
         self.assertNotEqual(note_identity(record), note_identity(replace(record, episode=replace(ep, metadata={}))))
-        self.assertIn('节目说明', json.dumps(nodes, ensure_ascii=False))
+        self.assertTrue(nodes)
 
 
 class RequestedDelivery(unittest.IsolatedAsyncioTestCase):

@@ -121,7 +121,7 @@ class DialogueLayout(unittest.TestCase):
         with self.assertRaisesRegex(LibraryError, '姓名加粗'):
             compiler._verify_speaker_labels(token, nodes)
 
-    def test_v2_chinese_appendix_is_migrated_at_same_url(self):
+    def test_v2_chinese_appendix_is_replaced_by_qa_at_same_url(self):
         case = migrations.LegacyMigration()
         case.setUp()
         self.addCleanup(case.doCleanups)
@@ -138,8 +138,9 @@ class DialogueLayout(unittest.TestCase):
         result = case.c.publish(case.job)
         self.assertTrue(result['documents'][0]['url'].endswith(case.token))
         self.assertNotIn('完整中文文字稿', str(case.f.api.blocks(case.token)))
-        self.assertIn('完整对谈实录', str(case.f.api.blocks(case.token)))
-        self.assertEqual(before[1], case.f.api.data[case.token][1])
+        self.assertIn('QA 整理', str(case.f.api.blocks(case.token)))
+        self.assertNotIn('完整对谈实录', str(case.f.api.blocks(case.token)))
+        self.assertEqual(before[1]['heading1'], case.f.api.data[case.token][1]['heading1'])
 
 
 if __name__ == '__main__':
