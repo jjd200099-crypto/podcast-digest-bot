@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import test_reader_daily as fixtures
+from test_daily_document import notes
 
 from news_officer.daily_enrichment import (
     _content,
@@ -447,7 +448,6 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
     @patch('news_officer.runtime.datetime', wraps=datetime)
     async def test_real_shownotes_failure_preserves_body_and_successful_sibling(self, clock):
         clock.now.return_value = datetime.fromisoformat('2026-10-11T09:00:00+08:00')
-        from test_daily_document import notes
 
         instance, base = await self.prepare()
         compiler = self.compiler(instance)
@@ -486,23 +486,22 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.outbox_items(base.key)[0].content, self.original)
 
     async def test_new_style_failure_keeps_receipt_unlinked_until_retry_succeeds(self):
-        from test_daily_document import notes
         from test_deepread_new_style import sample
 
-        from news_officer.shownotes import ShownotesWriter, note_identity
+        from news_officer.shownotes import ShownotesWriter
 
         instance, base, _, _ = await self.interactive_bundle()
         compiler = self.compiler(instance)
-        compiler.new_style = True
+
         client = Mock()
-        compiler.writer = ShownotesWriter(client, "model", new_style=True)
+        compiler.writer = ShownotesWriter(client, "model")
         enqueue_enrichment(self.store, '2026-10-11', compiler=compiler)
         job = self.store.claim_next('document')
         record = self.store.get_verified_transcript(job.payload['episode_id'])
         # A real legacy cache entry must not short-circuit new-style generation.
         with self.store._connect() as db:
             db.execute('INSERT INTO episode_shownotes VALUES (?,?,?)',
-                       (note_identity(record), json.dumps(notes(record)), 'legacy'))
+                       ("legacy-old-format-identity", json.dumps({"parts": []}), 'legacy'))
         with (patch('news_officer.deepread.generate', side_effect=ValueError('failed')),
               self.assertRaisesRegex(ValueError, 'failed')):
             await instance._handle_document_job(job)
@@ -535,6 +534,45 @@ class EnrichmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.api.puts), 1)
         saved = self.store.get_job_result(base.key, 'daily:document:' + record.episode.id)
         self.assertIn(saved['documents'][0]['url'], self.api.puts[0]['content'])
+
+    async def test_three_new_format_failures_leave_card_without_episode_link(self):
+        from news_officer.episode_document import DocumentRetryStopped
+        from news_officer.shownotes import ShownotesWriter
+
+        instance, base, bundle, delivery = await self.interactive_bundle()
+        bundle['enrichment']['sections'].append({
+            'episode_id': 'two', 'body': 'Sibling summary.',
+            'template': 'Sibling summary.\n\n[精读](https://document.invalid/DAILY_DOCUMENT_LINK)',
+            'strict_document_allowed': True})
+        compiler = self.compiler(instance)
+        client = Mock()
+        compiler.writer = ShownotesWriter(client, 'model')
+        enqueue_enrichment(self.store, '2026-10-11', compiler=compiler)
+        with self.store._connect() as db:
+            row = db.execute("SELECT job_key,payload_json FROM jobs WHERE kind='document' "
+                             "AND json_extract(payload_json,'$.episode_id')='one'").fetchone()
+        from news_officer.models import Job
+        job = Job(row['job_key'], 'document', json.loads(row['payload_json']), 1)
+        with patch('news_officer.deepread.generate', side_effect=ValueError('failed')) as generate:
+            for attempt in range(3):
+                with self.assertRaises(DocumentRetryStopped if attempt == 2 else ValueError):
+                    await instance._handle_document_job(job)
+            with self.assertRaises(DocumentRetryStopped):
+                await instance._handle_document_job(job)
+        self.assertEqual(generate.call_count, 3)
+        client.responses.parse.assert_not_called()
+        self.assertEqual(self.document_api.creates, 0)
+        self.assertIsNone(self.store.get_job_result(base.key, 'daily:document:one'))
+        with self.store._connect() as db:
+            self.assertEqual(tuple(db.execute('SELECT attempts,status FROM episode_document_attempts').fetchone()),
+                             (3, 'failed'))
+        sibling = self.ready(base.key, 'two')
+        _update_target(self.store, self.api, base.key, bundle, [sibling], delivery, None)
+        self.assertEqual(len(self.api.puts), 1)
+        content = self.api.puts[0]['content']
+        self.assertIn('docx/two', content)
+        self.assertNotIn('docx/one', content)
+        self.assertEqual(content.count('https://www.feishu.cn/docx/'), 1)
 
     async def test_library_failure_is_bounded_after_notes_are_cached(self):
         from news_officer.episode_document import DocumentRetryStopped

@@ -1,4 +1,4 @@
-"""Opt-in, source-covered Chinese interview study notes and chronological QA."""
+"""Source-covered, source-covered Chinese interview study notes and chronological QA."""
 
 import json
 import logging
@@ -10,7 +10,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from .glossary import GLOSSARY_INSTRUCTIONS, preserve_glossary_values
-from .shownotes import Correction, NotePoint, text_node, transcript_evidence
+from .qa import chunk_transcript
+from .shownotes import text_node
 from .titles import normalize_deepread_title
 
 LOGGER = logging.getLogger(__name__)
@@ -37,6 +38,32 @@ CHUNK_INSTRUCTIONS = (
     "core 仅概括本批；所有 evidence_ids 必须来自本批 transcript。"
     "known_speakers 仅用于保持姓名和角色一致，不引用先前批次的内容。"
 )
+
+
+def transcript_evidence(text):
+    result, previous = {}, ''
+    # Preserve every source character while anchoring timestamped utterances
+    # individually, instead of assigning several minutes to a chunk's first cue.
+    bodies = re.split(r'(?m)(?=^\[\d{1,3}:\d{2}(?::\d{2})?\])', text)
+    chunks = [(f'C{i:04d}', body) for i, body in enumerate(filter(None, bodies), 1)] if len(bodies) > 1 else chunk_transcript(text)
+    for key, body in chunks:
+        times = re.findall(r'\[(\d{1,3}:\d{2}(?::\d{2})?)\]', body)
+        result[key] = {'text': body, 'time': times[0] if times else previous}
+        if times:
+            previous = times[-1]
+    return result
+
+
+class NotePoint(BaseModel):
+    text: str
+    evidence_ids: list[str] = Field(min_length=1, max_length=4)
+
+
+class Correction(BaseModel):
+    original: str
+    corrected: str
+    reason: str
+    evidence_id: str
 
 
 class Speaker(BaseModel):
@@ -214,13 +241,30 @@ def normalize_proper_noun(text):
 
 
 def _normalize_correction_text(text):
-    """NFKC/casefold, remove all Unicode punctuation, then collapse whitespace."""
+    """NFKC/casefold; punctuation separates tokens, including CJK punctuation."""
     text = unicodedata.normalize("NFKC", text).casefold()
-    return " ".join(
-        "".join(
-            char for char in text if not unicodedata.category(char).startswith("P")
-        ).split()
-    )
+    return " ".join("".join(
+        " " if unicodedata.category(char).startswith("P") else char
+        for char in text
+    ).split())
+
+
+def _correction_matches(original, evidence):
+    original = _normalize_correction_text(original)
+    evidence = _normalize_correction_text(evidence)
+    if not original:
+        return False
+    if not any(char.isdigit() or "LATIN" in unicodedata.name(char, "")
+               for char in original):
+        return original in evidence
+    # Latin/digit runs are whole tokens; each CJK character is a token.
+    # Thus mixed Chinese+Latin can match inside a CJK run, but never inside
+    # a longer Latin word. Punctuation and whitespace are equivalent separators.
+    def tokens(text):
+        return re.findall(r"[\u3400-\u9fff]|[^\s\u3400-\u9fff]+", text)
+    needle, haystack = tokens(original), tokens(evidence)
+    return any(haystack[i:i + len(needle)] == needle
+               for i in range(len(haystack) - len(needle) + 1))
 
 
 def normalize_evidence_ids(value):
@@ -325,10 +369,7 @@ def validate_deepread(value, evidence, episode_id="unknown"):
     supported_corrections = []
     for correction in notes.corrections:
         refs([correction.evidence_id])
-        original = _normalize_correction_text(correction.original)
-        if original and original in _normalize_correction_text(
-            evidence[correction.evidence_id]["text"]
-        ):
+        if _correction_matches(correction.original, evidence[correction.evidence_id]["text"]):
             supported_corrections.append(correction)
     dropped = len(notes.corrections) - len(supported_corrections)
     notes.corrections = supported_corrections

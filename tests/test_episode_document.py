@@ -10,7 +10,6 @@ import test_daily_document as fixtures
 
 from news_officer.episode_document import SelectedEpisodeCompiler, stars
 from news_officer.models import Job
-from news_officer.shownotes import render_episode, transcript_evidence, validate_notes
 
 
 class SelectedDocuments(unittest.TestCase):
@@ -123,7 +122,8 @@ class SelectedDocuments(unittest.TestCase):
             token = doc['url'].rsplit('/', 1)[-1]
             headings = [b['heading1']['elements'][0]['text_run']['content']
                         for b in f.api.blocks(token) if b['block_type'] == 3]
-            self.assertEqual(len(headings), 1)
+            self.assertEqual(headings[1:], ['核心内容', 'QA 整理'])
+            self.assertIn(headings[0], ['one', 'two'])
         self.assertEqual(before, f.store.list_job_results(f.base, 'daily_item'))
         self.assertEqual(self.compiler.publish(job), result)
         self.assertEqual(f.api.creates, 2)
@@ -187,7 +187,7 @@ class SelectedDocuments(unittest.TestCase):
     def test_frozen_old_batch_cannot_bypass_raised_threshold(self):
         self.compiler.min_stars = 5
         job = self.job()
-        self.fixture.store.save_job_result(job.key, 'episodes:content', 'episode_documents',
+        self.fixture.store.save_job_result(job.key, 'episodes:new-style-content', 'episode_documents',
                                            {'documents': [{'stars': 4}]})
         result = self.compiler.publish(job)
         self.assertFalse(result['notify'])
@@ -227,20 +227,6 @@ class SelectedDocuments(unittest.TestCase):
         f.add_episode('two')
         self.rate('two', 5)
         self.assertEqual(self.job().key, first.key)
-
-    def test_grounded_native_comparison_tables(self):
-        record = self.fixture.record
-        value = fixtures.notes(record)
-        key = next(iter(transcript_evidence(record.transcript.text)))
-        value['parts'][0]['tables'] = [{'columns': ['指标', '区别'], 'rows': [
-            {'cells': ['收入', '付费金额'], 'evidence_ids': [key]},
-            {'cells': ['使用量', '产品使用'], 'evidence_ids': [key]}]}]
-        nodes, markdown = render_episode(record, value)
-        self.assertTrue(any(n['block_type'] == 31 for n in nodes))
-        self.assertIn('| 指标 | 区别 |', markdown)
-        value['parts'][0]['tables'][0]['rows'][0]['evidence_ids'] = ['invented']
-        with self.assertRaisesRegex(ValueError, 'table evidence'):
-            validate_notes(value, transcript_evidence(record.transcript.text))
 
 
 class SelectedDelivery(unittest.IsolatedAsyncioTestCase):
@@ -360,9 +346,6 @@ class DocumentAllowlist(unittest.TestCase):
         self.assertEqual(self.compiler._audience([['chat_id', 'oc_new']]), [('chat_id', 'oc_new')])
 
 
-
-
-
 class DocumentRetryLimits(unittest.TestCase):
     setUp = SelectedDocuments.setUp
     rate = SelectedDocuments.rate
@@ -437,49 +420,10 @@ class DocumentRetryLimits(unittest.TestCase):
         self.assertEqual(f.writer.generate.call_count, 4)
 
 
-
-
 class CompleteDocumentBudget(unittest.TestCase):
     setUp = SelectedDocuments.setUp
     rate = SelectedDocuments.rate
     job = SelectedDocuments.job
-
-    def test_pre_merge_notes_revision_budget_is_not_reset(self):
-        from news_officer.episode_document import DocumentRetryStopped
-        from news_officer.shownotes import note_identity
-        f = self.fixture
-        job = self.job()
-        with f.store._connect() as db:
-            db.execute("INSERT INTO episode_document_attempts VALUES (?,?,?,3,'failed')",
-                       (f.record.episode.id, note_identity(f.record), '2026-09-21'))
-        with self.assertRaises(DocumentRetryStopped):
-            self.compiler.publish(job)
-        f.writer.generate.assert_not_called()
-        with f.store._connect() as db:
-            rows = db.execute('SELECT revision,attempts,status FROM episode_document_attempts').fetchall()
-        self.assertEqual([tuple(r) for r in rows], [(self.compiler.document_identity(f.record), 3, 'failed')])
-
-    def test_translation_failures_share_the_document_revision_budget(self):
-        from unittest.mock import Mock
-
-        from news_officer.episode_document import DocumentRetryStopped
-        f = self.fixture
-        self.compiler.include_fulltext = True
-        self.compiler.transcript_writer = Mock()
-        self.compiler.transcript_writer.generate.side_effect = ValueError('invalid translation')
-        job = self.job()
-        for attempt in range(3):
-            with self.assertRaises(DocumentRetryStopped if attempt == 2 else ValueError):
-                self.compiler.publish(job)
-        with self.assertRaises(DocumentRetryStopped):
-            self.compiler.publish(job)
-        self.assertEqual(f.writer.generate.call_count, 1)
-        self.assertEqual(self.compiler.transcript_writer.generate.call_count, 3)
-        self.assertEqual(f.api.creates, 0)
-        self.assertIsNone(f.store.get_job_result(job.key, 'episodes:content'))
-        with f.store._connect() as db:
-            self.assertEqual(tuple(db.execute('SELECT attempts,status FROM episode_document_attempts').fetchone()),
-                             (3, 'failed'))
 
 
 class BackoffRecoveryCaps(unittest.TestCase):

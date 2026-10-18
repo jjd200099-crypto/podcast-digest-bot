@@ -12,9 +12,10 @@ import uuid
 from datetime import date, timedelta
 
 from .daily_report import ranked_daily_items
+from .deepread import INTRO, VERSION
 from .library import LibraryError
 from .models import DailyItem
-from .shownotes import INTRO, VERSION, note_identity, render_episode, text_node
+from .shownotes import note_identity, render_episode, text_node
 
 
 def tree_signature(node):
@@ -71,14 +72,9 @@ def descendant_payload(nodes, start):
 
 
 class DailyDocumentCompiler:
-    def __init__(self, store, api, writer, *, folder='', start_date='', root=None, audience_filter=None, new_style=False):
+    def __init__(self, store, api, writer, *, folder='', start_date='', root=None, audience_filter=None):
         self.store, self.api, self.writer = store, api, writer
-        self.new_style = new_style
         self.notes_version, self.intro = VERSION, INTRO
-        if new_style:
-            from .deepread import INTRO as new_intro
-            from .deepread import VERSION as new_version
-            self.notes_version, self.intro = new_version, new_intro
         # Re-validates frozen daily:recipients against the runtime allowlist.
         self.audience_filter = audience_filter
         self.folder, self.start_date = folder, start_date
@@ -153,14 +149,14 @@ class DailyDocumentCompiler:
                                          'targets': audience})
         return count
 
-    def _notes(self, record, digest, *, fulltext_attached=False):
-        identity = note_identity(record, new_style=self.new_style)
+    def _notes(self, record, digest):
+        identity = note_identity(record)
         with self.store._connect() as db:
             row = db.execute('SELECT notes_json FROM episode_shownotes WHERE identity=?', (identity,)).fetchone()
         notes = json.loads(row[0]) if row else self.writer.generate(record)
-        if self.new_style and "chapters" not in notes:
+        if "chapters" not in notes:
             raise ValueError("New-style deepread required; refusing old-style notes")
-        nodes, markdown = render_episode(record, notes, digest, fulltext_attached=fulltext_attached, new_style=self.new_style)
+        nodes, markdown = render_episode(record, notes, digest)
         if not row:
             with self.store._connect() as db:
                 db.execute('INSERT OR IGNORE INTO episode_shownotes VALUES (?,?,?)',
@@ -218,7 +214,7 @@ class DailyDocumentCompiler:
         targets = self._audience(job.payload['targets'])
         if not targets:
             return None
-        bundle = self.store.get_job_result(job.key, 'document:content')
+        bundle = self.store.get_job_result(job.key, 'document:new-style-content')
         revision, records, pending = self.snapshot(job.payload['base_job'])
         if revision != job.payload['revision'] and bundle is None:
             # A newly queued revision will compile current sources instead.
@@ -230,13 +226,13 @@ class DailyDocumentCompiler:
             nodes, entries = json.loads(row['nodes_json']), json.loads(row['entries_json'])
             if not nodes:
                 nodes = [text_node(self.intro, 'quote')]
-            new = [(item, record) for item, record in records if note_identity(record, new_style=self.new_style) not in entries]
+            new = [(item, record) for item, record in records if note_identity(record) not in entries]
             heading = '本日节目' if not entries else '补充精读（全文已补齐或版本更新）'
             nodes.append(text_node(heading, 'heading1'))
             nodes.append(text_node(f'本版新增 {len(new)} 期精读；本日共有 {len(records)} 期已取得完整文字稿。'))
             for item, record in new:
                 nodes.extend(self._notes(record, self.store.get_transcript_digest(record.episode.id) or item.message))
-                entries.append(note_identity(record, new_style=self.new_style))
+                entries.append(note_identity(record))
             if pending:
                 nodes.append(text_node('本版暂未编译', 'heading2'))
                 nodes.extend(text_node(f'《{p["title"]}》：未取得已核验全文，不据简介编造；补齐后追加到本文。', 'bullet') for p in pending)
@@ -247,7 +243,7 @@ class DailyDocumentCompiler:
             # queued revision appends an explicit correction/addendum later.
             if self.snapshot(job.payload['base_job'])[0] != revision:
                 return None
-            bundle = self.store.save_job_result(job.key, 'document:content', 'document_content',
+            bundle = self.store.save_job_result(job.key, 'document:new-style-content', 'document_content',
                                                {'nodes': nodes, 'entries': entries, 'revision': revision,
                                                 'count': len(records)})
         token = row['document_id']

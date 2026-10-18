@@ -99,18 +99,14 @@ def build_runtime(settings: Settings) -> NewsOfficerRuntime:
         settings, store, messenger, router, podcast, research_agent=research
     )
     if settings.daily_document_enabled:
-        from .document_transcript import ChineseTranscriptWriter
         from .episode_document import SelectedEpisodeCompiler
         from .shownotes import ShownotesWriter
         runtime.document_compiler = SelectedEpisodeCompiler(
-            store, FeishuLibraryAPI(messenger), ShownotesWriter(summarizer.client, settings.openai_model,
-                                                                   new_style=settings.deepread_new_style),
+            store, FeishuLibraryAPI(messenger), ShownotesWriter(summarizer.client, settings.openai_model),
             folder=settings.daily_document_folder, start_date=settings.daily_document_start_date,
             min_stars=settings.daily_document_min_stars,
             max_attempts=settings.daily_document_max_attempts, timezone=settings.timezone,
             include_fulltext=settings.daily_document_fulltext,
-            new_style=settings.deepread_new_style,
-            transcript_writer=ChineseTranscriptWriter(store, summarizer.client, settings.openai_model),
             request_authorizer=research.allowed if research else None,
             audience_filter=runtime._document_audience,
         )

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
 from datetime import time
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@lru_cache(maxsize=1)
+def _warn_obsolete_deepread_variable():
+    logging.getLogger(__name__).warning("NEWS_OFFICER_DEEPREAD_NEW_STYLE is obsolete and can be removed")
 
 
 def _csv(value: str) -> tuple[str, ...]:
@@ -84,13 +91,17 @@ class Settings:
     daily_health_budget_seconds: int = 2700
     daily_document_max_attempts: int = 3
     daily_document_fulltext: bool = False
-    deepread_new_style: bool = True
     rss_first_seen: bool = True
     first_seen_max_age_days: int = 45
     first_seen_burst_limit: int = 3
 
     @classmethod
     def from_env(cls) -> Settings:
+        obsolete = os.environ.get("NEWS_OFFICER_DEEPREAD_NEW_STYLE")
+        if obsolete is not None:
+            if obsolete.strip().casefold() != "true":
+                raise ValueError("NEWS_OFFICER_DEEPREAD_NEW_STYLE has been removed; old-format 精读 is no longer supported. Remove this variable (value=false is not allowed).")
+            _warn_obsolete_deepread_variable()
         missing = [
             name
             for name in ("FEISHU_APP_ID", "FEISHU_APP_SECRET", "OPENAI_API_KEY")
@@ -167,7 +178,6 @@ class Settings:
                           or os.environ.get('NEWS_OFFICER_EDITORIAL_FILTER', 'true').lower() != 'true'):
             raise ValueError('Podwise discovery requires PODWISE_API_TOKEN and editorial review')
         return cls(
-            deepread_new_style=os.environ.get("NEWS_OFFICER_DEEPREAD_NEW_STYLE", "true").lower() == "true",
             discovery_topics=topics,
             daily_preparation_enabled=os.environ.get('NEWS_OFFICER_DAILY_PREPARATION', 'false').lower() == 'true',
             podwise_discovery_enabled=discovery,

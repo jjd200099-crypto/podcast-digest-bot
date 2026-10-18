@@ -7,7 +7,6 @@ from unittest.mock import Mock
 
 import test_document_transcript as documents
 
-from news_officer.daily_document import read_tree, tree_signature
 from news_officer.document_transcript import (
     ChineseTranscriptWriter,
     TranslationFailure,
@@ -102,7 +101,7 @@ class LegacyMigration(unittest.TestCase):
             row = db.execute('SELECT * FROM daily_documents').fetchone()
             self.base = json.loads(row['nodes_json']) + [text_node('完整文字稿（归档原文 · en）', 'heading2'),
                                                        text_node('原稿说明'), text_node('[00:01] Original.')]
-            self.entries = json.loads(row['entries_json']) + ['fulltext:legacy']
+            self.entries = ['old-format-identity', 'fulltext:legacy']
             db.execute('UPDATE daily_documents SET nodes_json=?,entries_json=?',
                        (json.dumps(self.base), json.dumps(self.entries)))
         self.c._write(self.token, self.base)
@@ -133,18 +132,6 @@ class LegacyMigration(unittest.TestCase):
             'reply_in_thread': False}, 1)
         self.f.store.enqueue(self.job.key, self.job.kind, self.job.payload)
 
-    def test_migration_preserves_front_and_recovers_lost_delete(self):
-        prefix = [tree_signature(n) for n in self.base[:-3]]
-        self.lost_delete = True
-        with self.assertRaises(TimeoutError):
-            self.c.publish(self.job)
-        result = self.c.publish(self.job)
-        self.assertTrue(result['documents'][0]['url'].endswith(self.token))
-        actual = read_tree(self.f.api.blocks(self.token), self.token)
-        self.assertEqual([tree_signature(n) for n in actual[:len(prefix)]], prefix)
-        self.assertNotIn('归档原文', str(actual))
-        self.assertIn('完整对谈实录', str(actual))
-        self.assertEqual(self.c.publish(self.job), result)
 
     def test_manual_edit_aborts_without_deletion(self):
         self.f.api.data[self.token][-1]['text']['elements'][0]['text_run']['content'] = '同事的修改'
@@ -152,12 +139,6 @@ class LegacyMigration(unittest.TestCase):
         with self.assertRaises(LibraryError):
             self.c.publish(self.job)
         self.assertEqual(before, self.f.api.data)
-
-    def test_failed_translation_leaves_live_original_untouched(self):
-        self.c.transcript_writer.generate.side_effect = TimeoutError('model unavailable')
-        with self.assertRaises(TimeoutError):
-            self.c.publish(self.job)
-        self.assertEqual(self.original, self.f.api.blocks(self.token))
 
 
 if __name__ == '__main__':
