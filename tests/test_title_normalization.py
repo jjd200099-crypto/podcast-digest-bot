@@ -81,7 +81,7 @@ class TitleNormalizationTests(unittest.TestCase):
                             {'text_run': {'content': 'one'}}]}}]
                         with (patch.object(compiler, 'snapshot', return_value=(revision, [(item, rec)], pending)),
                               patch.object(compiler, '_notes', side_effect=lambda *args, nodes=nodes, **kwargs:
-                                           (nodes, True) if kwargs.get('return_style') else nodes)):
+                                           nodes)):
                             result = compiler.publish(fixture.job())
                         self.assertEqual(result['documents'][0]['title'], 'one｜Test｜2026-09-21')
                         with fixture.fixture.store._connect() as db:

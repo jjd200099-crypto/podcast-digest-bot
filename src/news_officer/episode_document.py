@@ -290,7 +290,9 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
         if not self.retry_available(job.payload, self.today()):
             raise DocumentRetryStopped('Document retry budget or deadline reached')
         deferred = False
-        bundle = self.store.get_job_result(job.key, 'episodes:content')
+        # Pre-upgrade frozen bundles may contain old-style fallback documents.
+        content_key = 'episodes:new-style-content' if self.new_style else 'episodes:content'
+        bundle = self.store.get_job_result(job.key, content_key)
         if bundle is None:
             if not requested and not enrichment and revision != job.payload['revision']:
                 return None
@@ -316,20 +318,13 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 episode_nodes = None
                 if self.new_style and identity not in entries:
                     try:
-                        episode_nodes, generated_new_style = self._notes(
-                            record, digest, fulltext_attached=self.include_fulltext and bool(nodes),
-                            return_style=True)
+                        episode_nodes = self._notes(
+                            record, digest, fulltext_attached=self.include_fulltext and bool(nodes))
                     except Exception:
                         if requested or enrichment:
                             raise
                         logger.warning('Episode document validation failed; deferred', exc_info=True)
                         deferred = True
-                        continue
-                    if nodes and not generated_new_style:
-                        # Keep the existing notes and full-text appendix intact.
-                        documents.append({'key': key, 'title': title, 'nodes': nodes,
-                                          'entries': entries, 'revision': self.document_identity(record),
-                                          'stars': stars(digest)})
                         continue
                     if nodes:
                         replacement = {'replacement_base': nodes, 'replacement_start': 0}
@@ -358,8 +353,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                         deferred = True
                         continue
                     nodes.extend(episode_nodes)
-                    if not self.new_style or generated_new_style:
-                        entries.append(identity)
+                    entries.append(identity)
                 if self.include_fulltext and not self.new_style:
                     appendix_id = fulltext_identity(record)
                     if appendix_id not in entries:
@@ -383,7 +377,7 @@ class SelectedEpisodeCompiler(DailyDocumentCompiler):
                 return None
             bundle = {'documents': documents}
             if not deferred:
-                bundle = self.store.save_job_result(job.key, 'episodes:content', 'episode_documents', bundle)
+                bundle = self.store.save_job_result(job.key, content_key, 'episode_documents', bundle)
         if not requested:
             targets = self._audience(targets)
         links = []

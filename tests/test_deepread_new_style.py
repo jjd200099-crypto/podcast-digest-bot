@@ -69,6 +69,7 @@ def record():
             verified_complete=True,
         ),
         episode=SimpleNamespace(
+            id="episode-test",
             title="John Smith on OpenAI",
             show="Interview",
             url="https://example.com/episode",
@@ -155,16 +156,17 @@ class NewStyleTests(unittest.TestCase):
             transcript_evidence("unlabelled source"),
         )
 
-    def test_flag_defaults_off_and_explicitly_enables(self):
+    def test_flag_defaults_on_and_allows_explicit_opt_out(self):
         env = {
             "FEISHU_APP_ID": "id",
             "FEISHU_APP_SECRET": "secret",
             "OPENAI_API_KEY": "key",
         }
         with patch.dict(os.environ, env, clear=True):
-            self.assertFalse(Settings.from_env().deepread_new_style)
-            with patch.dict(os.environ, {"NEWS_OFFICER_DEEPREAD_NEW_STYLE": "true"}):
-                self.assertTrue(Settings.from_env().deepread_new_style)
+            self.assertTrue(Settings.from_env().deepread_new_style)
+            self.assertTrue(Settings.__dataclass_fields__["deepread_new_style"].default)
+            with patch.dict(os.environ, {"NEWS_OFFICER_DEEPREAD_NEW_STYLE": "false"}):
+                self.assertFalse(Settings.from_env().deepread_new_style)
 
     def test_default_writer_retains_old_spec_and_identity(self):
         client = Mock()
@@ -202,6 +204,20 @@ class NewStyleTests(unittest.TestCase):
             render_episode(record(), old),
             render_episode(record(), old, new_style=False),
         )
+
+    def test_new_style_writer_raises_without_old_model_call_or_secret_log(self):
+        for failure in (ValueError, TimeoutError, ConnectionError, RuntimeError):
+            client = Mock()
+            error = failure("secret-token-must-not-be-logged")
+            with patch("news_officer.deepread.generate", side_effect=error), self.assertLogs(
+                "news_officer.shownotes", level="WARNING"
+            ) as logs, self.assertRaises(failure) as raised:
+                ShownotesWriter(client, "model", new_style=True).generate(record())
+            self.assertIs(raised.exception, error)
+            client.responses.parse.assert_not_called()
+            self.assertEqual(len(logs.output), 1)
+            self.assertIn("episode episode-test; no old-style fallback", logs.output[0])
+            self.assertNotIn("secret-token", logs.output[0])
 
     def test_enabled_writer_uses_new_prompt_and_complete_dialogue_schema(self):
         client = Mock()
@@ -604,6 +620,24 @@ class NewStyleTests(unittest.TestCase):
 
 
 class NewStyleCompilerTests(unittest.TestCase):
+    def test_new_style_rejects_old_notes_even_under_new_cache_identity(self):
+        import test_episode_document as fixtures
+
+        f = fixtures.SelectedDocuments()
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        f.compiler.new_style = True
+        rec = f.fixture.record
+        identity = note_identity(rec, new_style=True)
+        old = f.fixture.writer.generate(rec)
+        with f.fixture.store._connect() as db:
+            db.execute('INSERT INTO episode_shownotes VALUES (?,?,?)',
+                       (identity, json.dumps(old), 'legacy'))
+        with self.assertRaisesRegex(ValueError, 'refusing old-style notes'):
+            f.compiler._notes(rec, '')
+        self.assertEqual(f.fixture.api.creates, 0)
+        self.assertFalse((f.compiler.root / (identity + '.md')).exists())
+
     def test_selected_compiler_publishes_qa_without_second_appendix_and_reuses_cache(
         self,
     ):
@@ -688,72 +722,59 @@ class NewStyleCompilerTests(unittest.TestCase):
             deepread.__dict__.clear()
             deepread.__dict__.update(module_state)
 
-    def test_failed_new_style_publishes_old_style_in_normal_and_enrichment_modes(self):
+    def test_failed_new_style_defers_then_retries_without_old_style(self):
         import test_episode_document as fixtures
-        from test_shownotes import ShownotesValidation
 
         for enrichment in (False, True):
-            for failure in (
-                ValueError("invalid"),
-                TimeoutError("timeout"),
-                ConnectionError("transport"),
-                RuntimeError("unexpected"),
-            ):
+            for failure in (ValueError("invalid"), TimeoutError("timeout"),
+                            ConnectionError("transport"), RuntimeError("unexpected")):
                 with self.subTest(enrichment=enrichment, failure=type(failure)):
                     f = fixtures.SelectedDocuments()
                     f.setUp()
                     self.addCleanup(f.doCleanups)
-                    old_fixture = ShownotesValidation()
-                    old_fixture.setUp()
-                    old = old_fixture.value
                     client = Mock()
-
-                    def respond(failure=failure, old=old, **kwargs):
-                        if kwargs["text_format"] is DeepRead:
-                            if isinstance(failure, ValueError):
-                                return SimpleNamespace(output_parsed=None)
-                            raise failure
-                        return SimpleNamespace(
-                            output_parsed=EpisodeNotes.model_validate(old)
-                        )
-
-                    client.responses.parse.side_effect = respond
+                    client.responses.parse.side_effect = failure
                     f.compiler.new_style = True
                     f.compiler.writer = ShownotesWriter(client, "model", new_style=True)
                     if enrichment:
-                        f.fixture.store.save_job_result(
-                            f.fixture.base,
-                            "bundle",
-                            "daily_bundle",
-                            {
-                                "enrichment": {"version": 1, "eligible": ["one"]},
-                                "deliveries": [
-                                    {"target_type": "chat_id", "target_id": "oc_test"}
-                                ],
-                            },
-                        )
+                        f.fixture.store.save_job_result(f.fixture.base, "bundle", "daily_bundle", {
+                            "enrichment": {"version": 1, "eligible": ["one"]},
+                            "deliveries": [{"target_type": "chat_id", "target_id": "oc_test"}],
+                        })
                         job = f.enrichment_job("one")
                     else:
                         job = f.job()
-                    with self.assertLogs(
-                        "news_officer.shownotes", level="WARNING"
-                    ) as logs:
+                    # Old jobs may have frozen a fallback result before this upgrade.
+                    f.fixture.store.save_job_result(job.key, 'episodes:content',
+                                                    'episode_documents', {'documents': []})
+                    with self.assertLogs("news_officer.shownotes", level="WARNING") as logs:
+                        if enrichment:
+                            with self.assertRaisesRegex(ValueError, "Deepread chunk generation failed"):
+                                f.compiler.publish(job)
+                        else:
+                            result = f.compiler.publish(job)
+                            self.assertTrue(result["deferred"])
+                            self.assertEqual(result["documents"], [])
+                    self.assertEqual(len(logs.output), 1)
+                    self.assertIn("episode one; no old-style fallback", logs.output[0])
+                    self.assertEqual(f.fixture.api.creates, 0)
+                    self.assertTrue(f.compiler.retry_available(job.payload, f.compiler.today()))
+                    with f.fixture.store._connect() as db:
+                        self.assertEqual(tuple(db.execute(
+                            "SELECT attempts,status FROM episode_document_attempts"
+                        ).fetchone()), (1, "pending"))
+                    self.assertEqual(client.responses.parse.call_count, 3)
+                    self.assertTrue(all(c.kwargs["text_format"] is DeepRead
+                                        for c in client.responses.parse.call_args_list))
+                    value = json.loads(json.dumps(sample()).replace("C0002", "C0001"))
+                    value["proper_nouns"] = []
+                    with patch("news_officer.deepread.generate", return_value=value):
                         result = f.compiler.publish(job)
                     self.assertEqual(result["count"], 1)
-                    self.assertIn("falling back", logs.output[0])
-                    self.assertIn(
-                        "核心论点", json.dumps(f.fixture.api.data, ensure_ascii=False)
-                    )
-                    self.assertEqual(
-                        sum(
-                            call.kwargs["text_format"] is DeepRead
-                            for call in client.responses.parse.call_args_list
-                        ),
-                        3,
-                    )
-                    self.assertEqual(f.compiler.publish(job), result)
+                    self.assertIn("QA 整理", json.dumps(f.fixture.api.data, ensure_ascii=False))
+                    self.assertNotIn("核心论点", json.dumps(f.fixture.api.data, ensure_ascii=False))
 
-    def test_existing_document_fallback_preserves_fulltext_and_does_not_cache(self):
+    def test_existing_document_failure_preserves_fulltext_and_does_not_cache(self):
         import test_document_transcript as fixtures
 
         from news_officer.models import Job
@@ -795,8 +816,9 @@ class NewStyleCompilerTests(unittest.TestCase):
             1,
         )
         f.f.store.enqueue(job.key, job.kind, job.payload)
-        result = compiler.publish(job)
-        self.assertEqual(result["documents"][0]["url"], first["documents"][0]["url"])
+        with self.assertRaisesRegex(ValueError, "new style failed"):
+            compiler.publish(job)
+        client.responses.parse.assert_not_called()
         self.assertEqual(f.f.api.data, before)
         self.assertTrue(f.appendix(first["documents"][0]["url"].rsplit("/", 1)[-1]))
         with f.f.store._connect() as db:
@@ -812,8 +834,9 @@ class NewStyleCompilerTests(unittest.TestCase):
             ).exists()
         )
         calls = failing_generate.call_count
-        compiler._notes(f.f.record, "", fulltext_attached=True)
-        compiler._notes(f.f.record, "", fulltext_attached=True)
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, "new style failed"):
+                compiler._notes(f.f.record, "", fulltext_attached=True)
         self.assertEqual(failing_generate.call_count, calls + 2)
 
     def test_runtime_passes_config_flag_to_writer_and_compiler(self):

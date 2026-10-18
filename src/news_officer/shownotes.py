@@ -201,7 +201,9 @@ class ShownotesWriter:
             try:
                 return generate(self.client, self.model, record)
             except Exception:
-                logger.warning('New-style deepread failed; falling back to old-style notes', exc_info=True)
+                logger.warning('New-style deepread failed for episode %s; no old-style fallback, job will retry',
+                               record.episode.id)
+                raise
         evidence = transcript_evidence(record.transcript.text)
         if not evidence or not record.transcript.verified_complete:
             raise ValueError('Complete transcript required')
