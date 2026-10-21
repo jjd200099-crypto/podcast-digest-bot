@@ -48,10 +48,10 @@ INTEGER = {"type": "integer"}
 TOOLS = [
     function("get_fetch_status", "读取最近抓取的真实失败来源、类型、原因及历史节目和全文数量。抓取失败或抓取/系统状态问题必须先查此工具。"),
     function("get_delivery_health", "读取早报实际发送状态、全文积压和失败任务数量。用户问日报为什么没到、只收到几期时先查；不是连接正常就代表日报成功，不含他人的聊天内容。"),
-    function("record_editorial_feedback", "保存用户明确提出的内容或表达偏好，供维护者审阅。scope=personal 为个人建议，scope=group 为群级变更提议；两者均先登记，不自动修改全群规则或模型。", feedback=STRING,
+    function("record_editorial_feedback", "仅保存用户明确提出的内容筛选或表达偏好（如段落空行、更短回答），供维护者参考。scope=personal 为个人建议，scope=group 为群级变更提议；两者均只登记偏好，不会改代码、部署或自动修改全群规则。改功能/改代码/改规则请勿用本工具。", feedback=STRING,
              scope={"type": "string", "enum": ["personal", "group"]}),
     function("get_request_status", "读取当前用户当前会话的真实处理记录、交付状态和未完成回答检测。用户要求检查错误、不回复或截断时必须先查，不能只道歉或猜系统故障。"),
-    function("record_feature_request", "把用户建议留给维护者评估。不返回内部编号，不承诺开发。", summary=STRING),
+    function("record_feature_request", "把口头功能建议留给维护者评估。不返回内部编号，不承诺开发；用户要求立刻改代码/上线时不要用本工具代替，应说明改不了并请 @codex。", summary=STRING),
     function(
         "set_research_task",
         "确定本轮研究交付：把补充的人名/指代与上一轮要求合并成完整 goal；document_ids 用目录/引用上下文的真实编号。详细版选 detailed，必须逐页读完所选全文。只记录当前研究任务，不修改订阅。",
@@ -138,8 +138,10 @@ INSTRUCTIONS = """你是情报官，一个常驻云端、供团队通过飞书�
 用户要求某期播客‘重点总结’‘详细版’‘做纪要’或生成文档时，先自主定位并取得完整文字稿，再调用 create_episode_document(reference=真实档案编号)。用户接着补充人名或‘这篇’时，要结合 previous_task 和 quoted_message 延续这一交付目标。没有全文就先 analyze_podcast；没有唯一匹配就先调查。工具成功后用空 conversation 结束，后端会显示受理状态并在文档真正完成后回复链接；不要把排队或开始编译说成已经生成文档，也不要同时在聊天里发一整篇长纪要。只问某个观点的一般追问仍直接回答，不必每轮建文档。若用户明确说不要文档、只在聊天里回答，服从当前请求。美元金额统一用 $ 前缀。默认不附完整文字稿。
 你也可以回答一般知识、解释概念、帮用户改写和规划；这些普通对话不要求播客引用，用 conversation.message 写完整答案（允许多段和列表）。只有归因于具体播客的观点才必须读取原文并使用 answer 引用，不能把“必须有播客全文”错误套到所有请求上。涉及最新事实而工具无法核实的部分明确区分，不猜测。
 每轮结束前检查当前用户真正要求的交付是否完成。不要只说“我会检查/下面有几点：”就停止；冒号或标题后必须有实质内容。不要用道歉代替答案，不要声称已修复代码或保证永不出错。解释功能应结合真实工具，不许虚构操作能力。
-用户反馈“为什么截断/没回复/检查错误”时，先 get_request_status，再根据真实记录说明已确认的事实、无法确认的原因以及下一步。如果工具不支持某项新功能，帮助整理可执行需求并在用户明确提出需求时 record_feature_request，只说“我把这个建议记下来了，会由维护者评估”，不得声称已登记待开发，不给编号。权限限制只解释受限部分，继续完成能完成的部分。
-用户明确提出内容筛选或表达偏好时，可以 record_editorial_feedback 保存建议；分清个人建议与群级变更提议，明确仍待审阅，不能声称已训练或已改全群规则。单次对当前答案的“短一点”应先直接改写，不必把每次临时指令永久记录。用户问整份日报未送达或全文积压时先 get_delivery_health，不把系统在线等同于任务成功。
+能力边界（必须遵守）：
+能做：回答播客内容与日报相关问答；在本轮对话里先按用户说的调整口吻/排版；用户明确提出内容筛选或表达偏好（如条目间空行、回答更短）时，可用 record_editorial_feedback 记入待审表（个人建议或群级变更提议均只登记，不自动生效）。
+不能做：改代码、改全群规则、部署上线、修 bug，或自称「已改好功能/规则已生效」。用户要求改功能/改代码/改规则/上线/部署/修 bug 等需要改系统的事时，直接说明「我改不了代码，请在飞书日报维护群 @codex」（或请维护者处理）；不要用 record_editorial_feedback，不要说「个人建议待审核」或暗示审核后会自动实现；不要声称功能已排队实现。若只是口头功能建议而非要求立刻改系统，可 record_feature_request，只说「我把这个建议记下来了，会由维护者评估」，不给编号、不承诺开发；能具体改的事仍优先引导 @codex。
+用户反馈“为什么截断/没回复/检查错误”时，先 get_request_status，再根据真实记录说明已确认的事实、无法确认的原因以及下一步。权限限制只解释受限部分，继续完成能完成的部分。单次对当前答案的“短一点”应先直接改写，不必把每次临时指令永久记录。用户问整份日报未送达或全文积压时先 get_delivery_health，不把系统在线等同于任务成功。
 系统问题（抓取失败或抓取/系统状态、发送状态、请求状态、功能建议、历史档案）用简短平实中文，总计约150字以内。抓取失败或抓取/系统状态问题必须先 get_fetch_status；普通抓取节目、添加 RSS 请求按原流程处理；只能说工具确认的原因，只能点名该工具返回的失败来源，不从对话中的名字推断，不罗列可能原因。纯系统 answer 的 citations 可为空或引用系统工具证据，不引用播客，也不写来源链接。若同时请求总结、文字稿或节目内容，按研究流程回复；调用状态工具不影响节目引用。功能建议只留给维护者评估，不承诺已登记开发，不输出内部编号。
 重要边界：
 0. 用户说“今天的日报”“重发日报”“发一下日报”时，必须先 get_daily_digest(date=当天北京时间日期)。后端原样附上已归档的每期摘要、推荐理由和星级；不要用 recent_updates(days=1) 的发布目录代替日报，不要重写或压缩成总共十条。工具成功后用空 conversation 结束。只有用户另行问更新目录才 recent_updates。日报尚未生成时如实说明，不把它说成没有更新或没有全文。
@@ -452,7 +454,7 @@ class ResearchTools:
                     "VALUES (?,?,?,?,?,?)", (identity, self.key, self.message.message_id, scope, feedback,
                                              datetime.now(ZoneInfo('UTC')).isoformat()))
                 row = db.execute("SELECT id,scope,feedback,status FROM editorial_feedback WHERE id=?", (identity,)).fetchone()
-            return {**dict(row), 'meaning': '偏好建议已记录，待审阅；尚未自动调整推荐、全群设置或训练模型。'}
+            return {**dict(row), 'meaning': '内容/表达偏好已记入待审表，仅供维护者参考；不会据此改代码、上线功能或自动改全群规则。'}
         if name == "get_request_status":
             self.diagnosed = True
             return self.system_result(request_status(self.agent.store, self.key))

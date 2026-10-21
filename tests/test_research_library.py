@@ -451,6 +451,9 @@ class ResearchTests(LibraryFixture):
         again = self.state.execute('record_editorial_feedback', {'feedback': '更短的自然段', 'scope': 'personal'})
         self.assertEqual(result['id'], again['id'])
         self.assertEqual(result['status'], 'proposed')
+        self.assertIn('内容/表达偏好', result['meaning'])
+        self.assertIn('不会据此改代码', result['meaning'])
+        self.assertNotIn('功能将', result['meaning'])
         with self.store._connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM editorial_feedback').fetchone()[0], 1)
         from dataclasses import replace
