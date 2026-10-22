@@ -64,4 +64,4 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           NEWS_OFFICER_WATCH_CHAT_ID: ${{ vars.NEWS_OFFICER_WATCH_CHAT_ID }}
           WATCH_DATE: ${{ inputs.date }}
-        run: python3 scripts/sre_morning_style_check.py
+        run: python3 .github/scripts/sre_morning_style_check.py
