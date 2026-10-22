@@ -571,6 +571,13 @@ class NewsOfficerRuntime:
                     await asyncio.to_thread(self.store.mark_progress_recalled, job.key, receipt)
                 except Exception as error:  # noqa: BLE001 - final answer must still arrive
                     logger.warning('Progress recall failed: %s', type(error).__name__)
+                    update = getattr(self.messenger, 'update_message', None)
+                    if callable(update):
+                        try:
+                            await asyncio.to_thread(update, receipt, '已完成')
+                            await asyncio.to_thread(self.store.mark_progress_recalled, job.key, receipt)
+                        except Exception as update_error:  # noqa: BLE001 - best effort cleanup
+                            logger.warning('Progress update failed: %s', type(update_error).__name__)
 
     def _persisted_daily_items(self, job: Job) -> list[DailyItem]:
         from .daily_report import ranked_daily_items

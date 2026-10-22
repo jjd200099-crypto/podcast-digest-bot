@@ -444,6 +444,15 @@ class FeishuMessenger:
             self._check(response, "file upload")
         raise RuntimeError("Feishu file upload did not complete")
 
+    def update_message(self, message_id: str, text: str) -> None:
+        response = requests.put(
+            f"{FEISHU_API}/im/v1/messages/{message_id}",
+            headers={"Authorization": f"Bearer {self.token()}"},
+            json={"msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)},
+            timeout=30,
+        )
+        self._check(response, "message update")
+
     def delete_message(self, message_id: str) -> None:
         response = requests.delete(
             f"{FEISHU_API}/im/v1/messages/{message_id}",

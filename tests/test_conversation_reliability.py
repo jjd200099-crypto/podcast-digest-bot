@@ -9,7 +9,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from test_reliability import FakeMessenger, FakePlugin, SequencePodcast, runtime
 
@@ -177,6 +177,33 @@ class ConcurrentSessionsTests(unittest.IsolatedAsyncioTestCase):
         with self.store._connect() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM outbox WHERE group_key='message:progress'").fetchone()[0], 1)
         self.assertEqual(recalled, ['progress-id'])
+
+    async def test_progress_delete_failure_updates_original_without_resending_answer(self):
+        messenger = FakeMessenger()
+        messenger.delete_message = Mock(side_effect=RuntimeError('recall denied'))
+        messenger.update_message = Mock()
+        original = messenger.deliver
+
+        def deliver(item):
+            original(item)
+            return 'progress-id' if item.group_key == 'message:progress' else 'answer-id'
+
+        messenger.deliver = deliver
+        instance = runtime(self.store, messenger, SequencePodcast([]), FakePlugin())
+        self.enqueue('delete-failure')
+        job = self.store.claim_next('message')
+        instance._ensure_reply(job, 'message:progress', '仍在处理中。',
+                               'delete-failure', f'{job.key}:progress', False)
+        await instance._drain_outbox(job)
+        await instance._handle_message_job(job)
+        await instance._handle_message_job(job)
+        messenger.delete_message.assert_called_once_with('progress-id')
+        messenger.update_message.assert_called_once_with('progress-id', '已完成')
+        with self.store._connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE job_key=? AND group_key LIKE 'message:result:%'",
+                (job.key,),
+            ).fetchone()[0], 1)
 
     async def test_answer_send_failure_keeps_progress_until_successful_retry(self):
         messenger = FakeMessenger()

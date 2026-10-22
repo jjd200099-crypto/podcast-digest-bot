@@ -42,6 +42,15 @@ class FeishuFileTests(unittest.TestCase):
         messenger._token_expires_at = time.monotonic() + 1000
         return messenger
 
+    @patch("news_officer.feishu.requests.put")
+    def test_update_progress_message_in_place(self, put):
+        put.return_value = FakeResponse()
+        self.messenger_with_token().update_message("progress-id", "已完成")
+        self.assertEqual(put.call_args.args, (f"{FEISHU_API}/im/v1/messages/progress-id",))
+        payload = put.call_args.kwargs["json"]
+        self.assertEqual(payload["msg_type"], "text")
+        self.assertEqual(json.loads(payload["content"]), {"text": "已完成"})
+
     def test_sanitize_file_name_removes_paths_controls_and_unsafe_characters(self):
         self.assertEqual(
             sanitize_file_name(" ../../folder\\Episode\nOne?:.md "),
