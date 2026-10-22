@@ -20,6 +20,13 @@ class ResearchAgentPromptBoundaryTests(unittest.TestCase):
         self.assertIn("不要说「个人建议待审核」", INSTRUCTIONS)
         self.assertIn("不要用 record_editorial_feedback", INSTRUCTIONS)
 
+    def test_source_list_requires_exact_count_every_name_and_plain_output(self):
+        for rule in ("精确数量（逐项计数）", "每一个节目名称，不得遗漏",
+                     "绝不提及 A/B、priority、筛选政策、价值筛选",
+                     "包括「不再按 A/B…」等免责声明", "不要写「来源」引用区块",
+                     "不要长篇开场"):
+            self.assertIn(rule, INSTRUCTIONS)
+
     def test_editorial_feedback_tool_is_preference_only(self):
         tool = next(t for t in TOOLS if t["name"] == "record_editorial_feedback")
         description = tool["description"]

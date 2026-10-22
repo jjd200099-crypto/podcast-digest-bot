@@ -652,6 +652,21 @@ class ResearchTests(LibraryFixture):
         self.message = IncomingMessage("m1", "team", "帮我添加追踪", "group", "user")
         self.state = ResearchTools(self.agent, "group:team:user", self.message)
 
+    def test_list_sources_only_exposes_identity_fields_and_all_names(self):
+        sources = self.registry.list()
+        enriched = [{**source, "priority": "A", "daily_limit": 2,
+                     "selection_policy": "private"} for source in sources]
+        with patch.object(self.registry, "list", return_value=enriched):
+            items = self.state.execute("list_sources", {})
+        payloads = [json.loads(item["text"]) for item in items]
+        self.assertEqual(len(payloads), len(sources))
+        self.assertEqual([item["name"] for item in payloads],
+                         [source["name"] for source in sources])
+        for item in payloads:
+            self.assertNotIn("priority", item)
+            self.assertLessEqual(set(item), {"name", "type", "kind", "url", "rss_url"})
+        self.assertTrue(all(not item["url"] for item in items))
+
     def test_public_archive_reads_verified_text_without_any_feishu_call(self):
         record = self.archive_record()
         self.agent.library = PodcastArchive(self.store)
@@ -929,6 +944,7 @@ class ResearchTests(LibraryFixture):
         self.assertEqual(len(model.inputs), 2)
         self.assertEqual(result, repeated)
         self.assertIn("Original Show", result.messages[0])
+        self.assertNotIn("来源：", result.messages[0])
         self.assertFalse(model.settings[0].store)
         with self.store._connect() as db:
             steps = list(db.execute("SELECT tool,status FROM research_steps"))
