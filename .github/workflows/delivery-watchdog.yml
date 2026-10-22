@@ -13,6 +13,10 @@ on:
         description: 'Send one private failure alert to the configured owner (today only)'
         default: false
         type: boolean
+      style_check:
+        description: 'Also print a read-only style summary JSON for the daily card'
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -51,3 +55,13 @@ jobs:
           else
             python -m news_officer.delivery_watchdog
           fi
+
+      - name: Optional style summary
+        if: ${{ inputs.style_check == true || inputs.style_check == 'true' }}
+        env:
+          PYTHONPATH: src
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          NEWS_OFFICER_WATCH_CHAT_ID: ${{ vars.NEWS_OFFICER_WATCH_CHAT_ID }}
+          WATCH_DATE: ${{ inputs.date }}
+        run: python3 .github/scripts/sre_morning_style_check.py
