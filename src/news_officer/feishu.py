@@ -142,8 +142,17 @@ def _post_elements(line: str) -> list[dict]:
     return elements or [{"tag": "text", "text": " "}]
 
 
-def _post_content(markdown: str, title: str) -> str:
-    paragraphs = [_post_elements(line) for line in markdown.splitlines()]
+def _post_content(markdown: str, title: str, *, native_lists: bool = False) -> str:
+    paragraphs = []
+    for line in markdown.splitlines():
+        if native_lists and re.match(r"^\s*[-*]\s+", line):
+            # Adjacent items share one Markdown element for native list rendering.
+            if paragraphs and paragraphs[-1][0]["tag"] == "md":
+                paragraphs[-1][0]["text"] += "\n" + line
+            else:
+                paragraphs.append([{"tag": "md", "text": line}])
+        else:
+            paragraphs.append(_post_elements(line))
     return json.dumps(
         {"zh_cn": {"title": title, "content": paragraphs or [[{"tag": "text", "text": " "}]]}},
         ensure_ascii=False,
@@ -254,11 +263,13 @@ def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str
     return combined_delivery_parts(body, idempotency_key, title=title)
 
 
-def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str = BRAND_HEADER) -> list[tuple[str, str, str]]:
+def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str = BRAND_HEADER,
+                            native_lists: bool = False) -> list[tuple[str, str, str]]:
     """Prefer one post; measure the serialized request, not visible characters.
 
     Feishu permits 30 KB for posts and 150 KB for text. A long answer falls
     back to a single text message before resorting to lossless overflow parts.
+    Native lists are opt-in for chat replies so daily post rendering stays stable.
     Keep legacy delivery_parts unchanged for backwards-compatible daily jobs.
     """
     body = markdown.strip()
@@ -270,7 +281,7 @@ def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str =
                     "uuid": "x" * 36, "reply_in_thread": False}
         return len(encoded_message_payload(envelope)) <= limit
 
-    post = _post_content(body, title)
+    post = _post_content(body, title, native_lists=native_lists)
     if fits("post", post, 29_000):
         return [("post", post, idempotency_uuid(idempotency_key, 1))]
     text = json.dumps({"text": f"{title}\n\n{body}"}, ensure_ascii=False)
@@ -460,7 +471,7 @@ class FeishuMessenger:
         self._check(response, "message recall")
 
     def reply(self, markdown: str, message_id: str, idempotency_key: str) -> None:
-        parts = combined_delivery_parts(markdown, idempotency_key)
+        parts = combined_delivery_parts(markdown, idempotency_key, native_lists=True)
         for index, (msg_type, content, item_uuid) in enumerate(parts, start=1):
             self.deliver(
                 OutboxItem(

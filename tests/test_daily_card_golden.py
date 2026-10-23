@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 
 from news_officer.daily_report import reader_episode_v4
-from news_officer.feishu import daily_card_delivery_parts, encoded_message_payload
+from news_officer.feishu import (
+    combined_delivery_parts,
+    daily_card_delivery_parts,
+    encoded_message_payload,
+)
 from news_officer.models import DailyItem, Episode
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -31,6 +35,19 @@ class DailyCardGoldenTests(unittest.TestCase):
         self.assertEqual(len(parts), 1)
         self.assertEqual(parts[0][0], 'interactive')
         self.assertEqual(json.loads(parts[0][1]), expected)
+
+    def test_daily_delivery_matches_main_byte_for_byte(self):
+        # Frozen from main 8ea1b921's Feishu renderer (content bytes and UUIDs).
+        expected = json.loads((FIXTURES / 'daily-delivery-main.json').read_text())
+        fixture = json.loads((FIXTURES / 'daily-2026-10-14.json').read_text())
+        sections = [reader_episode_v4(
+            DailyItem(Episode.from_persisted_dict(row['episode']), row['status'], row['message']),
+            number, row['document_url']) for number, row in enumerate(fixture['items'], 1)]
+        body = '\n\n━━━━━━━━━━━━━━━━━━━━\n\n'.join(sections)
+        for renderer in (combined_delivery_parts, daily_card_delivery_parts):
+            with self.subTest(renderer=renderer.__name__):
+                parts = renderer(body, 'daily:2026-10-14', title=f'🎧 播客精选 · {fixture["day"]}')
+                self.assertEqual([list(part) for part in parts], expected[renderer.__name__])
 
     def test_invalid_titles_keep_three_parts_and_summary(self):
         fixture = json.loads((FIXTURES / 'daily-2026-10-14.json').read_text())['items'][0]

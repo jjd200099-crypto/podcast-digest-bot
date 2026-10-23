@@ -161,7 +161,7 @@ class TranscriptQAServiceTests(unittest.TestCase):
         self.assertNotIn("###", rendered)
         self.assertNotIn("（", rendered)
         instructions = qa.client.responses.calls[0]["instructions"]
-        self.assertIn("一两句短句", instructions)
+        self.assertIn("每点一句话", instructions)
         self.assertIn("investment memo", instructions)
 
     def test_complete_chunks_appear_once_with_injection_guard_and_citations(self):
@@ -177,6 +177,7 @@ class TranscriptQAServiceTests(unittest.TestCase):
 
         markdown = qa.answer(stored, "嘉宾的核心判断是什么？")
 
+        self.assertTrue(markdown.startswith("第一项结论。\n\n- 第二项结论。"))
         calls = qa.client.responses.calls
         self.assertEqual(len(calls), 1)
         call = calls[0]

@@ -1186,12 +1186,27 @@ class ResearchTests(LibraryFixture):
             value = {"kind": "answer", "message": "", "points": points}
             rendered = self.state.render(value)
             self.assertEqual(rendered.count(doc.url), 1)
-            self.assertEqual(rendered.split('\n\n来源：')[0], '\n\n'.join(p['text'] for p in points))
+            self.assertEqual(rendered.split('\n\n来源：')[0], '\n\n'.join(('' if i == 0 else '- ') + f'原文支持的第{i + 1}条要点。' for i, p in enumerate(points)))
             self.assertTrue(rendered.endswith(f"来源：[{doc.title}]({doc.url})"))
             # Deduplicating presentation must not skip validation of later points.
             points[-1]['citations'] = [{'id': 'invented'}]
             with self.assertRaises(ValueError):
                 self.state.render(value)
+
+    def test_scope_warnings_stay_internal_for_conversation_and_answer(self):
+        self.state.warnings = ["内部检索范围"]
+        self.state.tool_warnings = ["内部工具限制"]
+        text = self.state.render({"kind": "conversation", "message": "可以讨论 investment memo。", "points": []})
+        self.assertEqual(text, "可以讨论 investment memo。")
+        evidence = self.state.evidence_item("verified", "https://example.test/source", "Source")
+        text = self.state.render({"kind": "answer", "message": "", "points": [
+            {"text": "先看 investment memo。", "citations": [{"id": evidence["evidence_id"]}]},
+            {"text": "Sam Altman 提供背景。", "citations": [{"id": evidence["evidence_id"]}]},
+        ]})
+        self.assertTrue(text.startswith("先看 investment memo。\n\n- Sam Altman 提供背景。"))
+        self.assertNotIn("内部", text)
+        self.assertNotIn("检索范围说明", text)
+        self.assertEqual(self.state.warnings, ["内部检索范围"])
 
     def test_comparison_keeps_each_distinct_source_once_in_first_use_order(self):
         first = self.state.evidence_item('first source', 'https://example.test/first', 'First')
