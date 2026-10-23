@@ -39,9 +39,9 @@ class CuratedSourcesTests(unittest.TestCase):
             "Decoder with Nilay Patel": (
                 "https://feeds.megaphone.fm/recodedecode", "A", 4,
                 ("Decoder", "Decoder with Nilay Patel")),
-            "CNBC Morning Call": (
-                "https://feeds.simplecast.com/Bt3ITxGl", "B", 10,
-                ("Morning Call", "CNBC Morning Call")),
+            "CNBC Squawk Pod": (
+                "https://feeds.simplecast.com/VHAcgaw_", "B", 10,
+                ("Squawk Pod", "CNBC Squawk Pod")),
         }
         feeds_path = ROOT / "feeds.json"
         configured = {s["name"]: s for s in json.loads(feeds_path.read_text())["sources"]}
@@ -59,8 +59,8 @@ class CuratedSourcesTests(unittest.TestCase):
                 self.assertEqual(source.scan_depth, depth)
                 self.assertEqual(source.aliases, aliases)
                 self.assertEqual(source.include_keywords,
-                                 keywords if name == "CNBC Morning Call" else ())
-        cnbc = loaded["CNBC Morning Call"]
+                                 keywords if name == "CNBC Squawk Pod" else ())
+        cnbc = loaded["CNBC Squawk Pod"]
         for title in ("AI market outlook", "Nvidia earnings", "Chip stocks rally",
                       "Cybersecurity spending", "Tech regulation"):
             with self.subTest(title=title):

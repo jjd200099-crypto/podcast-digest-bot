@@ -181,15 +181,15 @@
       "enabled": true
     },
     {
-      "name": "CNBC Morning Call",
+      "name": "CNBC Squawk Pod",
       "aliases": [
-        "Morning Call",
-        "CNBC Morning Call"
+        "Squawk Pod",
+        "CNBC Squawk Pod"
       ],
       "type": "rss",
       "priority": "B",
       "url": "",
-      "rss_url": "https://feeds.simplecast.com/Bt3ITxGl",
+      "rss_url": "https://feeds.simplecast.com/VHAcgaw_",
       "enabled": true,
       "scan_depth": 10,
       "include_keywords": [

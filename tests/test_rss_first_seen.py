@@ -119,7 +119,7 @@ class RSSFirstSeenTests(unittest.TestCase):
 
     def test_added_podcast_feeds_seed_history_without_backfill(self):
         self.seed()
-        names = {"TBPN", "Decoder with Nilay Patel", "CNBC Morning Call"}
+        names = {"TBPN", "Decoder with Nilay Patel", "CNBC Squawk Pod"}
         added = [s for s in json.loads((ROOT / 'feeds.json').read_text())["sources"]
                  if s["name"] in names]
         self.assertEqual(len(added), 3)
