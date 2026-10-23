@@ -117,6 +117,32 @@ class RSSFirstSeenTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT seeded FROM rss_item_first_seen WHERE feed_key=?',
                                         (added,)).fetchone()[0], 1)
 
+    def test_added_podcast_feeds_seed_history_without_backfill(self):
+        self.seed()
+        names = {"TBPN", "Decoder with Nilay Patel", "CNBC Morning Call"}
+        added = [s for s in json.loads((ROOT / 'feeds.json').read_text())["sources"]
+                 if s["name"] in names]
+        self.assertEqual(len(added), 3)
+        self.feeds.write_text(json.dumps({"sources": added}))
+
+        def fetch(name, feed, **kwargs):
+            return [replace(self.episode(name), title="AI interview", show=name,
+                            metadata={"rss_feed_url": feed, "rss_guid": name,
+                                      "audio_url": feed + "/episode.mp3"})]
+
+        with patch('news_officer.podcast.latest_rss_episodes', side_effect=fetch):
+            self.assertEqual(self.service.discover_daily_candidates(self.now), [])
+            self.assertEqual(self.service.discover_daily_candidates(
+                self.now + timedelta(hours=1)), [])
+        with self.store._connect() as db:
+            for source in added:
+                with self.subTest(name=source["name"]):
+                    rows = db.execute(
+                        'SELECT seeded FROM rss_item_first_seen WHERE feed_key=?',
+                        (source["rss_url"],)).fetchall()
+                    self.assertTrue(rows)
+                    self.assertTrue(all(row[0] == 1 for row in rows))
+
     def test_flag_off_does_not_record_or_promote(self):
         self.service.rss_first_seen = False
         self.assertEqual([e.id for e in self.scan([self.episode('old'), self.episode('recent', 0)])],
