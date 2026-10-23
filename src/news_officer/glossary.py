@@ -3,7 +3,7 @@
 import re
 
 GLOSSARY_INSTRUCTIONS = (
-    "\n术语表：原稿使用的英文技术名词保留英文，不自行创造中文译名。"
+    "\n术语表：原稿使用的常用英文术语和专有名词保留英文，不自行创造中文译名。investment memo、技术与投资术语，以及人名、公司、产品、模型和论文名称使用原文英文拼写，不音译、不替换为中文名、不添加括号中文释义；中文原名仍保留中文，不猜英文名。"
     "world action model（含 world-action model）统一写 world action model，"
     "不要写世界—动作模型、世界-动作模型或世界动作模型；"
     "world model、flow matching、agentic harness 等也保留英文。"

@@ -5,10 +5,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from news_officer.research_agent import INSTRUCTIONS, TOOLS
+from news_officer.research_agent import INSTRUCTIONS, TOOLS, plain_chat_text
 
 
 class ResearchAgentPromptBoundaryTests(unittest.TestCase):
+    def test_plain_qa_style(self):
+        for rule in ("先给结论", "一两句短句", "不堆标题", "不加括号解释", "不堆行话"):
+            self.assertIn(rule, INSTRUCTIONS)
+
+    def test_plain_formatter_keeps_english_names_and_claims(self):
+        self.assertEqual(
+            plain_chat_text("### **结论**\nSam Altman 在 OpenAI 写 investment memo。"),
+            "结论\nSam Altman 在 OpenAI 写 investment memo。",
+        )
+
     def test_instructions_redirect_system_changes_to_codex(self):
         self.assertIn("能力边界", INSTRUCTIONS)
         self.assertIn("我改不了代码", INSTRUCTIONS)

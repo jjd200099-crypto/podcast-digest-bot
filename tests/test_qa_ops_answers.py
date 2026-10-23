@@ -27,6 +27,19 @@ class OpsAnswersTests(LibraryFixture):
         self.message = IncomingMessage('incident', 'team', QUESTION, 'group', 'user')
         self.state = ResearchTools(self.agent, self.message.conversation_key, self.message)
 
+    def test_group_answer_flattens_headings_and_keeps_english_terms(self):
+        self.state.execute('get_fetch_status', {})
+        rendered = self.state.render({
+            'kind': 'answer', 'message': '', 'points': [{
+                'text': '### **结论**\n可以保留 investment memo、Sam Altman 和 OpenAI 的英文写法。',
+                'citations': [],
+            }],
+        })
+        self.assertTrue(rendered.startswith('结论\n可以保留 investment memo'))
+        self.assertNotIn('###', rendered)
+        self.assertNotIn('**', rendered)
+        self.assertIn('Sam Altman 和 OpenAI', rendered)
+
     def test_real_incident_uses_status_without_episode_citations_or_request_id(self):
         self.feeds.write_text(json.dumps({'sources': [{'name': 'Actual Channel', 'type': 'youtube',
                                                      'rss_url': 'https://example.test/rss'}]}))

@@ -150,7 +150,7 @@ def consolidate(client, model, merged, evidence):
         f"{min_chapters}–10章，合并重复主题并保留细节、例子和限定条件。core evidence_ids沿用输入。"
         "章节仅返回title和start_turn（从0开始的全局对谈索引），首章从0开始，"
         "严格递增，每章至少一轮，保持原始顺序。所有对谈由程序原样保留，不重写。"
-        "不得出现内部工作流标签。"
+        "不得出现内部工作流标签。" + GLOSSARY_INSTRUCTIONS
     )
     for attempt in range(3):
         try:
