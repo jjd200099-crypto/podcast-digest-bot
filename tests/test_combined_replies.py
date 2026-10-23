@@ -37,6 +37,13 @@ class ReplyPlugin(FakePlugin):
 
 
 class CombinedReplyTests(unittest.IsolatedAsyncioTestCase):
+    def test_reply_lists_use_native_markdown_elements(self):
+        parts = combined_delivery_parts("结论。\n\n- investment memo\n- Sam Altman", "bullets")
+        self.assertEqual(parts[0][0], "post")
+        rows = json.loads(parts[0][1])["zh_cn"]["content"]
+        self.assertEqual(rows[-1], [{"tag": "md", "text": "- investment memo\n- Sam Altman"}])
+        self.assertEqual(rows[0], [{"tag": "text", "text": "结论。"}])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.temp.name) / "store.sqlite3")

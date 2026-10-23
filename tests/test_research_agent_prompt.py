@@ -10,7 +10,7 @@ from news_officer.research_agent import INSTRUCTIONS, TOOLS, plain_chat_text
 
 class ResearchAgentPromptBoundaryTests(unittest.TestCase):
     def test_plain_qa_style(self):
-        for rule in ("先给结论", "一两句短句", "不堆标题", "不加括号解释", "不堆行话"):
+        for rule in ("先给结论", "每点一句话", "飞书原生无序列表", "不堆标题", "不加括号解释", "不堆行话"):
             self.assertIn(rule, INSTRUCTIONS)
 
     def test_plain_formatter_keeps_english_names_and_claims(self):
