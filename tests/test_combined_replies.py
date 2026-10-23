@@ -38,7 +38,7 @@ class ReplyPlugin(FakePlugin):
 
 class CombinedReplyTests(unittest.IsolatedAsyncioTestCase):
     def test_reply_lists_use_native_markdown_elements(self):
-        parts = combined_delivery_parts("结论。\n\n- investment memo\n- Sam Altman", "bullets")
+        parts = combined_delivery_parts("结论。\n\n- investment memo\n- Sam Altman", "bullets", native_lists=True)
         self.assertEqual(parts[0][0], "post")
         rows = json.loads(parts[0][1])["zh_cn"]["content"]
         self.assertEqual(rows[-1], [{"tag": "md", "text": "- investment memo\n- Sam Altman"}])
@@ -78,6 +78,17 @@ class CombinedReplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(visible(part), text)
             self.assertEqual(part.reply_in_thread, kind == "group")
             self.assertEqual(part.target_id, "om_" + kind)
+
+    async def test_private_and_group_answers_use_native_lists(self):
+        text = "结论。\n\n- investment memo\n- Sam Altman"
+        for kind in ("p2p", "group"):
+            with self.subTest(kind=kind):
+                instance, job, _, messenger = self.setup_job(kind, (text,))
+                await instance._handle_message_job(job)
+                self.store.complete(job.key)
+                self.assertEqual(len(messenger.attempts), 1)
+                rows = json.loads(messenger.attempts[0].content)["zh_cn"]["content"]
+                self.assertEqual(rows[-1], [{"tag": "md", "text": "- investment memo\n- Sam Altman"}])
 
     async def test_multiple_result_blocks_merge_and_retry_without_duplicates(self):
         blocks = ("第一部分：" + "依据一。" * 500, "第二部分：" + "依据二。" * 500)
@@ -150,6 +161,17 @@ class DirectReplyTests(unittest.TestCase):
         for call in send.call_args_list:
             self.assertEqual(call.args[0].total_parts, 1)
             self.assertEqual(visible(call.args[0]), text)
+
+    def test_direct_reply_uses_native_lists_but_broadcast_send_does_not(self):
+        messenger = FeishuMessenger("app", "secret")
+        text = "- 简介：节目内容。\n- [精读](https://example.com/doc)"
+        with patch.object(messenger, "deliver", return_value="receipt") as send:
+            messenger.reply(text, "om_test", "reply")
+            messenger.send(text, "ou_test", "open_id", "broadcast")
+        reply, broadcast = [json.loads(call.args[0].content)["zh_cn"]["content"]
+                            for call in send.call_args_list]
+        self.assertEqual(reply, [[{"tag": "md", "text": text}]])
+        self.assertTrue(all(element["tag"] != "md" for row in broadcast for element in row))
 
     def test_extreme_answer_uses_near_capacity_not_small_chunks(self):
         text = "甲" * 90_000

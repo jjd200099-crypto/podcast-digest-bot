@@ -263,11 +263,13 @@ def daily_card_delivery_parts(markdown: str, idempotency_key: str, *, title: str
     return combined_delivery_parts(body, idempotency_key, title=title)
 
 
-def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str = BRAND_HEADER) -> list[tuple[str, str, str]]:
+def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str = BRAND_HEADER,
+                            native_lists: bool = False) -> list[tuple[str, str, str]]:
     """Prefer one post; measure the serialized request, not visible characters.
 
     Feishu permits 30 KB for posts and 150 KB for text. A long answer falls
     back to a single text message before resorting to lossless overflow parts.
+    Native lists are opt-in for chat replies so daily post rendering stays stable.
     Keep legacy delivery_parts unchanged for backwards-compatible daily jobs.
     """
     body = markdown.strip()
@@ -279,7 +281,7 @@ def combined_delivery_parts(markdown: str, idempotency_key: str, *, title: str =
                     "uuid": "x" * 36, "reply_in_thread": False}
         return len(encoded_message_payload(envelope)) <= limit
 
-    post = _post_content(body, title, native_lists=True)
+    post = _post_content(body, title, native_lists=native_lists)
     if fits("post", post, 29_000):
         return [("post", post, idempotency_uuid(idempotency_key, 1))]
     text = json.dumps({"text": f"{title}\n\n{body}"}, ensure_ascii=False)
@@ -469,7 +471,7 @@ class FeishuMessenger:
         self._check(response, "message recall")
 
     def reply(self, markdown: str, message_id: str, idempotency_key: str) -> None:
-        parts = combined_delivery_parts(markdown, idempotency_key)
+        parts = combined_delivery_parts(markdown, idempotency_key, native_lists=True)
         for index, (msg_type, content, item_uuid) in enumerate(parts, start=1):
             self.deliver(
                 OutboxItem(

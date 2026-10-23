@@ -177,7 +177,7 @@ class NewsOfficerRuntime:
             # including any legacy parts or explicitly requested attachments.
             parts = [(p.msg_type, p.content, p.uuid) for p in existing]
         else:
-            parts = combined_delivery_parts(markdown, idempotency_key)
+            parts = combined_delivery_parts(markdown, idempotency_key, native_lists=True)
             for file_key in file_keys:
                 parts.append(
                     file_delivery_part(file_key, idempotency_key, len(parts) + 1)
