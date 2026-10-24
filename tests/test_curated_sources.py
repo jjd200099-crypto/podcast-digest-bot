@@ -46,8 +46,9 @@ class CuratedSourcesTests(unittest.TestCase):
         feeds_path = ROOT / "feeds.json"
         configured = {s["name"]: s for s in json.loads(feeds_path.read_text())["sources"]}
         loaded = {s.name: s for s in load_youtube_sources(feeds_path)}
-        keywords = ("AI", "artificial intelligence", "NVIDIA", "Nvidia", "semiconductor",
-                    "chip", "cybersecurity", "security", "tech")
+        keywords = ("AI", "artificial intelligence", "OpenAI", "Anthropic", "ChatGPT",
+                    "Nvidia", "semiconductor", "semiconductors", "chip", "chips",
+                    "cybersecurity", "tech")
         for name, (url, priority, depth, aliases) in expected.items():
             with self.subTest(name=name):
                 source = loaded[name]
@@ -61,12 +62,18 @@ class CuratedSourcesTests(unittest.TestCase):
                 self.assertEqual(source.include_keywords,
                                  keywords if name == "CNBC Squawk Pod" else ())
         cnbc = loaded["CNBC Squawk Pod"]
-        for title in ("AI market outlook", "Nvidia earnings", "Chip stocks rally",
+        for title in ("AI market outlook", "Artificial intelligence investment",
+                      "OpenAI funding", "Anthropic growth", "ChatGPT adoption",
+                      "Nvidia earnings", "NVIDIA outlook", "Semiconductor demand",
+                      "Semiconductors outlook", "Chip stocks rally", "Chips demand surges",
                       "Cybersecurity spending", "Tech regulation"):
             with self.subTest(title=title):
                 self.assertTrue(cnbc.accepts(Episode("id", title, "https://example.org", cnbc.name)))
-        self.assertFalse(cnbc.accepts(Episode(
-            "id", "Oil prices and bond yields", "https://example.org", cnbc.name)))
+        for title in ("Oil prices and bond yields", "National Security outlook",
+                      "Social Security reform"):
+            with self.subTest(title=title):
+                self.assertFalse(cnbc.accepts(Episode(
+                    "id", title, "https://example.org", cnbc.name)))
 
     def test_only_podcast_generalist_source_is_configured(self):
         feeds_text = (ROOT / "feeds.json").read_text(encoding="utf-8")
