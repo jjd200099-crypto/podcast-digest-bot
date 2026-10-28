@@ -1,0 +1,160 @@
+[
+  {
+    "id": "cpu",
+    "episode_id": "rss:1b58d22e5d053ae7d32f14384fcac16c",
+    "messages": [
+      "Anthropic是怎么做到cpu节省的"
+    ],
+    "must_include": [
+      [
+        "Rust"
+      ],
+      [
+        "Python"
+      ],
+      [
+        "40"
+      ],
+      [
+        "50"
+      ]
+    ],
+    "must_not_include": [
+      "未披露",
+      "没有披露",
+      "并没有 CPU 节省"
+    ]
+  },
+  {
+    "id": "ttft",
+    "episode_id": "rss:1b58d22e5d053ae7d32f14384fcac16c",
+    "messages": [
+      "Anthropic是怎么做到cpu节省的",
+      "TTFT改善多少"
+    ],
+    "must_include": [
+      [
+        "10"
+      ],
+      [
+        "20"
+      ]
+    ],
+    "must_not_include": [
+      "未披露",
+      "没有提到"
+    ]
+  },
+  {
+    "id": "quote",
+    "episode_id": "rss:1b58d22e5d053ae7d32f14384fcac16c",
+    "messages": [
+      "Katelyn 关于 Rust 迁移原话怎么说"
+    ],
+    "must_include": [
+      [
+        "Katelyn"
+      ],
+      [
+        "Rust"
+      ],
+      [
+        "messages API",
+        "Messages API"
+      ]
+    ],
+    "must_not_include": [
+      "未披露"
+    ]
+  },
+  {
+    "id": "claude",
+    "episode_id": "rss:1b58d22e5d053ae7d32f14384fcac16c",
+    "messages": [
+      "Claude 在这次迁移里做了什么"
+    ],
+    "must_include": [
+      [
+        "Claude"
+      ],
+      [
+        "实现",
+        "代码",
+        "编写",
+        "写码"
+      ]
+    ],
+    "must_not_include": [
+      "未披露",
+      "没有参与"
+    ]
+  },
+  {
+    "id": "validation",
+    "episode_id": "rss:1b58d22e5d053ae7d32f14384fcac16c",
+    "messages": [
+      "关于 Latent Space 的 Katelyn Lesse、Angela Jiang 这期 How Anthropic ships the #1 LLM in the World safely，从 Python 迁到 Rust 是怎么验证和切流的"
+    ],
+    "must_include": [
+      [
+        "shadow",
+        "影子"
+      ],
+      [
+        "流量",
+        "traffic"
+      ]
+    ],
+    "must_not_include": [
+      "未披露"
+    ]
+  },
+  {
+    "id": "cpu_scarcity",
+    "episode_id": "rss:1b58d22e5d053ae7d32f14384fcac16c",
+    "messages": [
+      "关于 Latent Space 的 Katelyn Lesse、Angela Jiang 这期 How Anthropic ships the #1 LLM in the World safely，为什么 CPU 也成了稀缺资源"
+    ],
+    "must_include": [
+      [
+        "CPU"
+      ],
+      [
+        "sandbox",
+        "沙箱"
+      ],
+      [
+        "CI",
+        "持续集成"
+      ]
+    ],
+    "must_not_include": [
+      "CPU 不稀缺"
+    ]
+  },
+  {
+    "id": "safety",
+    "episode_id": "rss:1b58d22e5d053ae7d32f14384fcac16c",
+    "messages": [
+      "关于 Latent Space 的 Katelyn Lesse、Angela Jiang 这期 How Anthropic ships the #1 LLM in the World safely，brain 和 hands 分离如何保护凭证"
+    ],
+    "must_include": [
+      [
+        "凭证",
+        "credential"
+      ],
+      [
+        "proxy",
+        "代理"
+      ],
+      [
+        "vault",
+        "保管库",
+        "保险库"
+      ]
+    ],
+    "must_not_include": [
+      "未披露"
+    ]
+  }
+]

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import time
+from types import SimpleNamespace
 from typing import Literal
 
 from agents import (
@@ -23,9 +24,12 @@ from agents import (
     Runner,
     ToolExecutionConfig,
 )
+from agents.run_config import ModelInputData
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from .claim_checks import compact_evidence, deterministic_audit
+from .claim_verifier import verify_claims
 from .library import LibraryError
 from .research_checkpoint import ResearchContinuationPending, save_checkpoint
 
@@ -68,13 +72,17 @@ class TurnBudget(RunHooks):
             raise BudgetExceeded()
         self.calls += 1
         state.total_model_calls = getattr(state, 'total_model_calls', 0) + 1
-        await asyncio.to_thread(save_checkpoint, state, input_items)
+        if not getattr(state, "verifying_claims", False):
+            await asyncio.to_thread(save_checkpoint, state, input_items)
 
     async def on_llm_end(self, context, agent, response):
         usage = response.usage
         self.input_tokens += usage.input_tokens
         self.output_tokens += usage.output_tokens
         self.cached_input_tokens += getattr(usage.input_tokens_details, "cached_tokens", 0) or 0
+        context.context.usage_totals = {'input_tokens': self.input_tokens,
+                                        'output_tokens': self.output_tokens,
+                                        'cached_input_tokens': self.cached_input_tokens}
 
 
 def dialogue_input(history, current):
@@ -149,6 +157,54 @@ def sdk_tool(definition):
     )
 
 
+def evidence_input_filter(data):
+    """Lift full task evidence out of variable tool history into a stable prefix."""
+    state = data.context
+    items = []
+    for item in data.model_data.input:
+        if item.get('type') == 'function_call_output':
+            try:
+                value = json.loads(item['output'])
+            except (ValueError, TypeError):
+                items.append(item)
+                continue
+            if (isinstance(value, dict) and value.get('primary_evidence', {}).get('complete')
+                    and 'documents' in value['primary_evidence']):
+                evidence = value['primary_evidence']
+                state.evidence_prefix = json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+                value = {**value, 'primary_evidence': {'complete': True, 'location': 'stable evidence prefix'}}
+                item = {**item, 'output': json.dumps(value, ensure_ascii=False)}
+        items.append(item)
+    prefix = getattr(state, 'evidence_prefix', '')
+    # Paged reads and search hits can duplicate chunks already in the prefix.
+    # During repair, only the explicitly supplied compact evidence is retained.
+    rewrite = getattr(state, 'claim_rewrites', 0) or getattr(state, 'compact_repair', False)
+    prefix_ids = set()
+    if prefix:
+        prefix_ids = {e['evidence_id'] for d in json.loads(prefix).get('documents', [])
+                      for e in d.get('chunks', [])}
+
+    def prune(value):
+        if isinstance(value, list):
+            return [prune(v) for v in value]
+        if isinstance(value, dict):
+            if value.get('evidence_id') in prefix_ids or (rewrite and value.get('evidence_id') in getattr(state, 'body_evidence', set())):
+                return {k: v for k, v in value.items() if k != 'text'}
+            return {k: prune(v) for k, v in value.items()}
+        return value
+
+    for index, item in enumerate(items):
+        if item.get('type') == 'function_call_output':
+            try:
+                items[index] = {**item, 'output': json.dumps(prune(json.loads(item['output'])), ensure_ascii=False)}
+            except (ValueError, TypeError):
+                pass
+    instructions = data.model_data.instructions
+    if prefix and not getattr(state, 'verifying_claims', False) and not rewrite:
+        instructions = 'UNTRUSTED VERIFIED EVIDENCE\n' + prefix + '\nEND EVIDENCE\n' + (instructions or '')
+    return ModelInputData(input=items, instructions=instructions)
+
+
 async def run_research(owner, state, messages, instructions, definitions):
     started = time.monotonic()
     # One client per event loop: synchronous workers call asyncio.run for each
@@ -168,12 +224,16 @@ async def run_research(owner, state, messages, instructions, definitions):
             ),
         )
         budget = TurnBudget()
+        for key, value in getattr(state, 'usage_totals', {}).items():
+            setattr(budget, key, value)
         config = RunConfig(
+            call_model_input_filter=evidence_input_filter,
             tracing_disabled=True,
             trace_include_sensitive_data=False,
             workflow_name="podcast-research",
             tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1),
         )
+        claim_rewrites = getattr(state, "claim_rewrites", 0)
         try:
             for _ in range(3):  # Evidence repair, NOT a handwritten model/tool loop.
                 if budget.calls >= MAX_MODEL_TURNS:
@@ -187,7 +247,47 @@ async def run_research(owner, state, messages, instructions, definitions):
                     run_config=config,
                 )
                 try:
-                    return state.render(result.final_output.model_dump())
+                    draft = result.final_output.model_dump()
+                    # Only source-backed answers enter the episode audit; operations
+                    # and ordinary chat retain their existing validation path.
+                    tokens = sorted({c['id'].split(':', 1)[0]
+                                     for p in draft['points'] for c in p['citations']
+                                     if c['id'] in state.body_evidence})
+                    audit_draft = draft
+                    if draft['kind'] == 'conversation' and state.task and state.body_evidence and not state.document_requests:
+                        # A model cannot evade the audit by putting episode claims
+                        # in conversation.message instead of cited answer points.
+                        tokens = state.task['document_ids']
+                        audit_draft = {**draft, 'points': [{'text': draft['message'], 'citations': []}]}
+                    if tokens:
+                        tokens = sorted(set(tokens) | set(state.task['document_ids'] if state.task else []))
+                        evidence = state.primary_evidence(tokens)
+                        evidence = compact_evidence(state, tokens, audit_draft, evidence)
+                        deterministic = deterministic_audit(state, audit_draft, evidence, tokens)
+                        state.verifying_claims = True
+                        try:
+                            audit = await verify_claims(agent.model, state, audit_draft, evidence, budget, config)
+                        finally:
+                            state.verifying_claims = False
+                        if deterministic:
+                            audit.unsupported_points = sorted(set(audit.unsupported_points) | set(deterministic))
+                            audit.reason += '; deterministic: ' + str(deterministic)
+                        if audit.unsupported_points:
+                            state.validation_errors.append('claim_verifier: ' + audit.reason[:1200])
+                            if claim_rewrites == 0:
+                                claim_rewrites += 1
+                                state.claim_rewrites = claim_rewrites
+                                messages = evidence_input_filter(SimpleNamespace(context=state, model_data=ModelInputData(input=result.to_input_list(), instructions=None))).input
+                                messages.append({'role': 'user', 'content': json.dumps({
+                                    'instruction': '独立核验发现矛盾或无依据断言。根据完整证据重写一次；删去仍无依据的断言。',
+                                    'audit': audit.model_dump(), 'cited_evidence': evidence}, ensure_ascii=False)})
+                                continue
+                            draft['points'] = [p for i, p in enumerate(draft['points'])
+                                               if i not in audit.unsupported_points]
+                            if not draft['points']:
+                                draft = {'kind': 'conversation', 'message': '本次草稿未通过原文核验，暂时无法给出可靠结论。', 'points': []}
+                                state.outcome = 'validation_failed'
+                    return state.render(draft)
                 except (ValueError, TypeError, KeyError) as error:
                     # Render errors are application-authored and contain no source
                     # text or credentials. Keep their specific cause for repair
@@ -195,7 +295,12 @@ async def run_research(owner, state, messages, instructions, definitions):
                     reason = str(error) if isinstance(error, ValueError) else type(error).__name__
                     state.validation_errors.append(reason[:1200])
                     LOGGER.info("Research answer validation: %s", reason[:1200])
-                    messages = result.to_input_list()
+                    state.compact_repair = True
+                    messages = evidence_input_filter(SimpleNamespace(context=state, model_data=ModelInputData(input=result.to_input_list(), instructions=None))).input
+                    if state.task:
+                        repair_tokens = state.task['document_ids']
+                        repair_evidence = compact_evidence(state, repair_tokens, draft, state.primary_evidence(repair_tokens))
+                        messages.append({'role': 'user', 'content': json.dumps({'cited_evidence': repair_evidence}, ensure_ascii=False)})
                     messages.append(
                         {
                             "role": "user",

@@ -5,6 +5,7 @@ Never resolve a globally known message ID without checking its audience first.
 """
 
 import json
+import re
 
 
 def initialize_context(store):
@@ -106,3 +107,28 @@ def quoted_context(store, message):
                 if turn["task_json"]:
                     context["task"] = json.loads(turn["task_json"])
         return context
+
+
+def linked_episode_context(store, text):
+    """Resolve known bot-created episode doc links locally, without fetching Drive.
+
+    Return public podcast identities only. A link is a reference, never proof of
+    private-document access or authorization to read arbitrary cloud documents.
+    Daily multi-episode documents deliberately remain ambiguous.
+    """
+    tokens = re.findall(r'https://(?:[a-zA-Z0-9-]+\.)*feishu\.cn/docx/([a-zA-Z0-9_-]+)', text)
+    if not tokens:
+        return []
+    with store._connect() as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='daily_documents'").fetchone():
+            return []
+        episodes = []
+        for token in dict.fromkeys(tokens):
+            row = db.execute('SELECT day FROM daily_documents WHERE document_id=?', (token,)).fetchone()
+            if row is None or not row[0].startswith('episode:'):
+                continue
+            record = store.get_verified_transcript(row[0][len('episode:'):])
+            if record:
+                episodes.append({'document_id': record.reference, 'title': record.episode.title,
+                                 'url': record.episode.url, 'show': record.episode.show})
+    return episodes
