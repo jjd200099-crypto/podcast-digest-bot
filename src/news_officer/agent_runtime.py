@@ -26,6 +26,7 @@ from agents import (
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
+from .claim_verifier import verify_claims
 from .library import LibraryError
 from .research_checkpoint import ResearchContinuationPending, save_checkpoint
 
@@ -68,7 +69,8 @@ class TurnBudget(RunHooks):
             raise BudgetExceeded()
         self.calls += 1
         state.total_model_calls = getattr(state, 'total_model_calls', 0) + 1
-        await asyncio.to_thread(save_checkpoint, state, input_items)
+        if not getattr(state, "verifying_claims", False):
+            await asyncio.to_thread(save_checkpoint, state, input_items)
 
     async def on_llm_end(self, context, agent, response):
         usage = response.usage
@@ -174,6 +176,7 @@ async def run_research(owner, state, messages, instructions, definitions):
             workflow_name="podcast-research",
             tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1),
         )
+        claim_rewrites = getattr(state, "claim_rewrites", 0)
         try:
             for _ in range(3):  # Evidence repair, NOT a handwritten model/tool loop.
                 if budget.calls >= MAX_MODEL_TURNS:
@@ -187,7 +190,49 @@ async def run_research(owner, state, messages, instructions, definitions):
                     run_config=config,
                 )
                 try:
-                    return state.render(result.final_output.model_dump())
+                    draft = result.final_output.model_dump()
+                    # Only source-backed answers enter the episode audit; operations
+                    # and ordinary chat retain their existing validation path.
+                    tokens = sorted({c['id'].split(':', 1)[0]
+                                     for p in draft['points'] for c in p['citations']
+                                     if c['id'] in state.body_evidence})
+                    audit_draft = draft
+                    if draft['kind'] == 'conversation' and state.task and state.body_evidence and not state.document_requests:
+                        # A model cannot evade the audit by putting episode claims
+                        # in conversation.message instead of cited answer points.
+                        tokens = state.task['document_ids']
+                        audit_draft = {**draft, 'points': [{'text': draft['message'], 'citations': []}]}
+                    if tokens:
+                        tokens = sorted(set(tokens) | set(state.task['document_ids'] if state.task else []))
+                        evidence = state.primary_evidence(tokens)
+                        if not evidence.get('complete'):
+                            # Full paged evidence is already in the validated ledger.
+                            if any(len(state.read_coverage.get(t, set())) < len(state.chunks(t)) for t in tokens):
+                                raise ValueError('Read all selected documents before claim verification')
+                            evidence = {'digests': evidence.get('digests', {}),
+                                        'chunks': {i: e for i, e in state.evidence.items()
+                                                   if i in state.body_evidence and i.split(':', 1)[0] in tokens}}
+                        state.verifying_claims = True
+                        try:
+                            audit = await verify_claims(agent.model, state, audit_draft, evidence, budget, config)
+                        finally:
+                            state.verifying_claims = False
+                        if audit.unsupported_points:
+                            state.validation_errors.append('claim_verifier: ' + audit.reason[:1200])
+                            if claim_rewrites == 0:
+                                claim_rewrites += 1
+                                state.claim_rewrites = claim_rewrites
+                                messages = result.to_input_list()
+                                messages.append({'role': 'user', 'content': json.dumps({
+                                    'instruction': '独立核验发现矛盾或无依据断言。根据完整证据重写一次；删去仍无依据的断言。',
+                                    'audit': audit.model_dump(), 'primary_evidence': evidence}, ensure_ascii=False)})
+                                continue
+                            draft['points'] = [p for i, p in enumerate(draft['points'])
+                                               if i not in audit.unsupported_points]
+                            if not draft['points']:
+                                draft = {'kind': 'conversation', 'message': '本次草稿未通过原文核验，暂时无法给出可靠结论。', 'points': []}
+                                state.outcome = 'validation_failed'
+                    return state.render(draft)
                 except (ValueError, TypeError, KeyError) as error:
                     # Render errors are application-authored and contain no source
                     # text or credentials. Keep their specific cause for repair

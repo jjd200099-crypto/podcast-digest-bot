@@ -45,8 +45,14 @@ class ScriptedModel(Model):
         self.outputs = iter(outputs)
         self.inputs = []
         self.settings = []
+        self.audit_inputs = []
 
     async def get_response(self, **kwargs):
+        if kwargs.get("output_schema") and kwargs["output_schema"].name() == "ClaimAudit":
+            # Legacy scenarios script research turns; their facts are approved by
+            # a separate scripted audit. Grounding regressions script both agents.
+            self.audit_inputs.append(copy.deepcopy(kwargs["input"]))
+            return ModelResponse(final_output({"unsupported_points": [], "reason": "scripted approval"}), Usage(requests=1), None)
         self.inputs.append(copy.deepcopy(kwargs["input"]))
         self.settings.append(kwargs["model_settings"])
         return ModelResponse(next(self.outputs), Usage(requests=1), None)
@@ -1232,7 +1238,7 @@ class ResearchTests(LibraryFixture):
 
     def test_detailed_requires_every_page_and_accepts_internal_anchors(self):
         doc = LibraryDocument("long", "Noam Brown", "https://example.test/noam",
-                              "agents learn from experience. " * 4000)
+                              "agents learn from experience. " * 24000)
         with patch.object(self.library, "snapshot", return_value=([doc], [])):
             self.state.execute("set_research_task", {
                 "goal": "完整详细版", "document_ids": ["long"], "format": "detailed"})
