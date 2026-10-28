@@ -296,6 +296,7 @@ class PodcastResearchAgent:
         if context['previous_task'] and re.search(r'^(?:那|他|她|这篇|这期|这个观点|刚才|上面)', text.strip()):
             context['followup_reminder'] = '若是在追问刚才节目里的原因或观点，必须重新读取相关原文并用 answer 引用回答；一句话也不例外。不要将这类追问归为无需来源的一般聊天。'
         state = ResearchTools(self, key, message)
+        state.conversation_goal = conversation_goal(history, text)
         resumed = restore_checkpoint(state) if self.backend == 'agents_sdk' else None
         if not resumed and self.tone_advisor is not None:
             advice = asyncio.run(self.tone_advisor.advise(text, history))
@@ -353,6 +354,20 @@ class PodcastResearchAgent:
             attachment_episode_ids=tuple(a.episode_id for a in state.attachments),
             attachments=tuple(state.attachments),
         )
+
+
+def conversation_goal(history, current):
+    """Keep bounded verbatim dialogue for pronoun/metric follow-ups."""
+    selected, size = [], 0
+    for turn in reversed(history[-6:]):
+        cost = len(turn['question']) + len(turn['answer'])
+        if size + cost > 8000:
+            break
+        selected.append(turn)
+        size += cost
+    if not selected:
+        return current
+    return '\n'.join(f"用户：{t['question']}\n助手：{t['answer']}" for t in reversed(selected)) + "\n当前用户：" + current
 
 
 class ResearchTools:
@@ -431,9 +446,13 @@ class ResearchTools:
                 record = self.agent.store.get_verified_transcript(token)
                 if record:
                     digests[token] = self.agent.store.get_transcript_digest(record.episode.id)
-        if sum(len(self.corpus()[t].text) + len(digests.get(t, "")) for t in tokens) > 600_000:
+        from .evidence_budget import MAX_EVIDENCE_TOKENS, estimate_tokens
+        # Include serialized citation/metadata overhead in the context budget.
+        cost = sum(estimate_tokens(json.dumps({"digest": digests.get(t, ""),
+                    "chunks": self.chunks(t)}, ensure_ascii=False)) for t in tokens)
+        if cost > MAX_EVIDENCE_TOKENS:
             return {"requires_paging": True, "digests": digests,
-                    "instruction": "所选全文超过600000字符，逐页读完所有文档；不可据局部声称未提及。"}
+                    "instruction": "所选全文超过证据 token 预算，逐页读完所有文档；不可据局部声称未提及。"}
         documents = []
         for token in tokens:
             doc = self.corpus()[token]
@@ -506,7 +525,7 @@ class ResearchTools:
                     or not args["goal"].strip()):
                 raise ValueError("Choose real document IDs and a nonempty task")
             tokens = list(dict.fromkeys(tokens))
-            self.task = {"goal": self.message.text,
+            self.task = {"goal": getattr(self, "conversation_goal", self.message.text),
                          "resolved_references": [self.corpus()[t].title for t in tokens],
                          "document_ids": tokens, "format": args["format"]}
             evidence = self.primary_evidence(tokens)
