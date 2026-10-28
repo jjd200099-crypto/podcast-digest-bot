@@ -160,6 +160,54 @@
       "enabled": true
     },
     {
+      "name": "TBPN",
+      "type": "rss",
+      "priority": "A",
+      "url": "",
+      "rss_url": "https://feeds.transistor.fm/technology-brother",
+      "enabled": true,
+      "scan_depth": 8
+    },
+    {
+      "name": "Decoder with Nilay Patel",
+      "aliases": [
+        "Decoder",
+        "Decoder with Nilay Patel"
+      ],
+      "type": "rss",
+      "priority": "A",
+      "url": "",
+      "rss_url": "https://feeds.megaphone.fm/recodedecode",
+      "enabled": true
+    },
+    {
+      "name": "CNBC Squawk Pod",
+      "aliases": [
+        "Squawk Pod",
+        "CNBC Squawk Pod"
+      ],
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://feeds.simplecast.com/VHAcgaw_",
+      "enabled": true,
+      "scan_depth": 10,
+      "include_keywords": [
+        "AI",
+        "artificial intelligence",
+        "OpenAI",
+        "Anthropic",
+        "ChatGPT",
+        "Nvidia",
+        "semiconductor",
+        "semiconductors",
+        "chip",
+        "chips",
+        "cybersecurity",
+        "tech"
+      ]
+    },
+    {
       "name": "No Priors",
       "type": "rss",
       "priority": "B",

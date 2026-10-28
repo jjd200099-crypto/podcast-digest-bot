@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from news_officer.models import Episode
 from news_officer.podcast import load_youtube_sources
 
 
@@ -31,6 +32,48 @@ class CuratedSourcesTests(unittest.TestCase):
         self.assertEqual(loaded[0].priority, "A")
         self.assertEqual(loaded[0].url, "")
         self.assertEqual(loaded[0].rss_url, "https://cheekypint.substack.com/feed")
+
+    def test_new_rss_sources_load_with_filters_and_aliases(self):
+        expected = {
+            "TBPN": ("https://feeds.transistor.fm/technology-brother", "A", 8, ()),
+            "Decoder with Nilay Patel": (
+                "https://feeds.megaphone.fm/recodedecode", "A", 4,
+                ("Decoder", "Decoder with Nilay Patel")),
+            "CNBC Squawk Pod": (
+                "https://feeds.simplecast.com/VHAcgaw_", "B", 10,
+                ("Squawk Pod", "CNBC Squawk Pod")),
+        }
+        feeds_path = ROOT / "feeds.json"
+        configured = {s["name"]: s for s in json.loads(feeds_path.read_text())["sources"]}
+        loaded = {s.name: s for s in load_youtube_sources(feeds_path)}
+        keywords = ("AI", "artificial intelligence", "OpenAI", "Anthropic", "ChatGPT",
+                    "Nvidia", "semiconductor", "semiconductors", "chip", "chips",
+                    "cybersecurity", "tech")
+        for name, (url, priority, depth, aliases) in expected.items():
+            with self.subTest(name=name):
+                source = loaded[name]
+                self.assertIs(configured[name]["enabled"], True)
+                self.assertEqual(source.source_type, "rss")
+                self.assertEqual(source.url, "")
+                self.assertEqual(source.rss_url, url)
+                self.assertEqual(source.priority, priority)
+                self.assertEqual(source.scan_depth, depth)
+                self.assertEqual(source.aliases, aliases)
+                self.assertEqual(source.include_keywords,
+                                 keywords if name == "CNBC Squawk Pod" else ())
+        cnbc = loaded["CNBC Squawk Pod"]
+        for title in ("AI market outlook", "Artificial intelligence investment",
+                      "OpenAI funding", "Anthropic growth", "ChatGPT adoption",
+                      "Nvidia earnings", "NVIDIA outlook", "Semiconductor demand",
+                      "Semiconductors outlook", "Chip stocks rally", "Chips demand surges",
+                      "Cybersecurity spending", "Tech regulation"):
+            with self.subTest(title=title):
+                self.assertTrue(cnbc.accepts(Episode("id", title, "https://example.org", cnbc.name)))
+        for title in ("Oil prices and bond yields", "National Security outlook",
+                      "Social Security reform"):
+            with self.subTest(title=title):
+                self.assertFalse(cnbc.accepts(Episode(
+                    "id", title, "https://example.org", cnbc.name)))
 
     def test_only_podcast_generalist_source_is_configured(self):
         feeds_text = (ROOT / "feeds.json").read_text(encoding="utf-8")
