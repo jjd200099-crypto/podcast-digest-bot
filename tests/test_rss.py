@@ -53,6 +53,27 @@ def complete_plain_transcript(*, include_closing: bool = True) -> str:
 
 class RSSTests(unittest.TestCase):
     @patch("news_officer.rss._response")
+    def test_rss_discovery_skips_preview_title_prefix(self, response):
+        url = "https://feeds.example.com/show"
+        titles = [
+            "(Preview) Trimmed episode",
+            " \t(pReViEw) Another trimmed episode \n",
+            "Full episode",
+            "A (Preview) in the middle",
+            "Preview without parentheses",
+        ]
+        items = "".join(
+            f"<item><guid>e-{index}</guid><title>{title}</title></item>"
+            for index, title in enumerate(titles)
+        )
+        response.return_value = FakeResponse(f"<rss><channel>{items}</channel></rss>", url)
+
+        for show_name in ("Sharp Tech", "Another Show"):
+            with self.subTest(show_name=show_name):
+                episodes = latest_rss_episodes(show_name, url, limit=0)
+                self.assertEqual([episode.title for episode in episodes], titles[2:])
+
+    @patch("news_officer.rss._response")
     def test_zero_scan_limit_reads_all_feed_entries(self, response):
         url = "https://feeds.example.com/show"
         items = "".join(f"<item><guid>e-{i}</guid><title>Episode {i}</title>"
