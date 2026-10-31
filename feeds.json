@@ -181,6 +181,14 @@
       "enabled": true
     },
     {
+      "name": "Sharp Tech",
+      "type": "rss",
+      "priority": "B",
+      "url": "",
+      "rss_url": "https://sharptech.fm/feed/podcast",
+      "enabled": true
+    },
+    {
       "name": "CNBC Squawk Pod",
       "aliases": [
         "Squawk Pod",

@@ -121,6 +121,7 @@ class CuratedSourcesTests(unittest.TestCase):
 
     def test_curated_rss_sources_load(self):
         expected_urls = {
+            "https://sharptech.fm/feed/podcast",
             "https://feeds.megaphone.fm/nopriors",
             "https://api.substack.com/feed/podcast/1084089.rss",
             "https://anchor.fm/s/f2ee4948/podcast/rss",
@@ -144,6 +145,7 @@ class CuratedSourcesTests(unittest.TestCase):
         }
         self.assertEqual(set(configured), expected_urls)
         self.assertEqual(set(loaded), expected_urls)
+        self.assertEqual(loaded["https://sharptech.fm/feed/podcast"].name, "Sharp Tech")
         for rss_url in expected_urls:
             with self.subTest(rss_url=rss_url):
                 self.assertEqual(configured[rss_url]["type"], "rss")
