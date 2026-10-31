@@ -208,6 +208,8 @@ def latest_rss_episodes(
     episodes: list[Episode] = []
     for item in (items if limit == 0 else items[: max(1, limit)]):
         title = (item.findtext("title") or "").strip()
+        if title.casefold().startswith("(preview)"):
+            continue
         published_at = _parse_date(item.findtext("pubDate") or "")
         link = _safe_https_url(item.findtext("link") or "")
         guid = (item.findtext("guid") or "").strip()
