@@ -37,7 +37,7 @@ from .rss import (
     latest_rss_episodes,
 )
 from .sequoia import SequoiaOfficialTranscriptProvider
-from .source_matching import normalize_rss_url
+from .source_matching import matches_include_keywords, normalize_rss_url
 from .store import Store
 from .summarizer import SummaryFormatError
 from .text_sources import discover_articles, load_text_sources, text_sources_enabled
@@ -179,16 +179,16 @@ class YouTubeFeedSource:
     aliases: tuple[str, ...] = ()
     podwise_podcast_ids: tuple[str, ...] = ()
 
+    match_description_first_sentence: bool = False
+    include_keywords_title_only: tuple[str, ...] = ()
+
     def accepts(self, episode: Episode) -> bool:
         if youtube_skip_reason(episode):
             return False
-        if not self.include_keywords:
-            return True
-        title = str(episode.metadata.get("youtube_title") or episode.title).casefold()
-        return any(
-            re.search(rf"(?<![a-z0-9]){re.escape(keyword.casefold())}(?![a-z0-9])", title)
-            is not None
-            for keyword in self.include_keywords
+        return matches_include_keywords(
+            episode, self.include_keywords,
+            match_description_first_sentence=self.match_description_first_sentence,
+            include_keywords_title_only=self.include_keywords_title_only,
         )
 
 
@@ -223,6 +223,8 @@ def load_youtube_sources(path: Path, *, warned_keys=None) -> list[YouTubeFeedSou
                 YouTubeFeedSource(
                     url=str(source.get("url") or ""),
                     include_keywords=keywords,
+                    match_description_first_sentence=source.get("match_description_first_sentence", False),
+                    include_keywords_title_only=_string_list(source.get("include_keywords_title_only")),
                     scan_depth=min(50, max(1, scan_depth)),
                     name=str(source.get("name") or ""),
                     rss_url=str(source.get("rss_url") or ""),

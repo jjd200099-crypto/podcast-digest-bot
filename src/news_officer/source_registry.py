@@ -15,7 +15,7 @@ from xml.etree import ElementTree
 import requests
 
 from .rss import MAX_FEED_BYTES, _response, latest_rss_episodes
-from .source_matching import normalize_rss_url
+from .source_matching import matches_include_keywords, normalize_rss_url
 
 
 class SourceRegistry:
@@ -146,9 +146,13 @@ class SourceRegistry:
                 for ep in episodes:
                     if ep.published_at and cutoff <= ep.published_at <= now:
                         keywords = source.get("include_keywords", [])
-                        if keywords and not any(
-                            k.casefold() in ep.title.casefold() for k in keywords
-                        ):
+                        if source.get("match_description_first_sentence", False):
+                            if not matches_include_keywords(
+                                ep, keywords, match_description_first_sentence=True,
+                                include_keywords_title_only=source.get("include_keywords_title_only", ()),
+                            ):
+                                continue
+                        elif keywords and not any(k.casefold() in ep.title.casefold() for k in keywords):
                             continue
                         result.append(
                             {
