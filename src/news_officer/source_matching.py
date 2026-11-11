@@ -27,14 +27,20 @@ def normalize_rss_url(value: str) -> str:
         return ''
 
 
-def matches_include_keywords(episode: Episode, keywords: Sequence[str]) -> bool:
+def matches_include_keywords(
+    episode: Episode, keywords: Sequence[str], *,
+    match_description_first_sentence: bool = False,
+    include_keywords_title_only: Sequence[str] = (),
+) -> bool:
     if not keywords:
         return True
     title = str(episode.metadata.get("youtube_title") or episode.title)
     lead = re.split(r"[.?!]\s+", str(episode.metadata.get("description") or ""), maxsplit=1)[0]
+    title_only = {keyword.casefold() for keyword in include_keywords_title_only}
     return any(
         re.search(rf"(?<![a-z0-9]){re.escape(keyword.casefold())}(?![a-z0-9])", text.casefold())
         is not None
         for keyword in keywords
-        for text in (title, lead)
+        for text in ((title, lead) if match_description_first_sentence
+                     and keyword.casefold() not in title_only else (title,))
     )

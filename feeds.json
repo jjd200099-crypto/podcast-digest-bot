@@ -219,6 +219,8 @@
       "rss_url": "https://feeds.simplecast.com/GcylmXl7",
       "enabled": true,
       "scan_depth": 10,
+      "match_description_first_sentence": true,
+      "include_keywords_title_only": ["AI", "Nvidia"],
       "include_keywords": [
         "AI",
         "artificial intelligence",
@@ -227,8 +229,6 @@
         "ChatGPT",
         "Nvidia",
         "Head of AI",
-        "data center",
-        "data centers",
         "Sam Altman",
         "Dario Amodei",
         "Demis Hassabis",
