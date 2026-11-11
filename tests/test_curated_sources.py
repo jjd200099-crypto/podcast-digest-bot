@@ -1,13 +1,16 @@
 import json
 import sys
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from news_officer.models import Episode
 from news_officer.podcast import load_youtube_sources
+from news_officer.source_registry import SourceRegistry
 
 
 class CuratedSourcesTests(unittest.TestCase):
@@ -70,10 +73,68 @@ class CuratedSourcesTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertTrue(cnbc.accepts(Episode("id", title, "https://example.org", cnbc.name)))
         for title in ("Oil prices and bond yields", "National Security outlook",
-                      "Social Security reform"):
+                      "Social Security reform", "paid overtime", "email updates"):
             with self.subTest(title=title):
                 self.assertFalse(cnbc.accepts(Episode(
                     "id", title, "https://example.org", cnbc.name)))
+
+    def test_squawk_on_the_street_loads(self):
+        source = next(s for s in load_youtube_sources(ROOT / "feeds.json")
+                      if s.name == "CNBC Squawk on the Street")
+        self.assertEqual(source.source_type, "rss")
+        self.assertEqual(source.url, "")
+        self.assertEqual(source.rss_url, "https://feeds.simplecast.com/GcylmXl7")
+        self.assertEqual(source.priority, "B")
+        self.assertEqual(source.scan_depth, 10)
+        self.assertEqual(source.aliases, ("Squawk on the Street", "CNBC Squawk on the Street"))
+        self.assertEqual(source.include_keywords, (
+            "AI", "artificial intelligence", "OpenAI", "Anthropic", "ChatGPT", "Nvidia",
+            "Head of AI", "data center", "data centers", "Sam Altman", "Dario Amodei",
+            "Demis Hassabis", "Jensen Huang", "Mira Murati", "Sarah Friar", "Ilya Sutskever",
+            "xAI", "DeepMind", "CoreWeave"))
+        configured = json.loads((ROOT / "feeds.json").read_text())["sources"]
+        self.assertIs(next(s for s in configured if s["name"] == source.name)["enabled"], True)
+
+    def test_squawk_keyword_matching_in_discovery_and_recent(self):
+        source = next(s for s in load_youtube_sources(ROOT / "feeds.json")
+                      if s.name == "CNBC Squawk on the Street")
+        cases = [
+            (True, ("11AM Hour: OpenAI CFO Sarah Friar, Citi's Head of AI Research Heath Terry "
+             "& Former Minneapolis Fed President Gary Stern 11/6/26"), ""),
+            (False, "CNBC Investing Club: Cramer's Morning Take on Home Depot 11/4/26", ""),
+            (False, ("11AM Hour: Stocks Rally After Midterm Elections, Circle CEO on Earnings "
+             "& CVS to Split Up 11/4/26"), ("We break down the impact of the midterm elections "
+             "on tech, banks and the health care space.")),
+            (False, "11AM Hour: Tech Stocks Sell Off, Tapestry CEO & Box CEO 11/5/26",
+             ("We discuss the tech sell-off. Box CEO Aaron Levie discusses the company's "
+             "expanded partnership with Nvidia.")),
+        ]
+        for keyword in ("OpenAI", "Head of AI", "artificial intelligence"):
+            cases.append((True, "11AM Hour: Market outlook", f"We discuss {keyword}. Stocks rally."))
+        for title in ("Oil prices and bond yields", "National Security outlook",
+                      "Social Security reform", "paid overtime", "email updates"):
+            cases.append((False, title, ""))
+        for keyword in ("tech", "chip", "chips", "semiconductor", "semiconductors", "cybersecurity"):
+            cases.append((False, f"Market {keyword} outlook", ""))
+        for boundary in (". ", "? ", "! ", ".\n", "?\t"):
+            cases.append((False, "Market outlook", "Stocks rally" + boundary + "Nvidia earnings"))
+        cases.extend([
+            (True, "Market outlook", "nViDiA earnings without sentence punctuation"),
+            (False, "Market outlook", "Investors paid overtime and read email"),
+        ])
+        registry = SourceRegistry(Mock(), ROOT / "feeds.json")
+        for expected, title, description in cases:
+            with self.subTest(title=title, description=description):
+                episode = Episode("id", title, "https://example.org", source.name,
+                                  published_at=datetime.now(UTC),
+                                  metadata={"description": description})
+                self.assertEqual(source.accepts(episode), expected)
+                with patch.object(registry, "list", return_value=[{
+                    "name": source.name, "rss_url": source.rss_url,
+                    "include_keywords": source.include_keywords,
+                }]), patch("news_officer.source_registry.latest_rss_episodes",
+                          return_value=[episode]):
+                    self.assertEqual(bool(registry.recent(1)["episodes"]), expected)
 
     def test_only_podcast_generalist_source_is_configured(self):
         feeds_text = (ROOT / "feeds.json").read_text(encoding="utf-8")

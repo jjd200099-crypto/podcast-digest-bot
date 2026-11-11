@@ -37,7 +37,7 @@ from .rss import (
     latest_rss_episodes,
 )
 from .sequoia import SequoiaOfficialTranscriptProvider
-from .source_matching import normalize_rss_url
+from .source_matching import matches_include_keywords, normalize_rss_url
 from .store import Store
 from .summarizer import SummaryFormatError
 from .text_sources import discover_articles, load_text_sources, text_sources_enabled
@@ -182,14 +182,7 @@ class YouTubeFeedSource:
     def accepts(self, episode: Episode) -> bool:
         if youtube_skip_reason(episode):
             return False
-        if not self.include_keywords:
-            return True
-        title = str(episode.metadata.get("youtube_title") or episode.title).casefold()
-        return any(
-            re.search(rf"(?<![a-z0-9]){re.escape(keyword.casefold())}(?![a-z0-9])", title)
-            is not None
-            for keyword in self.include_keywords
-        )
+        return matches_include_keywords(episode, self.include_keywords)
 
 
 def load_youtube_sources(path: Path, *, warned_keys=None) -> list[YouTubeFeedSource]:
