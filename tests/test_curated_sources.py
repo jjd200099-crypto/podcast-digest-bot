@@ -75,6 +75,49 @@ class CuratedSourcesTests(unittest.TestCase):
                 self.assertFalse(cnbc.accepts(Episode(
                     "id", title, "https://example.org", cnbc.name)))
 
+    def test_odd_lots_loads_with_filters_and_aliases(self):
+        feeds_path = ROOT / "feeds.json"
+        configured = next(s for s in json.loads(feeds_path.read_text())["sources"]
+                          if s["name"] == "Odd Lots")
+        loaded = [s for s in load_youtube_sources(feeds_path) if s.name == "Odd Lots"]
+        self.assertEqual(len(loaded), 1)
+        source = loaded[0]
+        self.assertIs(configured["enabled"], True)
+        self.assertEqual(source.source_type, "rss")
+        self.assertEqual(source.url, "")
+        self.assertEqual(source.rss_url, (
+            "https://www.omnycontent.com/d/playlist/"
+            "e73c998e-6e60-432f-8610-ae210140c5b1/"
+            "8a94442e-5a74-4fa2-8b8d-ae27003a8d6b/"
+            "982f5071-765c-403d-969d-ae27003a8d83/podcast.rss"))
+        self.assertEqual(source.priority, "B")
+        self.assertEqual(source.scan_depth, 10)
+        self.assertEqual(source.aliases, ("Odd Lots", "Bloomberg Odd Lots"))
+        self.assertEqual(source.include_keywords, (
+            "AI", "artificial intelligence", "OpenAI", "Anthropic", "ChatGPT",
+            "Nvidia", "Jensen Huang", "semiconductor", "semiconductors", "chip",
+            "chips", "data center", "data centers", "tech"))
+
+    def test_odd_lots_filters_real_episode_titles(self):
+        source = next(s for s in load_youtube_sources(ROOT / "feeds.json")
+                      if s.name == "Odd Lots")
+        for title in (
+            "How Wall Street Is Bracing For the Post-Jensen Huang Nvidia Era",
+            "The Impossible Trilemma That Hangs Over the Nvidia Crisis",
+            "What Nvidia's Megaspeed Scandal Is Really All About",
+        ):
+            with self.subTest(title=title):
+                self.assertTrue(source.accepts(Episode(
+                    "id", title, "https://example.org", source.name)))
+        for title in (
+            "Why a $2 Billion Law Firm Suddenly Collapsed",
+            "This Is How New York City Takes Out Its Trash",
+            "The Perfect Storm That Clobbered Hedge Funds",
+        ):
+            with self.subTest(title=title):
+                self.assertFalse(source.accepts(Episode(
+                    "id", title, "https://example.org", source.name)))
+
     def test_only_podcast_generalist_source_is_configured(self):
         feeds_text = (ROOT / "feeds.json").read_text(encoding="utf-8")
         sources = json.loads(feeds_text)["sources"]
