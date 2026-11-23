@@ -96,6 +96,14 @@ def compact_paragraphs(markdown, rewriter=None, audit=None):
     originals = [span.group() for span in spans]
     if not originals:
         return markdown
+    from .summarizer import daily_prose_within_short_card_caps
+    if daily_prose_within_short_card_caps(originals):
+        if audit is not None:
+            audit.append({'fallback': False, 'skipped': 'already-within-short-card-caps',
+                          'before_lengths': list(map(len, originals)),
+                          'after_lengths': list(map(len, originals)),
+                          'paragraphs': originals})
+        return markdown
     ratio = compact_ratio()
     errors = []
     paragraphs = None
@@ -555,7 +563,7 @@ def v4_layout_enabled(value=None):
 def reader_episode_v4(item, number, document_url='', *, source_text=''):
     """Extract archived prose without rewriting claims or calling a model."""
     from .glossary import preserve_english_terms
-    from .summarizer import _valid_v4_summary, normalize_v4_summary
+    from .summarizer import normalize_v4_summary
     summary = normalize_v4_summary(item.message)
     content = preserve_english_terms(render_daily_summary(summary, reader_mode=True), source_text)
     content = re.sub(r'\[新\]|【新】', '', content).replace('王颢蓁', '')
@@ -586,45 +594,31 @@ def reader_episode_v4(item, number, document_url='', *, source_text=''):
     topic = re.sub(r'[｜|]', ' / ', topic)
     title = f'{guest}｜{topic}'
     heading = f'**{number}. 【{show}｜{title}】**'
-    if not _valid_v4_summary(summary):
-        # Keep the full body in the archive; cards show a bounded extract.
-        intro = next((line[3:] for line in lines if line.startswith('简介：')), '')
-        if not intro:
-            intro = next((re.sub(r'^(?:\d+[.、]\s*|[•*-]\s*)', '', line)
-                          for line in lines if not line.startswith(
-                              ('#', '节目：', '时长：', '链接：', '节目链接：', '收听链接：',
-                               '推荐理由：', '阅读建议：', '推荐星级：', '要点总结：',
-                               '优先级/阅读建议：', '[', '【'))), '')
-        excerpt = intro if len(intro) <= 160 else intro[:159].rstrip() + '…'
-        fields = [heading, '', '- 简介：' + excerpt] if excerpt else [heading]
-        fields.extend(line for line in lines if line.startswith(
-            ('推荐理由：', '阅读建议：', '优先级/阅读建议：')))
-        if document_url:
-            fields.append(f'[精读和完整中文对谈]({document_url})')
-        fields.append(f'[收听节目]({item.episode.url})')
-        return '\n'.join(fields)
-    intro, reason, advice, points = '', '', '', []
+    from .summarizer import (
+        _valid_short_daily_summary,
+        strip_daily_card_expansions,
+        trim_daily_card_body,
+    )
+
+    intro, first_prose = '', ''
     for line in lines:
         clean = line.removeprefix('- ').strip('*')
         if clean.startswith('简介：'):
             intro = clean[3:]
-        elif clean.startswith('推荐理由：'):
-            reason = clean[5:]
-        elif clean.startswith(('阅读建议：', '优先级/阅读建议：')):
-            advice = clean.split('：', 1)[1]
         elif clean.startswith(('节目：', '时长：', '链接：', '节目链接：', '收听链接：',
-                               '推荐星级：', '要点总结：', '#', '[', '【')):
+                               '推荐理由：', '阅读建议：', '推荐星级：', '要点总结：',
+                               '优先级/阅读建议：', '#', '[', '【')):
             continue
-        else:
-            points.append(re.sub(r'^(?:\d+[.、]\s*|[•*-]\s*)', '', line))
-    if not intro and points:
-        # Reuse existing prose without inventing a new claim or dropping a takeaway.
-        intro = points[0]
-    if not points and intro:
-        points = [intro]
-    fields = [f'**{number}. 【{show}｜{title}】**', '', f'- 简介：{intro}',
-              '- 优先级/阅读建议：' + '，'.join(v for v in (advice, reason) if v),
-              '- 要点总结：', '\n'.join(f'    {i}. {point}' for i, point in enumerate(points, 1))]
+        elif not first_prose:
+            first_prose = re.sub(r'^(?:\d+[.、]\s*|[•*-]\s*)', '', line)
+
+    # Cards show one prose paragraph. Archived 要点总结 and 推荐理由 stay in
+    # the stored summary / 精读, not on the reader-facing daily card.
+    body = intro or first_prose
+    body = trim_daily_card_body(strip_daily_card_expansions(body))
+    if _valid_short_daily_summary(summary):
+        heading = f'**{number}. {topic}**'
+    fields = [heading, '', body] if body else [heading]
     if document_url:
         fields.append(f'[精读和完整中文对谈]({document_url})')
     fields.append(f'[收听节目]({item.episode.url})')

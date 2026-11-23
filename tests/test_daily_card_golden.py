@@ -73,11 +73,12 @@ class DailyCardGoldenTests(unittest.TestCase):
 
     def test_oversized_day_compacts_card_and_preserves_episode_links(self):
         section = json.loads(render_fixture()[0][1])['body']['elements'][1]['content']
-        section = section.replace('    2.', '    2. ' + '很长的论据。' * 4000)
+        # Inflate the body paragraph, which is now the only prose on the card.
+        section = section.replace('Jason Ma 说明', 'Jason Ma 说明' + '很长的论据。' * 4000)
         parts = daily_card_delivery_parts(section, 'large', title='今日')
         self.assert_payloads_fit(parts)
         self.assertEqual(parts[0][0], 'interactive')
-        self.assertIn('简介：Jason Ma', parts[0][1])
+        self.assertIn('Jason Ma 说明', parts[0][1])
         self.assertIn('https://www.latent.space/p/dyna', parts[0][1])
         self.assertIn('https://www.feishu.cn/docx/', parts[0][1])
         self.assertEqual(parts, daily_card_delivery_parts(section, 'large', title='今日'))

@@ -12,6 +12,18 @@ from .strict_selection import strict_selection_enabled
 
 TAKEAWAY_COUNT = 10
 TAKEAWAY_HARD_MAX_CHARS = 120
+# Reader-facing daily card caps, calibrated to the 2026-11-23 gold sample:
+# title 43, body 181, title + blank line + body 226.
+DAILY_TITLE_MIN_CHARS = 8
+DAILY_TITLE_HARD_MAX_CHARS = 70
+DAILY_BODY_HARD_MIN_CHARS = 80
+DAILY_BODY_TARGET_MIN_CHARS = 160
+DAILY_BODY_TARGET_MAX_CHARS = 200
+DAILY_BODY_HARD_MAX_CHARS = 220
+DAILY_CARD_COMBINED_HARD_MAX_CHARS = 260
+DAILY_EXPANSION_RE = re.compile(
+    r"两句原话|(?:\*\*)?对[^。\n]{0,40}的含义[：:]"
+)
 NUMBERED_TAKEAWAY_RE = re.compile(r"(?m)^[ \t]*(\d+)\.[ \t]+([^\r\n]*\S)[ \t]*$")
 MARKDOWN_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+\S.*$")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
@@ -34,6 +46,99 @@ def _visible_takeaway_text(text: str) -> str:
     # a link displays its label, not its destination URL.
     text = MARKDOWN_LINK_RE.sub(lambda match: match.group(1), text)
     return text.replace("**", "").replace("__", "")
+
+
+def _has_daily_card_expansion(text: str) -> bool:
+    """True when a daily card stacks verbatim quotes or a 含义 expansion."""
+    return bool(DAILY_EXPANSION_RE.search(text or ""))
+
+
+def strip_daily_card_expansions(text: str) -> str:
+    """Drop 两句原话 / 对…的含义 sections; keep short in-sentence hedges."""
+    if not text:
+        return text
+    match = DAILY_EXPANSION_RE.search(text)
+    if not match:
+        return text.strip()
+    return text[:match.start()].strip()
+
+
+def trim_daily_card_body(text: str, hard_max: int = DAILY_BODY_HARD_MAX_CHARS) -> str:
+    """Trim over-long body at a sentence or phrase boundary; never mid-word."""
+    text = strip_daily_card_expansions(text).strip()
+    if len(_visible_takeaway_text(text)) <= hard_max:
+        return text
+    # Walk raw prefixes and keep the longest that still fits and ends cleanly.
+    candidates = []
+    for match in re.finditer(r".+?[。！？][”’」』]?", text, re.DOTALL):
+        chunk = match.group(0).strip()
+        if len(_visible_takeaway_text(chunk)) <= hard_max:
+            candidates.append(chunk)
+    if candidates:
+        return candidates[-1]
+    for match in re.finditer(r".+?[，；;]", text, re.DOTALL):
+        chunk = match.group(0).strip()
+        if len(_visible_takeaway_text(chunk)) <= hard_max:
+            candidates.append(chunk)
+    if candidates:
+        return candidates[-1]
+    # Last resort: break at whitespace or between CJK chars, not inside ASCII words.
+    for end in range(min(len(text), hard_max * 2), 0, -1):
+        chunk = text[:end].rstrip()
+        if len(_visible_takeaway_text(chunk)) > hard_max:
+            continue
+        if end == len(text):
+            return chunk
+        nxt = text[end:end + 1]
+        prev = chunk[-1] if chunk else ""
+        ascii_word = prev.isalnum() and nxt.isalnum() and prev.isascii() and nxt.isascii()
+        if not ascii_word:
+            return chunk
+    return text
+
+
+def daily_prose_within_short_card_caps(paragraphs: list[str]) -> bool:
+    """Skip compact rewriting when a single body is already in the short-card band."""
+    bodies = [p.strip() for p in paragraphs if p.strip()]
+    if len(bodies) != 1:
+        return False
+    length = len(_visible_takeaway_text(bodies[0]))
+    return DAILY_BODY_HARD_MIN_CHARS <= length <= DAILY_BODY_HARD_MAX_CHARS
+
+
+def _valid_short_daily_summary(markdown: str) -> bool:
+    """New default stored summary: judgment title plus one 简介 paragraph."""
+    structure = re.fullmatch(
+        r"## ([^\r\n]{8,70})\n节目：\S[^\r\n]+\n"
+        r"(?:链接：[^\r\n]+\n)?(?:时长：[^\r\n]+\n)?"
+        r"简介：([^\r\n]+)\n"
+        r"推荐理由：[^\r\n]{8,160}\n推荐星级：([★☆]{5})[ \t]*",
+        markdown,
+    )
+    if not structure:
+        return False
+    title, intro, stars = structure.group(1), structure.group(2), structure.group(3)
+    title_len = len(_visible_takeaway_text(title))
+    body_len = len(_visible_takeaway_text(intro))
+    score = stars.count("★")
+    if not DAILY_TITLE_MIN_CHARS <= title_len <= DAILY_TITLE_HARD_MAX_CHARS:
+        return False
+    if not DAILY_BODY_HARD_MIN_CHARS <= body_len <= DAILY_BODY_HARD_MAX_CHARS:
+        return False
+    if title_len + 2 + body_len > DAILY_CARD_COMBINED_HARD_MAX_CHARS:
+        return False
+    if _has_daily_card_expansion(title) or _has_daily_card_expansion(intro):
+        return False
+    if re.search(r"(?m)^\s*(?:\d+[.、)]\s*|[-*>]\s+|#{1,6}\s+|【)", intro):
+        return False
+    if re.search(r"(?:嘉宾观点|嘉宾预测|公司主张|模型估算)\s*[:：]|https?://", intro):
+        return False
+    return (
+        1 <= score <= 5
+        and stars == "★" * score + "☆" * (5 - score)
+        and not re.search(r"王颢蓁|\[新\]|【新】|RSI[（(]", markdown)
+    )
+
 
 
 def _is_topic_separator(line: str) -> bool:
@@ -155,7 +260,7 @@ def normalize_v4_summary(markdown: str) -> str:
     # recommendation fields. Keep every nonempty line so the strict validator
     # still rejects unexpected prose, missing fields, and invalid numbering.
     text = '\n'.join(lines).strip()
-    if '\n要点总结：\n' not in text:
+    if '\n要点总结：\n' not in text and '\n简介：' not in text:
         return text
     return '\n'.join(line for line in text.splitlines() if line.strip())
 
@@ -184,7 +289,12 @@ def _valid_v4_summary(markdown: str) -> bool:
 
 def _valid_editorial_summary(markdown: str) -> bool:
     # Scoring and archived-document paths must still accept previously saved work.
-    return _valid_v4_summary(markdown) or _valid_narrative_summary(markdown) or _valid_legacy_editorial_summary(markdown)
+    return (
+        _valid_short_daily_summary(markdown)
+        or _valid_v4_summary(markdown)
+        or _valid_narrative_summary(markdown)
+        or _valid_legacy_editorial_summary(markdown)
+    )
 
 
 def _usable_summary(markdown: str) -> bool:
@@ -242,13 +352,14 @@ class TranscriptSummarizer:
     def cache_identity(self) -> str:
         # Frozen seed preserves existing keys across renderer/validator edits.
         # Model and selection scope still invalidate; display layout does not.
-        return hashlib.sha256(Path(__file__).with_name('summary_cache_seed_v4.txt').read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode() + b'v4').hexdigest()
+        return hashlib.sha256(Path(__file__).with_name('summary_cache_seed_v4.txt').read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode() + b'v4-short-card').hexdigest()
 
     def compatible_cache_identities(self) -> list[str]:
-        """Reuse pre-v4 and compact work with the same model and selection scope."""
+        """Reuse pre-short-card, pre-v4 and compact work with the same model and selection scope."""
         suffix = self.model.encode() + str(strict_selection_enabled()).encode()
         return [hashlib.sha256(Path(__file__).with_name(name).read_bytes() + suffix + layout).hexdigest()
-                for name, layout in [('summary_cache_seed_v4.txt', b'compact'),
+                for name, layout in [('summary_cache_seed_v4.txt', b'v4'),
+                                     ('summary_cache_seed_v4.txt', b'compact'),
                                      ('summary_cache_seed_narrative.txt', b'')]]
 
     def summarize(self, episode: Episode, transcript: Transcript) -> str:
@@ -278,19 +389,33 @@ class TranscriptSummarizer:
         from .daily_report import v4_layout_enabled
         v4 = v4_layout_enabled()
         if v4:
-            instructions += ('\n新版日报结构优先于上面关于自然段和不要编号的格式要求：'
-                             '标题写“## 短节目名｜真实嘉宾姓名｜一句中文核心主题”，不要堆入原始长剧集名。'
-                             '保留节目、链接、时长来源行。然后写“简介：”一段，接着“要点总结：”，'
-                             '用1.、2.等连续编号写3–6条，每条先给结论，再用具体例子、数字或机制支撑。'
-                             '最后保留推荐理由和推荐星级。篇幅可稍长，不为压字数丢失支撑和限定。'
-                             '不要[新]或【新】，RSI等术语不要括号释义，不要出现王颢蓁。\n')
+            instructions += (
+                '\n新版日报卡片优先于上面关于两至三段正文和编号要点的格式要求：\n'
+                '标题写“## ”加一句中文判断，约 40–70 字，硬上限 70 字；不要写成“节目名｜嘉宾｜主题”三节标题，'
+                '不要在词或英文专名中间截断，超限就整句重写。\n'
+                '保留节目、链接、时长来源行。不要写“要点总结：”或编号清单。\n'
+                '然后只写“简介：”一段：把嘉宾、节目名、日期写进这一段（日期写成“11 月 18 日”这种格式；'
+                '没有发布日期就不要编造）；若文字稿里有一段特别值得听的具体片段，可写“建议直接听 36:17–40:11”这样的时间戳，没有就省略。\n'
+                '判断句之后，卡片正文只能有这一段：节目信息 + 一个例子 + 简短限定。目标 160–200 字，硬上限 220 字；'
+                '标题加空行加简介合计硬上限 260 字。\n'
+                '必须保留会改变口径的短限定，例如“单一案例”“自报数字”“不含人工复核和整体交付成本”；'
+                '不得为压字数删掉这类限定。英文专有名词保持英文。\n'
+                '禁止把逐字原话、「两句原话」或「对 … 的含义」扩写（包括 ARR、席位乘以不变 token、'
+                'NBER 式跨研究对比、30/90 天愿望清单）写进简介；这些内容写到精读和完整中文对谈里，精读的原有深度不要因此缩短。\n'
+                '最后仍写推荐理由和推荐星级，它们供内部排序，不要把推荐理由写成简介正文。'
+                '不要[新]或【新】，RSI等术语不要括号释义，不要出现王颢蓁。\n'
+            )
         if strict_selection_enabled():
             instructions += ('\n严格筛选模式：对于包含大量非 AI 内容的混合主题节目（例如量子计算、制药），'
                              '日报摘要只聚焦 AI 相关部分，不总结非 AI 段落；标题、正文和推荐理由均遵守此范围。\n')
+        published = "未提供"
+        if episode.published_at is not None:
+            published = episode.published_at.date().isoformat()
         prompt = f"""节目：{episode.title}
 频道/主播：{episode.show}
 节目链接：{episode.url}
 时长：{duration}
+发布日期：{published}
 文字稿来源：{transcript.source_url}
 
 --- BEGIN UNTRUSTED TRANSCRIPT ---
@@ -301,7 +426,12 @@ class TranscriptSummarizer:
         for attempt in range(2):
             attempt_prompt = prompt
             if attempt and v4:
-                attempt_prompt += '\n请严格使用简介、要点总结和连续编号，以及推荐理由和推荐星级的新结构。\n'
+                attempt_prompt += (
+                    '\n上一次输出没有满足日报卡片格式。请重新独立生成：'
+                    '“## ”加一句判断（不超过70字），保留节目/链接/时长，只写一段“简介：”'
+                    '（不超过220字，含嘉宾、节目名、日期、一个例子和必要限定），'
+                    '不要要点总结、不要逐字原话、不要“对 … 的含义”；最后写推荐理由和推荐星级。\n'
+                )
             elif attempt:
                 attempt_prompt += (
                     "\n上一次输出没有满足格式校验。请重新独立生成最终 Markdown，"
@@ -321,7 +451,7 @@ class TranscriptSummarizer:
                 summary = normalize_v4_summary(summary)
             if v4 and _usable_summary(summary):
                 fallback = fallback or summary
-            if (_valid_v4_summary(summary) if v4 else _valid_narrative_summary(summary)):
+            if (_valid_short_daily_summary(summary) if v4 else _valid_narrative_summary(summary)):
                 return summary
         if fallback is not None:
             return fallback

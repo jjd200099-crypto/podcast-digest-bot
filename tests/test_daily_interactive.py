@@ -15,7 +15,7 @@ from news_officer.models import DailyItem
 
 
 class InteractiveCardTests(unittest.TestCase):
-    def test_card_has_exact_schema_and_nested_points_and_three_part_title(self):
+    def test_card_has_exact_schema_and_short_body_and_three_part_title(self):
         summary = V4.replace('Show｜AI 成本取决于任务', 'Show｜Mike｜AI 成本取决于任务')
         section = reader_episode_v4(DailyItem(EPISODE, 'summarized', summary), 1,
                                     'https://example.com/doc')
@@ -33,8 +33,9 @@ class InteractiveCardTests(unittest.TestCase):
         self.assertEqual(elements[0]['content'], '**🎧 播客精选 · 2026-10-15**')
         text = elements[1]['content']
         self.assertIn('【Show｜Mike｜AI 成本取决于任务】', text)
-        self.assertIn('- 要点总结：\n    1.', text)
-        self.assertIn('模型。\n    2.', text)
+        self.assertIn('Mike 讨论模型选择和 AI 成本。', text)
+        self.assertNotIn('- 要点总结：', text)
+        self.assertNotIn('    1.', text)
         self.assertIn('- [精读和完整中文对谈](https://example.com/doc)', text)
         self.assertIn('- [收听节目](', text)
         self.assertNotIn('重做版', content)
@@ -66,7 +67,8 @@ class InteractiveCardTests(unittest.TestCase):
             generated = instance.summarize(EPISODE, source)
         self.assertIn('world action model', generated)
         instructions = instance.client.responses.calls[0]['instructions']
-        self.assertIn('短节目名｜真实嘉宾姓名｜一句中文核心主题', instructions)
+        self.assertIn('不要写成“节目名｜嘉宾｜主题”三节标题', instructions)
+        self.assertIn('不含人工复核和整体交付成本', instructions)
         self.assertIn('术语表', instructions)
 
     def test_translation_normalizes_alias_without_changing_segment_ids(self):

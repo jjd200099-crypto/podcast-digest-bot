@@ -50,18 +50,22 @@ class DailyV4Tests(unittest.TestCase):
         self.assertEqual(len(parts), 1)
         self.assertEqual(parts[0][0], 'interactive')
         content = json.loads(parts[0][1])['body']['elements'][1]['content']
-        for label in ('- 简介：', '- 优先级/阅读建议：', '- 要点总结：'):
-            self.assertIn(label, content)
+        self.assertNotIn('- 要点总结：', content)
+        self.assertNotIn('- 优先级/阅读建议：', content)
+        self.assertNotIn('- 简介：', content)
+        intro = next(line[3:] for line in normalized.splitlines() if line.startswith('简介：'))
+        self.assertIn(intro, content)
         points = [line for line in normalized.splitlines() if line[:1].isdigit()]
         self.assertEqual(len(points), 5)
+        # Archived bullets stay in the stored summary, not on the daily card.
         for point in points:
-            self.assertIn('\n    ' + point, content)
-        self.assertNotRegex(content, r'\n\s*\n    \d+\. ')
+            self.assertNotIn('\n    ' + point, content)
         self.assertEqual(item.message, raw)
         instance = summarizer_for(raw)
         with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
             self.assertEqual(instance.summarize(EPISODE, TRANSCRIPT), normalized)
-        self.assertEqual(len(instance.client.responses.calls), 1)
+        # Old v4 point-list output is usable fallback, not a first-pass success.
+        self.assertEqual(len(instance.client.responses.calls), 2)
 
     def test_blank_lines_at_every_v4_boundary_preserve_strict_validation(self):
         padded = V4.replace('\n', '\n\n \t\n')
@@ -90,26 +94,28 @@ class DailyV4Tests(unittest.TestCase):
         self.assertEqual(parts[0][0], 'interactive')
         card = json.loads(parts[0][1])
         content = card['body']['elements'][1]['content']
-        for label in ('- 简介：', '- 优先级/阅读建议：', '- 要点总结：'):
-            self.assertIn(label, content)
-        self.assertEqual(sum(line.startswith('    ') for line in content.splitlines()), 6)
-        for number in range(1, 7):
-            self.assertIn(f'\n    {number}. ', content)
-        self.assertNotRegex(content, r'\n\s*\n    \d+\. ')
+        self.assertNotIn('- 要点总结：', content)
+        self.assertNotIn('- 优先级/阅读建议：', content)
+        self.assertNotIn('- 简介：', content)
+        intro = next(line[3:] for line in normalized.splitlines() if line.startswith('简介：'))
+        self.assertIn(intro, content)
+        self.assertFalse(any(line.startswith('    ') for line in content.splitlines()))
         self.assertEqual(item.message, raw)
         instance = summarizer_for(raw)
         with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
             summary = instance.summarize(EPISODE, TRANSCRIPT)
         self.assertEqual(summary, normalized)
         self.assertTrue(_valid_v4_summary(summary))
-        self.assertEqual(len(instance.client.responses.calls), 1)
+        self.assertEqual(len(instance.client.responses.calls), 2)
 
     def test_normalization_tolerates_labels_but_rejects_malformed_content(self):
         for heading in ('要点总结:', '**要点总结：**', '- **要点总结**:', '- 要点总结：'):
             with self.subTest(heading=heading):
                 value = V4.replace('要点总结：', heading).replace('\n2. ', '\n\n2. ')
                 self.assertEqual(normalize_v4_summary(value), V4)
-                self.assertIn('- 要点总结：', reader_episode_v4(DailyItem(EPISODE, 'summarized', value), 1))
+                rendered = reader_episode_v4(DailyItem(EPISODE, 'summarized', value), 1)
+                self.assertIn('Mike 讨论模型选择和 AI 成本。', rendered)
+                self.assertNotIn('- 要点总结：', rendered)
         for malformed in (V4.replace('2. ', '3. '), V4.replace('简介：', '介绍：'),
                           V4.replace('2. ', 'un-numbered prose\n2. '),
                           V4.replace('要点总结：', '要点总结：\n要点总结：'),
@@ -137,9 +143,11 @@ class DailyV4Tests(unittest.TestCase):
         value = V4.replace('Mike 讨论模型选择和 AI 成本。', '长简介' * 100).replace('2. ', '3. ')
         item = DailyItem(EPISODE, 'summarized', value)
         rendered = reader_episode_v4(item, 1, 'https://example.com/doc')
-        excerpt = next(line[5:] for line in rendered.splitlines() if line.startswith('- 简介：'))
-        self.assertEqual(len(excerpt), 160)
-        self.assertTrue(excerpt.endswith('…'))
+        excerpt = next(line for line in rendered.splitlines()
+                       if line and not line.startswith(('**', '[')))
+        self.assertLessEqual(len(excerpt), 220)
+        self.assertFalse(excerpt.endswith('…'))
+        self.assertTrue(excerpt.startswith('长简介'))
         self.assertNotIn('成本取决于任务。Mike', rendered)
         self.assertIn('[精读和完整中文对谈](https://example.com/doc)', rendered)
         self.assertIn(f'[收听节目]({EPISODE.url})', rendered)
@@ -159,10 +167,11 @@ class DailyV4Tests(unittest.TestCase):
         text = reader_episode_v4(item, 1, 'https://example.com/doc')
         self.assertIn('**1. 【Show｜嘉宾未注明｜AI 成本取决于任务】**', text)
         self.assertNotIn('Very long original', text)
-        self.assertIn('- 简介：Mike', text)
-        self.assertIn('- 优先级/阅读建议：值得看全文，', text)
-        self.assertIn('    1. 成本取决于任务。Mike 认为', text)
-        self.assertIn('模型。\n    2. ', text)
+        self.assertIn('Mike 讨论模型选择和 AI 成本。', text)
+        self.assertNotIn('- 简介：', text)
+        self.assertNotIn('- 优先级/阅读建议：', text)
+        self.assertNotIn('要点总结', text)
+        self.assertNotIn('    1. 成本取决于任务。Mike 认为', text)
         self.assertIn('[精读和完整中文对谈](https://example.com/doc)', text)
         self.assertIn(f'[收听节目]({EPISODE.url})', text)
         self.assertEqual(item.message, V4)
@@ -173,7 +182,8 @@ class DailyV4Tests(unittest.TestCase):
                '只有需求增长，成本下降才可能提高利润。\n'
                '推荐理由：有具体条件和数字作为支撑。\n推荐星级：★★★★☆')
         text = reader_episode_v4(DailyItem(EPISODE, 'summarized', old), 1)
-        self.assertIn('- 简介：公司认为效率可能提高1000倍，但仍需验证。', text)
+        self.assertIn('公司认为效率可能提高1000倍，但仍需验证。', text)
+        self.assertNotIn('- 简介：', text)
         self.assertNotIn('只有需求增长', text)
 
     def test_short_title_deduplicates_verbose_rss_brand(self):
@@ -187,7 +197,7 @@ class DailyV4Tests(unittest.TestCase):
     def test_legacy_paragraphs_and_bullets_do_not_manufacture_v4_fields(self):
         for old in (VALID_SUMMARY, LEGACY_SUMMARY):
             text = reader_episode_v4(DailyItem(EPISODE, 'summarized', old), 1)
-            self.assertIn('- 简介：', text)
+            self.assertNotIn('- 简介：', text)
             self.assertNotIn('- 要点总结：', text)
             self.assertNotIn('    1.', text)
             self.assertEqual(old, DailyItem(EPISODE, 'summarized', old).message)
@@ -213,13 +223,11 @@ class DailyV4Tests(unittest.TestCase):
             self.assertIn('推荐理由：' + decision['assessment']['reason'], scored)
             self.assertIn('推荐星级：★★★★☆', scored)
             rendered = render_reader_daily([DailyItem(EPISODE, 'summarized', scored)], [], layout='v4')
-            self.assertIn('- 简介：', rendered)
+            self.assertNotIn('- 简介：', rendered)
             self.assertIn('Mike 讨论模型选择和 AI 成本。', rendered)
-            if _valid_v4_summary(scored):
-                self.assertIn('- 要点总结：', rendered)
-            else:
-                self.assertNotIn('Mike 认为简单任务可以使用更小的模型。', rendered)
-                self.assertNotIn('公司称需要先验证客户的真实需求。', rendered)
+            self.assertNotIn('- 要点总结：', rendered)
+            self.assertNotIn('Mike 认为简单任务可以使用更小的模型。', rendered)
+            self.assertNotIn('公司称需要先验证客户的真实需求。', rendered)
 
     def test_fallback_preserves_strict_selection_and_rejects_empty_output(self):
         from news_officer.editorial import STRICT_POLICY_VERSION, EditorialPolicy
@@ -251,6 +259,11 @@ class DailyV4Tests(unittest.TestCase):
             for term in ('RSI（递归自我改进）', 'RSI(递归自我改进)',
                          '递归自我改进（RSI）', '递归自我改进(RSI)'):
                 value = summary.replace('推荐理由：', '推荐理由：' + term)
+                if '简介：' in value:
+                    value = value.replace('简介：', '简介：' + term)
+                else:
+                    # Narrative fixtures have no 简介 line; place the term in the first prose line.
+                    value = value.replace('模型表现的改善', term + '模型表现的改善', 1)
                 rendered = reader_episode_v4(DailyItem(EPISODE, 'summarized', value), 1)
                 self.assertNotIn(term, rendered)
                 self.assertIn('RSI', rendered)
@@ -280,7 +293,9 @@ class DailyV4Tests(unittest.TestCase):
         with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
             identity = instance.cache_identity()
             self.assertEqual(instance.summarize(EPISODE, TRANSCRIPT), V4)
-            self.assertIn('每条先给结论', instance.client.responses.calls[0]['instructions'])
+            self.assertIn('只写“简介：”一段', instance.client.responses.calls[0]['instructions'])
+            self.assertIn('不含人工复核和整体交付成本', instance.client.responses.calls[0]['instructions'])
+            self.assertNotIn('每条先给结论', instance.client.responses.calls[0]['instructions'])
         with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'compact'}):
             self.assertEqual(identity, instance.cache_identity())
 
@@ -381,7 +396,10 @@ class FullSixEpisodeCardTests(unittest.TestCase):
                     'uuid': 'x' * 36, 'reply_in_thread': False}
         self.assertLessEqual(len(encoded_message_payload(envelope)), 29000)
         content = '\n'.join(e.get('content', '') for e in json.loads(part[1])['body']['elements'])
+        intro = next(line[3:] for line in raw.splitlines() if line.startswith('简介：'))
+        self.assertEqual(content.count(intro), 6)
+        self.assertNotIn('要点总结', content)
         for point in points:
-            self.assertEqual(content.count(point), 6)
+            self.assertNotIn('\n    ' + point, content)
         self.assertEqual(content.count('[精读和完整中文对谈]('), 6)
         self.assertEqual(content.count('[收听节目]('), 6)
