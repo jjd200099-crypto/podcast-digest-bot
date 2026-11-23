@@ -115,3 +115,18 @@ class ShortDailyCardTests(unittest.TestCase):
         self.assertEqual(compact_paragraphs(markdown, model, audit), markdown)
         model.rewrite_paragraphs.assert_not_called()
         self.assertEqual(audit[0]["skipped"], "already-within-short-card-caps")
+
+    def test_trim_keeps_longest_prefix_not_last_sentence(self):
+        from news_officer.summarizer import trim_daily_card_body
+
+        body = (
+            "Shopify CEO Tobi Lütke 把 AI 带来的变化描述为一次从“手写代码”到“定义问题、约束系统并验证结果”的职业重构。"
+            "他以 Shopify 内部的 agentic factories、代码仓库改造和 internal tools 为例，说明 AI 不只是提升现有开发流程的速度，也让此前不值得启动的大型重构变成低成本实验。"
+            "节目开头围绕 Jensen Huang 的讨论则完全建立在主持人与 Lütke 对未经证实传闻的推测上，不能视为事实信息。"
+        )
+        trimmed = trim_daily_card_body(body)
+        self.assertTrue(trimmed.startswith("Shopify CEO Tobi Lütke"))
+        self.assertIn("agentic factories", trimmed)
+        self.assertNotIn("Jensen Huang", trimmed)
+        self.assertLessEqual(len(trimmed), 220)
+

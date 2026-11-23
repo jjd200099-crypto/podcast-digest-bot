@@ -71,13 +71,13 @@ def trim_daily_card_body(text: str, hard_max: int = DAILY_BODY_HARD_MAX_CHARS) -
     # Walk raw prefixes and keep the longest that still fits and ends cleanly.
     candidates = []
     for match in re.finditer(r".+?[。！？][”’」』]?", text, re.DOTALL):
-        chunk = match.group(0).strip()
+        chunk = text[:match.end()].strip()
         if len(_visible_takeaway_text(chunk)) <= hard_max:
             candidates.append(chunk)
     if candidates:
         return candidates[-1]
     for match in re.finditer(r".+?[，；;]", text, re.DOTALL):
-        chunk = match.group(0).strip()
+        chunk = text[:match.end()].strip()
         if len(_visible_takeaway_text(chunk)) <= hard_max:
             candidates.append(chunk)
     if candidates:
