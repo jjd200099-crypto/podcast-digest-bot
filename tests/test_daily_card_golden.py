@@ -1,4 +1,4 @@
-"""Production episode metadata plus approved editorial inputs for the v5 card."""
+"""Historical episode prose with the approved 2026-11-24 card presentation."""
 import json
 import re
 import unittest
@@ -27,17 +27,15 @@ def render_fixture():
 class DailyCardGoldenTests(unittest.TestCase):
     def test_approved_card_structure_and_content(self):
         expected = json.loads((FIXTURES / 'daily-draft-v5.json').read_text())
-        # The explicit tight-list requirement supersedes v5's blank list lines.
-        for element in expected['body']['elements']:
-            if element['tag'] == 'markdown':
-                element['content'] = re.sub(r'\n\n(?=    \d+\. )', '\n', element['content'])
         parts = render_fixture()
         self.assertEqual(len(parts), 1)
         self.assertEqual(parts[0][0], 'interactive')
         self.assertEqual(json.loads(parts[0][1]), expected)
+        for forbidden in ('简介：', '阅读建议', '推荐理由', '[新]', '【新】', '功能更新'):
+            self.assertNotIn(forbidden, parts[0][1])
 
-    def test_daily_delivery_matches_main_byte_for_byte(self):
-        # Frozen from main 8ea1b921's Feishu renderer (content bytes and UUIDs).
+    def test_daily_delivery_matches_approved_presentation_byte_for_byte(self):
+        # Approved 2026-11-24 presentation, frozen content bytes and UUIDs.
         expected = json.loads((FIXTURES / 'daily-delivery-main.json').read_text())
         fixture = json.loads((FIXTURES / 'daily-2026-10-14.json').read_text())
         sections = [reader_episode_v4(
@@ -77,7 +75,8 @@ class DailyCardGoldenTests(unittest.TestCase):
         parts = daily_card_delivery_parts(section, 'large', title='今日')
         self.assert_payloads_fit(parts)
         self.assertEqual(parts[0][0], 'interactive')
-        self.assertIn('简介：Jason Ma', parts[0][1])
+        self.assertIn('Jason Ma', parts[0][1])
+        self.assertNotIn('简介：', parts[0][1])
         self.assertIn('https://www.latent.space/p/dyna', parts[0][1])
         self.assertIn('https://www.feishu.cn/docx/', parts[0][1])
         self.assertEqual(parts, daily_card_delivery_parts(section, 'large', title='今日'))
@@ -99,7 +98,7 @@ class CardHeadroomTests(unittest.TestCase):
         url = 'https://xxxx.feishu.cn/docx/' + 'x' * 27
         # Find a full card fitting without links but exceeding the guard with them.
         for size in range(9000, 10000):
-            body = '**1. 【Show｜Guest｜Topic】**\n- 简介：完整简介。\n- 要点总结：\n    1. 内容。\n推荐理由：' + '文' * size + '\n[收听节目](https://example.com/episode)'
+            body = '**1. 【Show｜Guest｜Topic】**\n完整简介。\n- 要点总结：\n    1. 内容。\n推荐理由：' + '文' * size + '\n[收听节目](https://example.com/episode)'
             template = body + '\n[精读和完整中文对谈](' + url + ')'
             try:
                 daily_card_delivery_parts(body, 'key', title='Daily', allow_compaction=False)
@@ -122,13 +121,33 @@ class CardHeadroomTests(unittest.TestCase):
     def test_v4_compaction_preserves_layout_metadata_intro_and_all_links(self):
         from news_officer.daily_report import compact_reader_episode
         section = ('**1. 【Show｜Guest｜Topic】**\n- 节目：Show\n- 时长：60分钟\n'
-                   '- 简介：第一句。第二句。\n- 要点总结：\n'
+                   '第一句。第二句。\n- 要点总结：\n'
                    '    1. 要点一。\n    2. 要点二。\n    3. 要点三。\n'
                    '[精读和完整中文对谈](https://xxxx.feishu.cn/docx/abc)\n'
                    '[收听节目](https://example.com/listen)')
         for level in (1, 2, 3):
             compact = compact_reader_episode(section, level, '')
             for required in ('【Show｜Guest｜Topic】', '- 节目：Show', '- 时长：60分钟',
-                             '- 简介：第一句。第二句。', '- 要点总结：',
+                             '第一句。第二句。', '- 要点总结：',
                              'https://xxxx.feishu.cn/docx/abc', 'https://example.com/listen'):
                 self.assertIn(required, compact)
+
+    def test_short_and_legacy_cards_keep_intro_points_and_urls_at_each_level(self):
+        from news_officer.daily_report import compact_reader_episode
+        for prefix in ('', '- 简介：'):
+            for level, count in ((1, 3), (2, 2), (3, 1)):
+                with self.subTest(prefix=prefix, level=level):
+                    section = ('**1. 【Show｜Guest｜Topic】**\n\n' + prefix + '完整介绍。\n'
+                               '- 优先级/阅读建议：看全文\n- 阅读建议：看全文\n'
+                               '- 推荐理由：具体案例。\n- 要点总结：\n'
+                               '    1. 一。\n    2. 二。\n    3. 三。\n'
+                               '- [精读和完整中文对谈](https://example.com/doc)\n'
+                               '- [收听节目](https://example.com/listen)')
+                    compact = compact_reader_episode(section, level, '')
+                    self.assertIn(prefix + '完整介绍。', compact)
+                    self.assertIn('- 要点总结：', compact)
+                    self.assertEqual(len(re.findall(r'^    \d+\.', compact, re.MULTILINE)), count)
+                    for label in ('阅读建议', '推荐理由'):
+                        self.assertNotIn(label, compact)
+                    for url in ('https://example.com/doc', 'https://example.com/listen'):
+                        self.assertIn(url, compact)

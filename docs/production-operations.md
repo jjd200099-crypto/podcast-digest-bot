@@ -13,7 +13,7 @@ python scripts/release.py --project YOUR_RAILWAY_PROJECT --deploy
 
 ## 早报与监控
 
-`NEWS_OFFICER_DAILY_READER_MODE=true` 为当前默认：每个日报任务、每个收件人只冻结一条消息。正文保留节目介绍、摘要、推荐理由、阅读建议与已编译文档链接；不显示扫描统计、缺稿队列、过滤数量或重复免责声明，技术状态留在数据库和日志。日期只放在消息标题，独立送达监控同时兼容旧标题和新标题。阅读版不显示功能更新；非阅读版仅在显式设置 `NEWS_OFFICER_DAILY_RELEASE_NOTES=true` 时，于首份符合日期的日报附带更新。
+`NEWS_OFFICER_DAILY_READER_MODE=true` 为当前默认：每个日报任务、每个收件人只冻结一条消息。正文保留不带简介标签的单句介绍、编号要点与已编译文档及收听链接，不显示推荐理由或阅读建议；不显示扫描统计、缺稿队列、过滤数量或重复免责声明，技术状态留在数据库和日志。日期只放在消息标题，独立送达监控同时兼容旧标题和新标题。阅读版不显示功能更新；非阅读版仅在显式设置 `NEWS_OFFICER_DAILY_RELEASE_NOTES=true` 时，于首份符合日期的日报附带更新。
 
 ### 日报收件人白名单
 

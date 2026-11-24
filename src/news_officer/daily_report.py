@@ -494,14 +494,15 @@ def _coverage_report(items: list[DailyItem]) -> str | None:
 
 def compact_reader_episode(content: str, level: int, listening_url: str) -> str:
     """Drop whole optional lines/paragraphs; retain a complete summary and links."""
-    if '- 简介：' in content:
+    if ('- 简介：' in content or '- 要点总结：' in content
+            or re.match(r'^\*\*\d+\. 【[^\n]+｜[^\n]+｜[^\n]+】\*\*', content)):
         # v4/draft-v5: keep layout and the complete introduction. Compact only
         # optional advice and whole takeaway lines; never remove a URL line.
         result, points = [], 0
         for line in content.splitlines():
             if 'http://' in line or 'https://' in line:
                 result.append(line)
-            elif line.strip().startswith(('- 优先级/阅读建议：', '阅读建议：', '推荐理由：')):
+            elif line.strip().removeprefix('- ').startswith(('优先级/阅读建议：', '阅读建议：', '推荐理由：')):
                 continue
             elif re.match(r'^\s+\d+[.、] ', line):
                 points += 1
@@ -596,23 +597,17 @@ def reader_episode_v4(item, number, document_url='', *, source_text=''):
                                '推荐理由：', '阅读建议：', '推荐星级：', '要点总结：',
                                '优先级/阅读建议：', '[', '【'))), '')
         excerpt = intro if len(intro) <= 160 else intro[:159].rstrip() + '…'
-        fields = [heading, '', '- 简介：' + excerpt] if excerpt else [heading]
-        fields.extend(line for line in lines if line.startswith(
-            ('推荐理由：', '阅读建议：', '优先级/阅读建议：')))
+        fields = [heading, '', excerpt] if excerpt else [heading]
         if document_url:
             fields.append(f'[精读和完整中文对谈]({document_url})')
         fields.append(f'[收听节目]({item.episode.url})')
         return '\n'.join(fields)
-    intro, reason, advice, points = '', '', '', []
+    intro, points = '', []
     for line in lines:
         clean = line.removeprefix('- ').strip('*')
         if clean.startswith('简介：'):
             intro = clean[3:]
-        elif clean.startswith('推荐理由：'):
-            reason = clean[5:]
-        elif clean.startswith(('阅读建议：', '优先级/阅读建议：')):
-            advice = clean.split('：', 1)[1]
-        elif clean.startswith(('节目：', '时长：', '链接：', '节目链接：', '收听链接：',
+        elif clean.startswith(('推荐理由：', '阅读建议：', '优先级/阅读建议：', '节目：', '时长：', '链接：', '节目链接：', '收听链接：',
                                '推荐星级：', '要点总结：', '#', '[', '【')):
             continue
         else:
@@ -622,8 +617,7 @@ def reader_episode_v4(item, number, document_url='', *, source_text=''):
         intro = points[0]
     if not points and intro:
         points = [intro]
-    fields = [f'**{number}. 【{show}｜{title}】**', '', f'- 简介：{intro}',
-              '- 优先级/阅读建议：' + '，'.join(v for v in (advice, reason) if v),
+    fields = [heading, '', intro,
               '- 要点总结：', '\n'.join(f'    {i}. {point}' for i, point in enumerate(points, 1))]
     if document_url:
         fields.append(f'[精读和完整中文对谈]({document_url})')
