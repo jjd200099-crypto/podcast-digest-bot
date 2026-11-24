@@ -24,13 +24,13 @@
 
 日报默认只通过节目官方 RSS 发现新集和核验发布时间，不扫描 YouTube 频道、不抓取 YouTube 元数据或字幕。全文按“已有核验存档 → RSS/官网官方文字稿 → Podwise”顺序获取。只有来源明确、文本密度达标且覆盖节目主体时才会调用模型；否则固定回复“未取得完整文字稿，本次不摘要”。当前已接入 Acquired、Dwarkesh、Lenny's Podcast、The Generalist、David Senra、Sequoia、Invest Like the Best/Colossus 等官方来源。用户主动发来的 YouTube 链接仍支持分析，且 Podwise 优先于字幕兜底。
 
-新生成的晨报采用连贯短段落：每期先给“嘉宾或节目｜中文核心主题”，交代节目、链接和时长，再用两段为主（最多三段）的正文讲清核心判断、推理及重要分歧，最后给出一句推荐理由和阅读建议。正文通常 300–500 字，不列编号要点，不反复使用“嘉宾观点”等标签；预测和公司自报数据用“预计”“公司称”等自然措辞保留必要归属。全文核验规则不变，自动精读文档默认面向四星及五星节目。历史摘要兼容读取，已经冻结的消息和文字稿校验哈希不作改写。
+新生成的晨报采用结构化短卡：标题为「N. 【节目｜人物｜一句判断】」，下接一句不带「简介：」标签的简短介绍，再列「- 要点总结：」及 3–6 条编号要点，每条恰好一句简短易读的完整句子，保留关键数字、单位与归属。介绍中每位人物的身份只取自文字稿，不编造头衔或所属机构。卡片不显示推荐理由或阅读建议，末尾保留「精读和完整中文对谈」和「收听节目」链接。归档仍保存简介、要点总结、推荐理由和推荐星级字段。全文核验规则不变。
 
 `NEWS_OFFICER_DAILY_RSS_ONLY=true` 为运行时默认值，全部 14 个内置关注源均已有 RSS。RSS 失败会明确报告，不静默退回 YouTube；新增来源没有 RSS 时需补齐 RSS。RSS 每源至少扫描最近 30 条（候选不限时扫描完整 feed），再按追踪窗口筛选。已有更新但缺少全文、日期未核验、摘要格式失败时，状态保留在数据库和日志，阅读版日报不展示缺稿清单或抓取统计。历史合并的 YouTube ID 通过相同节目名、标题和发布时间去重，切换来源不会重发已处理的同一期。此开关不触发当天日报重跑，也不新增自动补跑时段。
 
-日报对取得完整文字稿且达到推荐档的节目生成摘要，按内部星级从高到低展示；低分节目保留全文归档，不占日报正文。评分只看相关度和信息密度：model frontier、AI research，以及 Fireworks 这类 AI 公司创始人的一手深度访谈优先；其中，OpenAI、Anthropic 等模型实验室的实质讨论，以及热门 AI 独角兽创始人（如用户指定的 Fireworks）的主要受访节目，作为必收录内容，至少归为“值得看全文”。广告、顺带提名和标题党不算；信息密度仍如实判断，不自动升为编译档。内部公司名单不单独加分。五星“值得编译”是少数双项满分的内容；四星“值得看全文”；三星“看摘要”。允许当天没有五星。用户只看到“值得编译 / 值得看全文 / 看摘要”和推荐理由，不显示星星或分项分数；缺全文属于待处理，不归为无关。详见 [评分规则](docs/editorial-policy.md)。历史已发送消息不重写。
+日报对取得完整文字稿且达到推荐档的节目生成摘要，按内部星级从高到低展示；低分节目保留全文归档，不占日报正文。评分只看相关度和信息密度：model frontier、AI research，以及 Fireworks 这类 AI 公司创始人的一手深度访谈优先；其中，OpenAI、Anthropic 等模型实验室的实质讨论，以及热门 AI 独角兽创始人（如用户指定的 Fireworks）的主要受访节目，作为必收录内容，至少归为“值得看全文”。广告、顺带提名和标题党不算；信息密度仍如实判断，不自动升为编译档。内部公司名单不单独加分。五星“值得编译”是少数双项满分的内容；四星“值得看全文”；三星“看摘要”。允许当天没有五星。这些推荐判断保留在归档和内部评分中，v4 卡片不显示推荐理由、阅读建议、星星或分项分数；缺全文属于待处理，不归为无关。详见 [评分规则](docs/editorial-policy.md)。历史已发送消息不重写。
 
-日报默认合并发送：各期推荐理由、正文、阅读建议及已编译精读文档链接放在同一条富文本消息内，不再每期单独推送。按实际序列化请求大小检查飞书限制；富文本过长时先尝试一条纯文本；阅读版仍超限时，依次去掉阅读建议和推荐理由、保留每期首段摘要、再缩为完整首句摘要，始终保留每期链接，并记录 operations warning。降级后仍按富文本→单条纯文本检查容量；仍无法容纳则停止发送并记录 warning，不在正文中途截断或拆成多条日报。每批内容及其节目映射先持久化，再发送；重启后重放同一消息，不重新生成。引用整份日报时，Agent 可看到其中的节目列表和资料编号。旧版已准备的消息保持原样完成，全文附件模式沿用旧格式；可用 `NEWS_OFFICER_DAILY_COMBINED_MESSAGE=false` 临时回退。
+日报默认合并发送：各期简短介绍、编号要点及已编译精读文档链接放在同一条富文本消息内，不再每期单独推送。按实际序列化请求大小检查飞书限制；富文本过长时先尝试一条纯文本；v4 卡片超限时保留标题、完整介绍和所有链接，按等级逐步减少尾部要点；旧版段落布局仍按推荐字段、首段、首句逐级压缩，始终保留每期链接，并记录 operations warning。降级后仍按富文本→单条纯文本检查容量；仍无法容纳则停止发送并记录 warning，不在正文中途截断或拆成多条日报。每批内容及其节目映射先持久化，再发送；重启后重放同一消息，不重新生成。引用整份日报时，Agent 可看到其中的节目列表和资料编号。旧版已准备的消息保持原样完成，全文附件模式沿用旧格式；可用 `NEWS_OFFICER_DAILY_COMBINED_MESSAGE=false` 临时回退。
 
 ### Podwise 扩展发现：不局限于关注列表
 
@@ -38,7 +38,7 @@
 
 这不是 Podwise 全站新集的穷尽扫描：接口没有完整的按发布时间排序的新集入口，搜索与目录都有读取上限；失败和截断会明确报告。列表外节目只读取现有全文，不自动提交付费转写。部署配置、边界和无发送验收脚本见 [扩展发现说明](docs/podwise-discovery.md)。
 
-Reader mode 日报不显示「功能更新」。每期标题加粗，正文与阅读建议之后依次附精读和收听链接；`NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT=false`（默认）时标签为「精读」，开启时为「精读和完整中文对谈」；按节目 ID 匹配精读文档，不按列表位置配对。不需要精读文档的节目只在正文末尾保留收听链接。已冻结或已发送的历史消息不重写，新的晨报继续只发送一条消息。
+Reader mode 日报不显示「功能更新」。每期标题加粗，简短介绍与编号要点之后依次附精读和收听链接；v4 卡片精读链接标签为「精读和完整中文对谈」，旧版 compact 布局按 `NEWS_OFFICER_DAILY_DOCUMENT_FULLTEXT` 选择标签；按节目 ID 匹配精读文档，不按列表位置配对。不需要精读文档的节目只在正文末尾保留收听链接。已冻结或已发送的历史消息不重写，新的晨报继续只发送一条消息。
 
 ### Podwise 全文获取与授权
 
@@ -60,7 +60,7 @@ Reader mode 日报不显示「功能更新」。每期标题加粗，正文与�
 
 发布、预处理、业务监控、对话验收与备份见 [生产运维说明](docs/production-operations.md)。
 
-情报官把核验过的全文保存在云端，用于后续问答；**日报和链接分析默认不发送文字稿附件**。晨报使用两至三段自然中文，附推荐理由、阅读建议及一次收听链接，不再显示星级或固定十条清单。用户明确索取文字稿时才生成 Markdown 阅读版；清理只作用于阅读版，不覆盖原始全文或其校验值。
+情报官把核验过的全文保存在云端，用于后续问答；**日报和链接分析默认不发送文字稿附件**。晨报使用简短介绍与编号要点，附精读及收听链接，不显示推荐理由或阅读建议，不再显示星级或固定十条清单。用户明确索取文字稿时才生成 Markdown 阅读版；清理只作用于阅读版，不覆盖原始全文或其校验值。
 
 `NEWS_OFFICER_MAX_SUMMARIES=0` 与 `NEWS_OFFICER_MAX_CANDIDATES=0` 表示处理追踪时间窗内发现的全部未推送候选，不再精选三期后停止；RSS 扫描不再只取前 30 条。已推送去重、缺全文重试冷却、日期和全文核验继续生效。所有候选继续获取全文并评级；无关内容归档但不占日报正文，关注列表与扩展发现的过滤数量保留在后台状态中。缺全文仍不能凭标题编写推荐。`NEWS_OFFICER_DAILY_TRANSCRIPT_ATTACHMENTS=false` 为默认值。`NEWS_OFFICER_DAILY_PREPARATION=true` 可开启提前两小时的有限预处理，复用绑定原稿版本的摘要，不产生推送；早报仍检查截止时间前的新节目，尚不是完全分离的实时采集系统。
 
@@ -208,14 +208,15 @@ previously frozen send byte for byte.
 ### Morning report layout
 
 `NEWS_OFFICER_DAILY_LAYOUT=v4` is the default for the combined reader morning report.
-It displays numbered short show headings, an introduction, reading advice, numbered
-conclusion-first takeaways, and short clickable reading/listening labels. Episodes
-are separated by a visible rule in the existing Feishu rich-text post format.
-Only summaries that validate as v4 use the complete v4 fields. Archived prose
-and bullet digests retain their original body structure without model rewriting.
-Usable new summaries fall back to this compatible renderer if v4 validation fails.
-Layout changes reuse prepared summaries, including pre-v4 caches, while model,
-selection policy and verified source changes still invalidate cached work.
+It displays `N. 【节目｜人物｜一句判断】` headings, a bare one-sentence
+introduction, and 3–6 numbered takeaways under `- 要点总结：`, each one short
+sentence. Introductions use only transcript-stated identities for every named
+person. Cards hide 简介 labels, recommendation reasons, and reading advice;
+archives still require 简介：, 要点总结：, 推荐理由：, and 推荐星级：.
+Both 精读和完整中文对谈 and 收听节目 links remain when available.
+Episodes are separated by a visible rule. Invalid archives show a bounded excerpt
+without rewriting claims. The 2026-11-24 writing-style cache suffix forces fresh
+summaries; older long-format cache identities are not compatible.
 The summary_cache_seed_*.txt files freeze historical cache identities; do not edit
 these seeds for rendering or validator changes. Document links continue to enrich the same frozen daily message.
 

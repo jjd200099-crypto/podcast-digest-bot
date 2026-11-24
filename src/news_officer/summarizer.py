@@ -240,16 +240,12 @@ class TranscriptSummarizer:
         return json.loads(response.output_text)['paragraphs']
 
     def cache_identity(self) -> str:
-        # Frozen seed preserves existing keys across renderer/validator edits.
-        # Model and selection scope still invalidate; display layout does not.
-        return hashlib.sha256(Path(__file__).with_name('summary_cache_seed_v4.txt').read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode() + b'v4').hexdigest()
+        # Writing changes invalidate old summaries without editing frozen seeds.
+        return hashlib.sha256(Path(__file__).with_name('summary_cache_seed_v4.txt').read_bytes() + self.model.encode() + str(strict_selection_enabled()).encode() + b'v4' + b'short-readable-card-2026-11-24').hexdigest()
 
     def compatible_cache_identities(self) -> list[str]:
-        """Reuse pre-v4 and compact work with the same model and selection scope."""
-        suffix = self.model.encode() + str(strict_selection_enabled()).encode()
-        return [hashlib.sha256(Path(__file__).with_name(name).read_bytes() + suffix + layout).hexdigest()
-                for name, layout in [('summary_cache_seed_v4.txt', b'compact'),
-                                     ('summary_cache_seed_narrative.txt', b'')]]
+        """Old introductions and takeaways must be regenerated in the new style."""
+        return []
 
     def summarize(self, episode: Episode, transcript: Transcript) -> str:
         if not transcript.verified_complete:
@@ -280,8 +276,8 @@ class TranscriptSummarizer:
         if v4:
             instructions += ('\n新版日报结构优先于上面关于自然段和不要编号的格式要求：'
                              '标题写“## 短节目名｜真实嘉宾姓名｜一句中文核心主题”，不要堆入原始长剧集名。'
-                             '保留节目、链接、时长来源行。然后写“简介：”一段，接着“要点总结：”，'
-                             '用1.、2.等连续编号写3–6条，每条先给结论，再用具体例子、数字或机制支撑。'
+                             '保留节目、链接、时长来源行。然后写“简介：”及一句简短、能一口气读完的介绍。简介中每个被点名的人都必须带有文字稿明确提供的身份（角色或所属机构）；不得编造文字稿未说明的头衔、公司或角色。接着写“要点总结：”，'
+                             '用1.、2.等连续编号写3–6条，每条恰好一句简短易读的完整句子，保留关键数字、单位及说话人归属，不写难以扫读的多分句长句。'
                              '最后保留推荐理由和推荐星级。篇幅可稍长，不为压字数丢失支撑和限定。'
                              '不要[新]或【新】，RSI等术语不要括号释义，不要出现王颢蓁。\n')
         if strict_selection_enabled():

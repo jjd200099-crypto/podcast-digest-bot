@@ -1,3 +1,4 @@
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ from news_officer.summarizer import (
     _valid_editorial_summary,
     _valid_v4_summary,
     normalize_v4_summary,
+    strict_selection_enabled,
 )
 
 V4 = ('## Show｜AI 成本取决于任务\n节目：Show｜Very long original episode title\n'
@@ -50,8 +52,9 @@ class DailyV4Tests(unittest.TestCase):
         self.assertEqual(len(parts), 1)
         self.assertEqual(parts[0][0], 'interactive')
         content = json.loads(parts[0][1])['body']['elements'][1]['content']
-        for label in ('- 简介：', '- 优先级/阅读建议：', '- 要点总结：'):
-            self.assertIn(label, content)
+        self.assertIn('- 要点总结：', content)
+        self.assertNotIn('简介：', content)
+        self.assertNotIn('阅读建议：', content)
         points = [line for line in normalized.splitlines() if line[:1].isdigit()]
         self.assertEqual(len(points), 5)
         for point in points:
@@ -90,8 +93,9 @@ class DailyV4Tests(unittest.TestCase):
         self.assertEqual(parts[0][0], 'interactive')
         card = json.loads(parts[0][1])
         content = card['body']['elements'][1]['content']
-        for label in ('- 简介：', '- 优先级/阅读建议：', '- 要点总结：'):
-            self.assertIn(label, content)
+        self.assertIn('- 要点总结：', content)
+        self.assertNotIn('简介：', content)
+        self.assertNotIn('阅读建议：', content)
         self.assertEqual(sum(line.startswith('    ') for line in content.splitlines()), 6)
         for number in range(1, 7):
             self.assertIn(f'\n    {number}. ', content)
@@ -137,7 +141,7 @@ class DailyV4Tests(unittest.TestCase):
         value = V4.replace('Mike 讨论模型选择和 AI 成本。', '长简介' * 100).replace('2. ', '3. ')
         item = DailyItem(EPISODE, 'summarized', value)
         rendered = reader_episode_v4(item, 1, 'https://example.com/doc')
-        excerpt = next(line[5:] for line in rendered.splitlines() if line.startswith('- 简介：'))
+        excerpt = rendered.splitlines()[2]
         self.assertEqual(len(excerpt), 160)
         self.assertTrue(excerpt.endswith('…'))
         self.assertNotIn('成本取决于任务。Mike', rendered)
@@ -159,8 +163,10 @@ class DailyV4Tests(unittest.TestCase):
         text = reader_episode_v4(item, 1, 'https://example.com/doc')
         self.assertIn('**1. 【Show｜嘉宾未注明｜AI 成本取决于任务】**', text)
         self.assertNotIn('Very long original', text)
-        self.assertIn('- 简介：Mike', text)
-        self.assertIn('- 优先级/阅读建议：值得看全文，', text)
+        self.assertIn('\n\nMike', text)
+        self.assertNotIn('简介：', text)
+        self.assertNotIn('阅读建议', text)
+        self.assertNotIn('推荐理由', text)
         self.assertIn('    1. 成本取决于任务。Mike 认为', text)
         self.assertIn('模型。\n    2. ', text)
         self.assertIn('[精读和完整中文对谈](https://example.com/doc)', text)
@@ -173,7 +179,7 @@ class DailyV4Tests(unittest.TestCase):
                '只有需求增长，成本下降才可能提高利润。\n'
                '推荐理由：有具体条件和数字作为支撑。\n推荐星级：★★★★☆')
         text = reader_episode_v4(DailyItem(EPISODE, 'summarized', old), 1)
-        self.assertIn('- 简介：公司认为效率可能提高1000倍，但仍需验证。', text)
+        self.assertIn('公司认为效率可能提高1000倍，但仍需验证。', text)
         self.assertNotIn('只有需求增长', text)
 
     def test_short_title_deduplicates_verbose_rss_brand(self):
@@ -187,7 +193,8 @@ class DailyV4Tests(unittest.TestCase):
     def test_legacy_paragraphs_and_bullets_do_not_manufacture_v4_fields(self):
         for old in (VALID_SUMMARY, LEGACY_SUMMARY):
             text = reader_episode_v4(DailyItem(EPISODE, 'summarized', old), 1)
-            self.assertIn('- 简介：', text)
+            self.assertTrue(text.splitlines()[2])
+            self.assertNotIn('简介：', text)
             self.assertNotIn('- 要点总结：', text)
             self.assertNotIn('    1.', text)
             self.assertEqual(old, DailyItem(EPISODE, 'summarized', old).message)
@@ -213,7 +220,10 @@ class DailyV4Tests(unittest.TestCase):
             self.assertIn('推荐理由：' + decision['assessment']['reason'], scored)
             self.assertIn('推荐星级：★★★★☆', scored)
             rendered = render_reader_daily([DailyItem(EPISODE, 'summarized', scored)], [], layout='v4')
-            self.assertIn('- 简介：', rendered)
+            self.assertTrue(rendered.splitlines()[2])
+            self.assertNotIn('简介：', rendered)
+            self.assertNotIn('阅读建议', rendered)
+            self.assertNotIn('推荐理由', rendered)
             self.assertIn('Mike 讨论模型选择和 AI 成本。', rendered)
             if _valid_v4_summary(scored):
                 self.assertIn('- 要点总结：', rendered)
@@ -250,7 +260,8 @@ class DailyV4Tests(unittest.TestCase):
         for summary in (V4, VALID_SUMMARY):
             for term in ('RSI（递归自我改进）', 'RSI(递归自我改进)',
                          '递归自我改进（RSI）', '递归自我改进(RSI)'):
-                value = summary.replace('推荐理由：', '推荐理由：' + term)
+                # Put the term in visible prose; recommendation reasons are hidden.
+                value = summary.replace('Mike 讨论', term + ' Mike 讨论').replace('模型表现的改善', term + ' 模型表现的改善')
                 rendered = reader_episode_v4(DailyItem(EPISODE, 'summarized', value), 1)
                 self.assertNotIn(term, rendered)
                 self.assertIn('RSI', rendered)
@@ -280,7 +291,13 @@ class DailyV4Tests(unittest.TestCase):
         with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'v4'}):
             identity = instance.cache_identity()
             self.assertEqual(instance.summarize(EPISODE, TRANSCRIPT), V4)
-            self.assertIn('每条先给结论', instance.client.responses.calls[0]['instructions'])
+            instructions = instance.client.responses.calls[0]['instructions']
+            for requirement in ('每条恰好一句', '每个被点名的人', '不得编造', '推荐理由', '推荐星级'):
+                self.assertIn(requirement, instructions)
+            seed = Path('src/news_officer/summary_cache_seed_v4.txt').read_bytes()
+            previous = hashlib.sha256(seed + instance.model.encode() + str(strict_selection_enabled()).encode() + b'v4').hexdigest()
+            self.assertNotEqual(identity, previous)
+            self.assertEqual(instance.compatible_cache_identities(), [])
         with patch.dict('os.environ', {'NEWS_OFFICER_DAILY_LAYOUT': 'compact'}):
             self.assertEqual(identity, instance.cache_identity())
 
